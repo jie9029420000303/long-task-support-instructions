@@ -13,7 +13,8 @@
 │   ├── references/behavioral-cases.md  共同行為案例 + Claude Code 驗證對照
 │   ├── templates/state.md          狀態檔範本（cp 後填寫）
 │   ├── templates/state.example.md  實跑一輪後的完整範例
-│   └── scripts/screenshot.js       無頭截圖落檔工具（子代理把證據存成 PNG 給主線 Read）
+│   ├── scripts/screenshot.js       無頭截圖落檔工具（子代理把證據存成 PNG 給主線 Read）
+│   └── scripts/scope-overlap.py    並行派工閘：比對工作包可修改範圍，有交集 exit 1
 └── agents/                         九個子代理定義（3 角色 × 3 個 effort 檔）
     ├── lt-visual-checker-{medium,high,xhigh}.md   A 線視覺查核（唯讀＋瀏覽器）
     ├── lt-tech-worker-{medium,high,xhigh}.md      B 線技術實作（可編輯，git 寫入被 hook 擋）
@@ -62,6 +63,7 @@
 | 升檔定義 xhigh | `lt-visual-checker-xhigh` 查核新版 | PASS；transcript 15/15 則 effort=xhigh |
 | 落檔證據 | `scripts/screenshot.js`（無頭 chrome-headless-shell） | 7 張 PNG 存進 evidence/，主線 Read 目視核對 |
 | 同版證據 | 候選版 e260982 與 6c21b0b 分開判定 | 未拼接 |
+| 並行派工閘（2026-09-15 補） | `scripts/scope-overlap.py` 跑真實長任務的 8 個工作包 prompt | 抓出 6 個交集（含 3 個 `**` 目錄前綴涵蓋）exit 1；無交集的兩包 exit 0；缺段落 exit 2 |
 
 未實測：`/goal` 的自動續跑（使用者指令，本輪未設）；`--resume` 續接後讀狀態檔；cloud session（需把 `.claude/` 提交進 repo）。
 

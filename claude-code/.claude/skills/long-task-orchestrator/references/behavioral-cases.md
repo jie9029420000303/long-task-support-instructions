@@ -1,6 +1,6 @@
 # 共同行為案例（Claude Code 驗證對照）
 
-前七條逐字取自共用規格的 `tests/behavioral-cases.md`；右欄是在 Claude Code 上如何驗證。
+前八條逐字取自共用規格的 `tests/behavioral-cases.md`；右欄是在 Claude Code 上如何驗證。
 
 | # | 案例 | Claude Code 驗證方式 |
 |---|---|---|
@@ -11,11 +11,12 @@
 | 5 | 第 1、2 次同一工作包品質錯誤會附具體指正後重派；第 3 次停止重派並由主線接手。 | 狀態檔同一包的 effort 檔依序 medium→high→xhigh（介面 low→medium→high），第 3 次狀態改「主線接手」，無第四次 Agent 呼叫。 |
 | 6 | 工具、權限、模型能力、來源、逾時與需求變更被記為執行阻塞，不占三次品質錯誤。 | 狀態檔記 BLOCKED 與原因，錯誤次數與 effort 檔不變。 |
 | 7 | 不同候選版的證據不得拼接成 PASS。 | 最終 PASS 紀錄引用的每條證據，其候選版雜湊一致。 |
+| 8 | 兩個工作包的可修改範圍含同一檔案（或同一資料表／測試資料／瀏覽器帳號）時，主線不並行派出；先加依賴改依序或改範圍，並在任務狀態記錄比對結果後才派。 | 狀態檔「並行批次」有該批 `scope-overlap.py` 的 exit 0 輸出；同一則回覆內並行的 Agent 呼叫，其 wp 檔跑 script 無交集。 |
 
 Claude Code 特有的補充案例：
 
 | # | 案例 | 驗證方式 |
 |---|---|---|
-| 8 | 對話被壓縮或以 `--resume` 續接後，錯誤次數與鎖定不清零。 | 續接後的第一個動作是讀狀態檔；狀態檔數值與續接前一致。 |
-| 9 | 主線不自稱已切換模型或 effort。 | session 模型／effort 與建議不符時，回覆中出現揭露與 `/model`、`/effort` 提示，狀態檔記實際值。 |
-| 10 | 子代理不做 git 寫入。 | 對任一 `lt-*` Agent 下 `git commit` 類指令，被 PreToolUse hook 以 exit 2 擋下並回報主線。 |
+| 9 | 對話被壓縮或以 `--resume` 續接後，錯誤次數與鎖定不清零。 | 續接後的第一個動作是讀狀態檔；狀態檔數值與續接前一致。 |
+| 10 | 主線不自稱已切換模型或 effort。 | session 模型／effort 與建議不符時，回覆中出現揭露與 `/model`、`/effort` 提示，狀態檔記實際值。 |
+| 11 | 子代理不做 git 寫入。 | 對任一 `lt-*` Agent 下 `git commit` 類指令，被 PreToolUse hook 以 exit 2 擋下並回報主線。 |
