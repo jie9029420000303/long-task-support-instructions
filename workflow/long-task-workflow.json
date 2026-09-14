@@ -1,0 +1,62 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "長任務協作流程",
+    "subtitle": "視覺 A 與技術 B 可並行，主線只以同一候選版的證據完成驗收",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "task", "label": "任務狀態" },
+    { "id": "main", "label": "主執行緒" },
+    { "id": "visual_agents", "label": "A 視覺查核子代理" },
+    { "id": "tech_agents", "label": "B 技術／介面子代理" },
+    { "id": "exceptions", "label": "重派與接手", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "啟動與鎖定", "fromCol": 0, "toCol": 1 },
+    { "id": "route", "label": "可複選分工", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "accept", "label": "同版查核與完成", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["task_start", "scope", "work_scope", "tech_work", "same_version_review", "task_done"],
+  "semanticChecks": {
+    "allowedRoots": ["task_start"],
+    "allowedTerminals": ["task_done"],
+    "requiredPaths": [
+      { "from": "work_scope", "to": "visual_main" },
+      { "from": "work_scope", "to": "tech_work" },
+      { "from": "visual_main", "to": "same_version_review" },
+      { "from": "tech_work", "to": "same_version_review" },
+      { "from": "quality_gate", "to": "main_takeover" },
+      { "from": "main_takeover", "to": "same_version_review" }
+    ]
+  },
+  "nodes": [
+    { "id": "task_start", "lane": "task", "col": 0, "type": "cloud", "label": "任務啟動／續接", "width": 138 },
+    { "id": "scope", "lane": "main", "col": 1, "type": "security", "label": "鎖定目標、候選版與角色", "width": 196 },
+    { "id": "work_scope", "lane": "main", "col": 2, "type": "messagebus", "label": "工作範圍（可複選）", "width": 184 },
+    { "id": "visual_main", "lane": "main", "col": 3, "type": "frontend", "label": "A｜主線設計與排版", "width": 162 },
+    { "id": "visual_check", "lane": "visual_agents", "col": 4, "type": "frontend", "label": "A｜客觀視覺查核", "width": 176 },
+    { "id": "tech_work", "lane": "tech_agents", "col": 3, "type": "backend", "label": "B｜子代理技術實作", "width": 176 },
+    { "id": "ui_test", "lane": "tech_agents", "col": 4, "type": "frontend", "label": "前台真實操作蒐證", "width": 178 },
+    { "id": "same_version_review", "lane": "main", "col": 5, "type": "security", "label": "主線同版整合查核", "width": 192 },
+    { "id": "quality_gate", "lane": "exceptions", "col": 1, "type": "messagebus", "label": "代理交付品質錯誤", "width": 196 },
+    { "id": "main_takeover", "lane": "exceptions", "col": 4, "type": "backend", "label": "錯 3｜主線接手該工作包", "width": 196 },
+    { "id": "task_done", "lane": "task", "col": 5, "type": "external", "label": "任務完成", "width": 138 }
+  ],
+  "edges": [
+    { "id": "start_scope", "from": "task_start", "to": "scope", "label": "啟動／續接", "variant": "emphasis" },
+    { "id": "scope_route", "from": "scope", "to": "work_scope", "label": "解析或沿用鎖定", "variant": "emphasis" },
+    { "id": "route_visual", "from": "work_scope", "to": "visual_main", "label": "A 視覺（網頁預設同選）", "variant": "emphasis" },
+    { "id": "route_tech", "from": "work_scope", "to": "tech_work", "label": "B 技術（網頁預設同選）", "variant": "emphasis" },
+    { "id": "visual_to_check", "from": "visual_main", "to": "visual_check", "label": "只派客觀畫面查核" },
+    { "id": "visual_to_review", "from": "visual_check", "to": "same_version_review", "label": "同一候選版視覺證據" },
+    { "id": "tech_to_ui", "from": "tech_work", "to": "ui_test", "label": "需要前台操作驗收" },
+    { "id": "tech_to_review", "from": "tech_work", "to": "same_version_review", "label": "程式／API／資料證據", "variant": "emphasis" },
+    { "id": "ui_to_review", "from": "ui_test", "to": "same_version_review", "label": "真實操作證據" },
+    { "id": "review_done", "from": "same_version_review", "to": "task_done", "label": "同一候選版全部 PASS", "variant": "emphasis" },
+    { "id": "report_quality_fail", "from": "same_version_review", "to": "quality_gate", "label": "未達標：先判定歸屬", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "bottom", "route": "bottom-channel" },
+    { "id": "takeover", "from": "quality_gate", "to": "main_takeover", "label": "同一工作包錯 3", "variant": "security" },
+    { "id": "takeover_review", "from": "main_takeover", "to": "same_version_review", "label": "主線完成未解工作", "variant": "emphasis" }
+  ]
+}
