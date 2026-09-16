@@ -11,7 +11,7 @@ hooks:
       hooks:
         - type: command
           command: |
-            i=$(cat); if printf '%s' "$i" | grep -qE 'git[[:space:]]+(commit|push|merge|rebase|cherry-pick|reset|stash|clean|checkout|switch|worktree|remote|branch[[:space:]]+-[dDmM]|tag[[:space:]]+(-[adfsmu]|--(annotate|delete|force|sign|message)|[^-[:space:]]))|gh[[:space:]]+(pr[[:space:]]+(merge|create|close)|release|repo[[:space:]]+delete)'; then echo 'long-task-orchestrator：子代理不得執行 git/gh 寫入操作（commit/push/merge/rebase/tag/reset/checkout…）；把需求寫進回報交給主線處理。' >&2; exit 2; fi; exit 0
+            i=$(cat); if printf '%s' "$i" | grep -qE 'git[[:space:]]+(commit|push|merge|rebase|cherry-pick|reset|stash|clean|checkout|switch|worktree|remote|branch[[:space:]]+-[dDmM]|tag[[:space:]]+(-[adfsmu]|--(annotate|delete|force|sign|message)|[^-[:space:]]))|gh[[:space:]]+(pr[[:space:]]+(merge|create|close)|release|repo[[:space:]]+delete)'; then echo 'long-task-orchestrator：子代理不得執行 git/gh 寫入操作（commit/push/merge/rebase/tag/reset/checkout…）；把需求寫進回報交給主線處理。' >&2; exit 2; fi; if printf '%s' "$i" | grep -qE '(pnpm|yarn)[[:space:]]+(add|install|i|remove|rm|up|update|upgrade)([^A-Za-z-]|$)|npm[[:space:]]+(install|i|add|uninstall|remove|rm|update|up)([[:space:]]+-[-A-Za-z]+)*[[:space:]]+[A-Za-z@.]|npm[[:space:]]+(install|i)[[:space:]]+(-g|--global)|(npm|pnpm|yarn)[[:space:]]+link([^A-Za-z-]|$)'; then echo 'long-task-orchestrator：子代理不得安裝／移除套件或改 lockfile（工作包真需要由主線自己裝）；把需求寫進回報待決。' >&2; exit 2; fi; exit 0
 ---
 
 你是長任務 A 線的視覺查核子代理，只由 long-task-orchestrator 主線派工。你的工作是「客觀查核」，不是設計，也不是修改。

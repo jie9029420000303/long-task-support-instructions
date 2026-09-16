@@ -64,7 +64,21 @@
 | 落檔證據 | `scripts/screenshot.js`（無頭 chrome-headless-shell） | 7 張 PNG 存進 evidence/，主線 Read 目視核對 |
 | 同版證據 | 候選版 e260982 與 6c21b0b 分開判定 | 未拼接 |
 | 並行派工閘（2026-09-15 補） | `scripts/scope-overlap.py` 跑真實長任務的 8 個工作包 prompt | 抓出 6 個交集（含 3 個 `**` 目錄前綴涵蓋）exit 1；無交集的兩包 exit 0；缺段落 exit 2 |
+| 共用資源閘（2026-09-16 補） | `[共用資源]` 的 `鍵:值` 標記比對 | 同瀏覽器工具（含全形冒號）exit 1、不同工具 exit 0、同 migration 編號對在途包 exit 1、缺段落 exit 2 |
+| 套件安裝守門（2026-09-16 補） | hook 單元測試 28 組 | `pnpm add/install/i`、`yarn add`、`npm install <pkg>`／`-D`／`-g`、`npm uninstall`、`npm link` 全擋；`npm ci`、裸 `npm install`、`npm test/run`、`npx` 全放行 |
+
+## 兩場實跑的回顧（2026-09-16，依 transcript 統計）
+
+| | 蜜蜂爺爺市價調查 | 會計驗收 acceptance-100 |
+|---|---|---|
+| 觸發 | `/goal` 同一分鐘內主線呼叫技能 ✅ | 同 ✅ |
+| 時長／壓縮 | 3 h 40 m／0 次 | 38 h／3 次（壓縮後技能未重載 → v0.2.0 的派工閘 0 次執行） |
+| 派工 | 2（介面 low；82 列 155 次真實點擊 36 分鐘） | 123（tech medium 50、high 44、ui low 17、ui medium 9） |
+| 品質錯誤處理 | — | 8 包各錯 1，附指正升 high 重派；無包到錯 3 ✅ |
+| 暴露的缺口 | 主線自做 6/8 包無登記；goal 條件不可判定 | 8 包並行 6 處重疊；pnpm 改共用 node_modules 整站 500；migration 撞號；3 個介面代理共用瀏覽器 → 可歸因重跑 5 批＝125 分鐘、1.39M tokens；state.md 58 KB 只重讀 9 次；41 包直接從 high 起跳 |
+
+這些缺口對應 v0.3.0 的修正：壓縮後強制重載、`[共用資源]` 欄與閘、介面代理序列化、套件安裝 hook、狀態檔快照化＋archive、主線自做登記、goal 條件建議、起始檔固定。
 
 未實測：`/goal` 的自動續跑（使用者指令，本輪未設）；`--resume` 續接後讀狀態檔；cloud session（需把 `.claude/` 提交進 repo）。
 
-已知限制：Browser pane 截圖只存在子代理的對話中，主線看不到；要讓主線目視，子代理需用 `scripts/screenshot.js` 落檔（agent 定義已寫明）。使用者自己的全域 PreToolUse hook 訊息（分支確認提示）會被子代理讀到並當作可疑注入回報，無害但會多一段文字。
+已知限制：Browser pane 截圖只存在子代理的對話中，主線看不到；要讓主線目視，子代理需用 `scripts/screenshot.js` 落檔（agent 定義已寫明）。 套件安裝被 hook 一律擋下（含工作包授權的情況）——真需要安裝由主線自己做。Browser pane／playwright MCP／chrome-devtools MCP 各是 session 級共用瀏覽器，同一工具同時只能有一個介面代理。使用者自己的全域 PreToolUse hook 訊息（分支確認提示）會被子代理讀到並當作可疑注入回報，無害但會多一段文字。
