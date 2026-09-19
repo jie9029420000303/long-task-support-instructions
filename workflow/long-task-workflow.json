@@ -3,7 +3,7 @@
   "diagram_type": "workflow",
   "meta": {
     "title": "長任務協作流程",
-    "subtitle": "視覺 A 與技術 B 可並行，主線只以同一候選版的證據完成驗收",
+    "subtitle": "視覺 A、技術 B、研究規劃 C 可複選；主線統整可驗證證據並完成正式產出",
     "quality_profile": "showcase"
   },
   "lanes": [
@@ -11,6 +11,7 @@
     { "id": "main", "label": "主執行緒" },
     { "id": "visual_agents", "label": "A 視覺查核子代理" },
     { "id": "tech_agents", "label": "B 技術／介面子代理" },
+    { "id": "research_agents", "label": "C 研究子代理" },
     { "id": "exceptions", "label": "重派與接手", "variant": "exception" }
   ],
   "phases": [
@@ -25,6 +26,7 @@
     "requiredPaths": [
       { "from": "work_scope", "to": "visual_main" },
       { "from": "work_scope", "to": "tech_work" },
+      { "from": "work_scope", "to": "research_work" },
       { "from": "visual_main", "to": "same_version_review" },
       { "from": "tech_work", "to": "same_version_review" },
       { "from": "quality_gate", "to": "main_takeover" },
@@ -39,7 +41,8 @@
     { "id": "visual_check", "lane": "visual_agents", "col": 4, "type": "frontend", "label": "A｜客觀視覺查核", "width": 176 },
     { "id": "tech_work", "lane": "tech_agents", "col": 3, "type": "backend", "label": "B｜子代理技術實作", "width": 176 },
     { "id": "ui_test", "lane": "tech_agents", "col": 4, "type": "frontend", "label": "前台真實操作蒐證", "width": 178 },
-    { "id": "same_version_review", "lane": "main", "col": 5, "type": "security", "label": "主線同版整合查核", "width": 192 },
+    { "id": "research_work", "lane": "research_agents", "col": 3, "type": "database", "label": "C｜分面研究與反證整理", "width": 196 },
+    { "id": "same_version_review", "lane": "main", "col": 5, "type": "security", "label": "主線整合查核／正式產出", "width": 210 },
     { "id": "quality_gate", "lane": "exceptions", "col": 1, "type": "messagebus", "label": "代理交付品質錯誤", "width": 196 },
     { "id": "main_takeover", "lane": "exceptions", "col": 4, "type": "backend", "label": "錯 3｜主線接手該工作包", "width": 196 },
     { "id": "task_done", "lane": "task", "col": 5, "type": "external", "label": "任務完成", "width": 138 }
@@ -49,11 +52,13 @@
     { "id": "scope_route", "from": "scope", "to": "work_scope", "label": "解析或沿用鎖定", "variant": "emphasis" },
     { "id": "route_visual", "from": "work_scope", "to": "visual_main", "label": "A 視覺（網頁預設同選）", "variant": "emphasis" },
     { "id": "route_tech", "from": "work_scope", "to": "tech_work", "label": "B 技術（網頁預設同選）", "variant": "emphasis" },
+    { "id": "route_research", "from": "work_scope", "to": "research_work", "label": "C 研究／系統規劃", "variant": "emphasis" },
     { "id": "visual_to_check", "from": "visual_main", "to": "visual_check", "label": "只派客觀畫面查核" },
     { "id": "visual_to_review", "from": "visual_check", "to": "same_version_review", "label": "同一候選版視覺證據" },
     { "id": "tech_to_ui", "from": "tech_work", "to": "ui_test", "label": "需要前台操作驗收" },
     { "id": "tech_to_review", "from": "tech_work", "to": "same_version_review", "label": "程式／API／資料證據", "variant": "emphasis" },
     { "id": "ui_to_review", "from": "ui_test", "to": "same_version_review", "label": "真實操作證據" },
+    { "id": "research_to_review", "from": "research_work", "to": "same_version_review", "label": "來源、反證與待確認事項；主線決策並撰稿", "variant": "emphasis" },
     { "id": "review_done", "from": "same_version_review", "to": "task_done", "label": "同一候選版全部 PASS", "variant": "emphasis" },
     { "id": "report_quality_fail", "from": "same_version_review", "to": "quality_gate", "label": "未達標：先判定歸屬", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "bottom", "route": "bottom-channel" },
     { "id": "takeover", "from": "quality_gate", "to": "main_takeover", "label": "同一工作包錯 3", "variant": "security" },

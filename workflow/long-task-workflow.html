@@ -4957,7 +4957,7 @@
         <div class="pulse-dot"></div>
         <h1>長任務協作流程</h1>
       </div>
-      <p class="subtitle">視覺 A 與技術 B 可並行，主線只以同一候選版的證據完成驗收</p>
+      <p class="subtitle">視覺 A、技術 B、研究規劃 C 可複選；主線統整可驗證證據並完成正式產出</p>
     </div>
 
     <script id="archify-guided-views-data" type="application/json">[]</script>
@@ -5005,9 +5005,9 @@
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
-      <svg viewBox="0 0 1321 776" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+      <svg viewBox="0 0 1330 900" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">長任務協作流程</title>
-        <desc id="archify-diagram-description">視覺 A 與技術 B 可並行，主線只以同一候選版的證據完成驗收</desc>
+        <desc id="archify-diagram-description">視覺 A、技術 B、研究規劃 C 可複選；主線統整可驗證證據並完成正式產出</desc>
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -5031,21 +5031,24 @@
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         <!-- Swimlanes -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-0" x="40" y="52" width="1265" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-0" x="40" y="52" width="1274" height="104" rx="10" class="c-lane" stroke-width="1"/>
         <text x="54" y="74" class="t-dim" font-size="10" font-weight="600">01 / 任務狀態</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="176" width="1265" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="176" width="1274" height="104" rx="10" class="c-lane" stroke-width="1"/>
         <text x="54" y="198" class="t-dim" font-size="10" font-weight="600">02 / 主執行緒</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="300" width="1265" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="300" width="1274" height="104" rx="10" class="c-lane" stroke-width="1"/>
         <text x="54" y="322" class="t-dim" font-size="10" font-weight="600">03 / A 視覺查核子代理</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="424" width="1265" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="424" width="1274" height="104" rx="10" class="c-lane" stroke-width="1"/>
         <text x="54" y="446" class="t-dim" font-size="10" font-weight="600">04 / B 技術／介面子代理</text>
 
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-4" x="40" y="548" width="1265" height="104" rx="10" class="c-lane" stroke-width="1"/>
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-4-exception" x="46" y="554" width="1253" height="92" rx="8" class="c-security-group" stroke-width="1"/>
-        <text x="54" y="570" class="t-security" font-size="10" font-weight="600">EX / 重派與接手</text>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-4" x="40" y="548" width="1274" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="570" class="t-dim" font-size="10" font-weight="600">05 / C 研究子代理</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-5" x="40" y="672" width="1274" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-5-exception" x="46" y="678" width="1262" height="92" rx="8" class="c-security-group" stroke-width="1"/>
+        <text x="54" y="694" class="t-security" font-size="10" font-weight="600">EX / 重派與接手</text>
 
         <!-- Phase headers -->
         <line x1="71" y1="35" x2="283" y2="35" class="a-default" stroke-width="1.1"/>
@@ -5062,19 +5065,21 @@
 
 
         <!-- Edge paths -->
-        <path data-edge-from="same_version_review" data-edge-to="quality_gate" data-edge-label="未達標：先判定歸屬" data-edge-key="0" data-edge-id="report_quality_fail" data-composition-points="1200.6,269;1200.6,673;237,673;237,641" d="M 1200.6 269 L 1200.6 673 L 237 673 L 237 641" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="same_version_review" data-edge-to="task_done" data-edge-label="同一候選版全部 PASS" data-edge-key="1" data-edge-id="review_done" data-composition-points="1200.6,217;1200.6,145" d="M 1200.6 217 L 1200.6 145" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="work_scope" data-edge-to="tech_work" data-edge-label="B 技術（網頁預設同選）" data-edge-key="2" data-edge-id="route_tech" data-composition-points="512.2,269;512.2,491;720.8,491" d="M 512.2 269 L 512.2 491 L 720.8 491" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="work_scope" data-edge-to="visual_main" data-edge-label="A 視覺（網頁預設同選）" data-edge-key="3" data-edge-id="route_visual" data-composition-points="604.2,243;727.8,243" d="M 604.2 243 L 727.8 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="scope" data-edge-to="work_scope" data-edge-label="解析或沿用鎖定" data-edge-key="4" data-edge-id="scope_route" data-composition-points="335,243;420.20000000000005,243" d="M 335 243 L 420.20000000000005 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="task_start" data-edge-to="scope" data-edge-label="啟動／續接" data-edge-key="5" data-edge-id="start_scope" data-composition-points="117,145;117,166;237,166;237,217" d="M 117 145 L 117 166 L 237 166 L 237 217" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="quality_gate" data-edge-to="main_takeover" data-edge-label="同一工作包錯 3" data-edge-key="6" data-edge-id="takeover" data-composition-points="335,615;982.5999999999999,615" d="M 335 615 L 982.5999999999999 615" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="main_takeover" data-edge-to="same_version_review" data-edge-label="主線完成未解工作" data-edge-key="7" data-edge-id="takeover_review" data-composition-points="1080.6,641;1080.6,668;1200.6,668;1200.6,269" d="M 1080.6 641 L 1080.6 668 L 1200.6 668 L 1200.6 269" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="tech_work" data-edge-to="same_version_review" data-edge-label="程式／API／資料證據" data-edge-key="8" data-edge-id="tech_to_review" data-composition-points="808.8,517;808.8,544;1200.6,544;1200.6,269" d="M 808.8 517 L 808.8 544 L 1200.6 544 L 1200.6 269" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="tech_work" data-edge-to="ui_test" data-edge-label="需要前台操作驗收" data-edge-key="9" data-edge-id="tech_to_ui" data-composition-points="808.8,465;808.8,449;1080.6,449;1080.6,465" d="M 808.8 465 L 808.8 449 L 1080.6 449 L 1080.6 465" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="ui_test" data-edge-to="same_version_review" data-edge-label="真實操作證據" data-edge-key="10" data-edge-id="ui_to_review" data-composition-points="1080.6,517;1080.6,544;1200.6,544;1200.6,269" d="M 1080.6 517 L 1080.6 544 L 1200.6 544 L 1200.6 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="visual_main" data-edge-to="visual_check" data-edge-label="只派客觀畫面查核" data-edge-key="11" data-edge-id="visual_to_check" data-composition-points="808.8,269;808.8,367;992.5999999999999,367" d="M 808.8 269 L 808.8 367 L 992.5999999999999 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="visual_check" data-edge-to="same_version_review" data-edge-label="同一候選版視覺證據" data-edge-key="12" data-edge-id="visual_to_review" data-composition-points="1080.6,393;1080.6,420;1200.6,420;1200.6,269" d="M 1080.6 393 L 1080.6 420 L 1200.6 420 L 1200.6 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="same_version_review" data-edge-to="quality_gate" data-edge-label="未達標：先判定歸屬" data-edge-key="0" data-edge-id="report_quality_fail" data-composition-points="1200.6,269;1200.6,797;237,797;237,765" d="M 1200.6 269 L 1200.6 797 L 237 797 L 237 765" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="research_work" data-edge-to="same_version_review" data-edge-label="來源、反證與待確認事項；主線決策並撰稿" data-edge-key="1" data-edge-id="research_to_review" data-composition-points="906.8,615;1179.6,615;1179.6,269" d="M 906.8 615 L 1179.6 615 L 1179.6 269" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="same_version_review" data-edge-to="task_done" data-edge-label="同一候選版全部 PASS" data-edge-key="2" data-edge-id="review_done" data-composition-points="1200.6,217;1200.6,145" d="M 1200.6 217 L 1200.6 145" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="work_scope" data-edge-to="research_work" data-edge-label="C 研究／系統規劃" data-edge-key="3" data-edge-id="route_research" data-composition-points="505.20000000000005,269;505.20000000000005,615;710.8,615" d="M 505.20000000000005 269 L 505.20000000000005 615 L 710.8 615" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="work_scope" data-edge-to="tech_work" data-edge-label="B 技術（網頁預設同選）" data-edge-key="4" data-edge-id="route_tech" data-composition-points="519.2,269;519.2,491;720.8,491" d="M 519.2 269 L 519.2 491 L 720.8 491" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="work_scope" data-edge-to="visual_main" data-edge-label="A 視覺（網頁預設同選）" data-edge-key="5" data-edge-id="route_visual" data-composition-points="604.2,243;727.8,243" d="M 604.2 243 L 727.8 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="scope" data-edge-to="work_scope" data-edge-label="解析或沿用鎖定" data-edge-key="6" data-edge-id="scope_route" data-composition-points="335,243;420.20000000000005,243" d="M 335 243 L 420.20000000000005 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="task_start" data-edge-to="scope" data-edge-label="啟動／續接" data-edge-key="7" data-edge-id="start_scope" data-composition-points="117,145;117,166;237,166;237,217" d="M 117 145 L 117 166 L 237 166 L 237 217" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="quality_gate" data-edge-to="main_takeover" data-edge-label="同一工作包錯 3" data-edge-key="8" data-edge-id="takeover" data-composition-points="335,739;982.5999999999999,739" d="M 335 739 L 982.5999999999999 739" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="main_takeover" data-edge-to="same_version_review" data-edge-label="主線完成未解工作" data-edge-key="9" data-edge-id="takeover_review" data-composition-points="1080.6,765;1080.6,792;1200.6,792;1200.6,269" d="M 1080.6 765 L 1080.6 792 L 1200.6 792 L 1200.6 269" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="tech_work" data-edge-to="same_version_review" data-edge-label="程式／API／資料證據" data-edge-key="10" data-edge-id="tech_to_review" data-composition-points="808.8,517;808.8,544;1200.6,544;1200.6,269" d="M 808.8 517 L 808.8 544 L 1200.6 544 L 1200.6 269" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="tech_work" data-edge-to="ui_test" data-edge-label="需要前台操作驗收" data-edge-key="11" data-edge-id="tech_to_ui" data-composition-points="808.8,465;808.8,449;1080.6,449;1080.6,465" d="M 808.8 465 L 808.8 449 L 1080.6 449 L 1080.6 465" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ui_test" data-edge-to="same_version_review" data-edge-label="真實操作證據" data-edge-key="12" data-edge-id="ui_to_review" data-composition-points="1080.6,517;1080.6,544;1200.6,544;1200.6,269" d="M 1080.6 517 L 1080.6 544 L 1200.6 544 L 1200.6 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="visual_main" data-edge-to="visual_check" data-edge-label="只派客觀畫面查核" data-edge-key="13" data-edge-id="visual_to_check" data-composition-points="808.8,269;808.8,367;992.5999999999999,367" d="M 808.8 269 L 808.8 367 L 992.5999999999999 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="visual_check" data-edge-to="same_version_review" data-edge-label="同一候選版視覺證據" data-edge-key="14" data-edge-id="visual_to_review" data-composition-points="1080.6,341;1080.6,325;1151.1,325;1151.1,285;1221.6,285;1221.6,269" d="M 1080.6 341 L 1080.6 325 L 1151.1 325 L 1151.1 285 L 1221.6 285 L 1221.6 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
 
         <!-- Nodes -->
         <g id="node-task_start" data-node-id="task_start" data-node-label="任務啟動／續接" tabindex="0" role="button" aria-label="Focus 任務啟動／續接, 任務狀態 › 啟動與鎖定" aria-pressed="false" data-node-kind="cloud" data-node-context="任務狀態 › 啟動與鎖定">
@@ -5135,15 +5140,15 @@
           <text data-node-label="" x="808.8" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">A｜主線設計與排版</text>
         </g>
 
-        <g id="node-same_version_review" data-node-id="same_version_review" data-node-label="主線同版整合查核" tabindex="0" role="button" aria-label="Focus 主線同版整合查核, 主執行緒 › 同版查核與完成" aria-pressed="false" data-node-kind="security" data-node-context="主執行緒 › 同版查核與完成">
-          <title>主線同版整合查核 · 主執行緒 › 同版查核與完成</title>
-          <rect x="1104.6" y="217" width="192" height="52" rx="6" class="c-mask"/>
-          <rect x="1104.6" y="217" width="192" height="52" rx="6" class="c-security" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1110.6 223) scale(0.6875)">
+        <g id="node-same_version_review" data-node-id="same_version_review" data-node-label="主線整合查核／正式產出" tabindex="0" role="button" aria-label="Focus 主線整合查核／正式產出, 主執行緒 › 同版查核與完成" aria-pressed="false" data-node-kind="security" data-node-context="主執行緒 › 同版查核與完成">
+          <title>主線整合查核／正式產出 · 主執行緒 › 同版查核與完成</title>
+          <rect x="1095.6" y="217" width="210" height="52" rx="6" class="c-mask"/>
+          <rect x="1095.6" y="217" width="210" height="52" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1101.6 223) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-node-label="" x="1200.6" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">主線同版整合查核</text>
+          <text data-node-label="" x="1200.6" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">主線整合查核／正式產出</text>
         </g>
 
         <g id="node-visual_check" data-node-id="visual_check" data-node-label="A｜客觀視覺查核" tabindex="0" role="button" aria-label="Focus A｜客觀視覺查核, A 視覺查核子代理 › 同版查核與完成" aria-pressed="false" data-node-kind="frontend" data-node-context="A 視覺查核子代理 › 同版查核與完成">
@@ -5182,109 +5187,132 @@
           <text data-node-label="" x="1080.6" y="486" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">前台真實操作蒐證</text>
         </g>
 
+        <g id="node-research_work" data-node-id="research_work" data-node-label="C｜分面研究與反證整理" tabindex="0" role="button" aria-label="Focus C｜分面研究與反證整理, C 研究子代理 › 可複選分工" aria-pressed="false" data-node-kind="database" data-node-context="C 研究子代理 › 可複選分工">
+          <title>C｜分面研究與反證整理 · C 研究子代理 › 可複選分工</title>
+          <rect x="710.8" y="589" width="196" height="52" rx="6" class="c-mask"/>
+          <rect x="710.8" y="589" width="196" height="52" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(716.8 595) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-node-label="" x="808.8" y="610" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">C｜分面研究與反證整理</text>
+        </g>
+
         <g id="node-quality_gate" data-node-id="quality_gate" data-node-label="代理交付品質錯誤" tabindex="0" role="button" aria-label="Focus 代理交付品質錯誤, 重派與接手 › 啟動與鎖定" aria-pressed="false" data-node-kind="messagebus" data-node-context="重派與接手 › 啟動與鎖定">
           <title>代理交付品質錯誤 · 重派與接手 › 啟動與鎖定</title>
-          <rect x="139" y="589" width="196" height="52" rx="6" class="c-mask"/>
-          <rect x="139" y="589" width="196" height="52" rx="6" class="c-messagebus" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(145 595) scale(0.6875)">
+          <rect x="139" y="713" width="196" height="52" rx="6" class="c-mask"/>
+          <rect x="139" y="713" width="196" height="52" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(145 719) scale(0.6875)">
             <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
             <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
             <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
             <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
           </g>
-          <text data-node-label="" x="237" y="610" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">代理交付品質錯誤</text>
+          <text data-node-label="" x="237" y="734" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">代理交付品質錯誤</text>
         </g>
 
         <g id="node-main_takeover" data-node-id="main_takeover" data-node-label="錯 3｜主線接手該工作包" tabindex="0" role="button" aria-label="Focus 錯 3｜主線接手該工作包, 重派與接手 › 同版查核與完成" aria-pressed="false" data-node-kind="backend" data-node-context="重派與接手 › 同版查核與完成">
           <title>錯 3｜主線接手該工作包 · 重派與接手 › 同版查核與完成</title>
-          <rect x="982.5999999999999" y="589" width="196" height="52" rx="6" class="c-mask"/>
-          <rect x="982.5999999999999" y="589" width="196" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(988.5999999999999 595) scale(0.6875)">
+          <rect x="982.5999999999999" y="713" width="196" height="52" rx="6" class="c-mask"/>
+          <rect x="982.5999999999999" y="713" width="196" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(988.5999999999999 719) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" x="1080.6" y="610" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">錯 3｜主線接手該工作包</text>
+          <text data-node-label="" x="1080.6" y="734" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">錯 3｜主線接手該工作包</text>
         </g>
 
         <!-- Edge labels -->
         <g data-detail="context" data-edge-from="same_version_review" data-edge-to="quality_gate" data-edge-label="未達標：先判定歸屬" data-edge-key="0" data-edge-id="report_quality_fail">
-          <rect x="670.5999999999999" y="653" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="718.8" y="663" class="t-security" font-size="8" text-anchor="middle">未達標：先判定歸屬</text>
+          <rect x="670.5999999999999" y="777" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="718.8" y="787" class="t-security" font-size="8" text-anchor="middle">未達標：先判定歸屬</text>
         </g>
-        <g data-detail="context" data-edge-from="same_version_review" data-edge-to="task_done" data-edge-label="同一候選版全部 PASS" data-edge-key="1" data-edge-id="review_done">
+        <g data-detail="context" data-edge-from="research_work" data-edge-to="same_version_review" data-edge-label="來源、反證與待確認事項；主線決策並撰稿" data-edge-key="1" data-edge-id="research_to_review">
+          <rect x="946.9999999999998" y="595" width="192.4" height="14" rx="3" class="c-mask"/>
+          <text x="1043.1999999999998" y="605" class="t-backend" font-size="8" text-anchor="middle">來源、反證與待確認事項；主線決策並撰稿</text>
+        </g>
+        <g data-detail="context" data-edge-from="same_version_review" data-edge-to="task_done" data-edge-label="同一候選版全部 PASS" data-edge-key="2" data-edge-id="review_done">
           <rect x="1150" y="197" width="101.2" height="14" rx="3" class="c-mask"/>
           <text x="1200.6" y="207" class="t-backend" font-size="8" text-anchor="middle">同一候選版全部 PASS</text>
         </g>
-        <g data-detail="context" data-edge-from="work_scope" data-edge-to="tech_work" data-edge-label="B 技術（網頁預設同選）" data-edge-key="2" data-edge-id="route_tech">
-          <rect x="558.7" y="471" width="115.6" height="14" rx="3" class="c-mask"/>
-          <text x="616.5" y="481" class="t-backend" font-size="8" text-anchor="middle">B 技術（網頁預設同選）</text>
+        <g data-detail="context" data-edge-from="work_scope" data-edge-to="research_work" data-edge-label="C 研究／系統規劃" data-edge-key="3" data-edge-id="route_research">
+          <rect x="564.6" y="595" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="608" y="605" class="t-backend" font-size="8" text-anchor="middle">C 研究／系統規劃</text>
         </g>
-        <g data-detail="context" data-edge-from="work_scope" data-edge-to="visual_main" data-edge-label="A 視覺（網頁預設同選）" data-edge-key="3" data-edge-id="route_visual">
+        <g data-detail="context" data-edge-from="work_scope" data-edge-to="tech_work" data-edge-label="B 技術（網頁預設同選）" data-edge-key="4" data-edge-id="route_tech">
+          <rect x="562.2" y="471" width="115.6" height="14" rx="3" class="c-mask"/>
+          <text x="620" y="481" class="t-backend" font-size="8" text-anchor="middle">B 技術（網頁預設同選）</text>
+        </g>
+        <g data-detail="context" data-edge-from="work_scope" data-edge-to="visual_main" data-edge-label="A 視覺（網頁預設同選）" data-edge-key="5" data-edge-id="route_visual">
           <rect x="608.2" y="223" width="115.6" height="14" rx="3" class="c-mask"/>
           <text x="666" y="233" class="t-backend" font-size="8" text-anchor="middle">A 視覺（網頁預設同選）</text>
         </g>
-        <g data-detail="context" data-edge-from="scope" data-edge-to="work_scope" data-edge-label="解析或沿用鎖定" data-edge-key="4" data-edge-id="scope_route">
+        <g data-detail="context" data-edge-from="scope" data-edge-to="work_scope" data-edge-label="解析或沿用鎖定" data-edge-key="6" data-edge-id="scope_route">
           <rect x="339" y="223" width="77.2" height="14" rx="3" class="c-mask"/>
           <text x="377.6" y="233" class="t-backend" font-size="8" text-anchor="middle">解析或沿用鎖定</text>
         </g>
-        <g data-detail="context" data-edge-from="task_start" data-edge-to="scope" data-edge-label="啟動／續接" data-edge-key="5" data-edge-id="start_scope">
+        <g data-detail="context" data-edge-from="task_start" data-edge-to="scope" data-edge-label="啟動／續接" data-edge-key="7" data-edge-id="start_scope">
           <rect x="148" y="146" width="58" height="14" rx="3" class="c-mask"/>
           <text x="177" y="156" class="t-backend" font-size="8" text-anchor="middle">啟動／續接</text>
         </g>
-        <g data-detail="context" data-edge-from="quality_gate" data-edge-to="main_takeover" data-edge-label="同一工作包錯 3" data-edge-key="6" data-edge-id="takeover">
-          <rect x="620.1999999999999" y="595" width="77.2" height="14" rx="3" class="c-mask"/>
-          <text x="658.8" y="605" class="t-security" font-size="8" text-anchor="middle">同一工作包錯 3</text>
+        <g data-detail="context" data-edge-from="quality_gate" data-edge-to="main_takeover" data-edge-label="同一工作包錯 3" data-edge-key="8" data-edge-id="takeover">
+          <rect x="620.1999999999999" y="719" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="658.8" y="729" class="t-security" font-size="8" text-anchor="middle">同一工作包錯 3</text>
         </g>
-        <g data-detail="context" data-edge-from="main_takeover" data-edge-to="same_version_review" data-edge-label="主線完成未解工作" data-edge-key="7" data-edge-id="takeover_review">
-          <rect x="1097.1999999999998" y="648" width="86.8" height="14" rx="3" class="c-mask"/>
-          <text x="1140.6" y="658" class="t-backend" font-size="8" text-anchor="middle">主線完成未解工作</text>
+        <g data-detail="context" data-edge-from="main_takeover" data-edge-to="same_version_review" data-edge-label="主線完成未解工作" data-edge-key="9" data-edge-id="takeover_review">
+          <rect x="1097.1999999999998" y="772" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1140.6" y="782" class="t-backend" font-size="8" text-anchor="middle">主線完成未解工作</text>
         </g>
-        <g data-detail="context" data-edge-from="tech_work" data-edge-to="same_version_review" data-edge-label="程式／API／資料證據" data-edge-key="8" data-edge-id="tech_to_review">
+        <g data-detail="context" data-edge-from="tech_work" data-edge-to="same_version_review" data-edge-label="程式／API／資料證據" data-edge-key="10" data-edge-id="tech_to_review">
           <rect x="954.0999999999999" y="524" width="101.2" height="14" rx="3" class="c-mask"/>
           <text x="1004.6999999999999" y="534" class="t-backend" font-size="8" text-anchor="middle">程式／API／資料證據</text>
         </g>
-        <g data-detail="context" data-edge-from="tech_work" data-edge-to="ui_test" data-edge-label="需要前台操作驗收" data-edge-key="9" data-edge-id="tech_to_ui">
+        <g data-detail="context" data-edge-from="tech_work" data-edge-to="ui_test" data-edge-label="需要前台操作驗收" data-edge-key="11" data-edge-id="tech_to_ui">
           <rect x="901.3" y="429" width="86.8" height="14" rx="3" class="c-mask"/>
           <text x="944.6999999999999" y="439" class="t-muted" font-size="8" text-anchor="middle">需要前台操作驗收</text>
         </g>
-        <g data-detail="context" data-edge-from="ui_test" data-edge-to="same_version_review" data-edge-label="真實操作證據" data-edge-key="10" data-edge-id="ui_to_review">
+        <g data-detail="context" data-edge-from="ui_test" data-edge-to="same_version_review" data-edge-label="真實操作證據" data-edge-key="12" data-edge-id="ui_to_review">
           <rect x="1106.8" y="524" width="67.6" height="14" rx="3" class="c-mask"/>
           <text x="1140.6" y="534" class="t-muted" font-size="8" text-anchor="middle">真實操作證據</text>
         </g>
-        <g data-detail="context" data-edge-from="visual_main" data-edge-to="visual_check" data-edge-label="只派客觀畫面查核" data-edge-key="11" data-edge-id="visual_to_check">
+        <g data-detail="context" data-edge-from="visual_main" data-edge-to="visual_check" data-edge-label="只派客觀畫面查核" data-edge-key="13" data-edge-id="visual_to_check">
           <rect x="857.3" y="347" width="86.8" height="14" rx="3" class="c-mask"/>
           <text x="900.6999999999999" y="357" class="t-muted" font-size="8" text-anchor="middle">只派客觀畫面查核</text>
         </g>
-        <g data-detail="context" data-edge-from="visual_check" data-edge-to="same_version_review" data-edge-label="同一候選版視覺證據" data-edge-key="12" data-edge-id="visual_to_review">
-          <rect x="1092.3999999999999" y="400" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="1140.6" y="410" class="t-muted" font-size="8" text-anchor="middle">同一候選版視覺證據</text>
+        <g data-detail="context" data-edge-from="visual_check" data-edge-to="same_version_review" data-edge-label="同一候選版視覺證據" data-edge-key="14" data-edge-id="visual_to_review">
+          <rect x="1067.6499999999999" y="305" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1115.85" y="315" class="t-muted" font-size="8" text-anchor="middle">同一候選版視覺證據</text>
         </g>
 
         <!-- Legend -->
         <g data-legend="" data-legend-bridge="">
-          <text x="20" y="676" class="t-primary" font-size="12" font-weight="650">Legend</text>
-          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="User UI" data-legend-x="20" data-legend-baseline="696" data-legend-width="74">
-            <rect x="20" y="688" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
-            <text x="42" y="696" class="t-muted" font-size="7.5" font-weight="500">User UI</text>
+          <text x="20" y="800" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="User UI" data-legend-x="20" data-legend-baseline="820" data-legend-width="74">
+            <rect x="20" y="812" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
+            <text x="42" y="820" class="t-muted" font-size="7.5" font-weight="500">User UI</text>
           </g>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Agent logic" data-legend-x="101" data-legend-baseline="696" data-legend-width="91">
-            <rect x="101" y="688" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
-            <text x="123" y="696" class="t-muted" font-size="7.5" font-weight="500">Agent logic</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Agent logic" data-legend-x="101" data-legend-baseline="820" data-legend-width="91">
+            <rect x="101" y="812" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="123" y="820" class="t-muted" font-size="7.5" font-weight="500">Agent logic</text>
           </g>
-          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Policy" data-legend-x="199" data-legend-baseline="696" data-legend-width="70">
-            <rect x="199" y="688" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
-            <text x="221" y="696" class="t-muted" font-size="7.5" font-weight="500">Policy</text>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Policy" data-legend-x="199" data-legend-baseline="820" data-legend-width="70">
+            <rect x="199" y="812" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="221" y="820" class="t-muted" font-size="7.5" font-weight="500">Policy</text>
           </g>
-          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="Tool action" data-legend-x="276" data-legend-baseline="696" data-legend-width="91">
-            <rect x="276" y="688" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
-            <text x="298" y="696" class="t-muted" font-size="7.5" font-weight="500">Tool action</text>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="Tool action" data-legend-x="276" data-legend-baseline="820" data-legend-width="91">
+            <rect x="276" y="812" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
+            <text x="298" y="820" class="t-muted" font-size="7.5" font-weight="500">Tool action</text>
           </g>
-          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud service" data-legend-x="374" data-legend-baseline="696" data-legend-width="100">
-            <rect x="374" y="688" width="14" height="9" rx="2" class="c-cloud" stroke-width="1"/>
-            <text x="396" y="696" class="t-muted" font-size="7.5" font-weight="500">Cloud service</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Context / trace" data-legend-x="374" data-legend-baseline="820" data-legend-width="109">
+            <rect x="374" y="812" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
+            <text x="396" y="820" class="t-muted" font-size="7.5" font-weight="500">Context / trace</text>
           </g>
-          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External system" data-legend-x="481" data-legend-baseline="696" data-legend-width="109">
-            <rect x="481" y="688" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
-            <text x="503" y="696" class="t-muted" font-size="7.5" font-weight="500">External system</text>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud service" data-legend-x="490" data-legend-baseline="820" data-legend-width="100">
+            <rect x="490" y="812" width="14" height="9" rx="2" class="c-cloud" stroke-width="1"/>
+            <text x="512" y="820" class="t-muted" font-size="7.5" font-weight="500">Cloud service</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External system" data-legend-x="597" data-legend-baseline="820" data-legend-width="109">
+            <rect x="597" y="812" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="619" y="820" class="t-muted" font-size="7.5" font-weight="500">External system</text>
           </g>
         </g>
       </svg>
