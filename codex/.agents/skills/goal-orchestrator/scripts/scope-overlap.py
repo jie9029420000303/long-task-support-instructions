@@ -13,7 +13,7 @@ import re, sys, collections, os
 SECTION = re.compile(r"\[可修改範圍\](.*?)(?=\n\[|\n## |\Z)", re.S)
 SHARED = re.compile(r"\[共用資源\](.*?)(?=\n\[|\n## |\Z)", re.S)
 KV = re.compile(r"([A-Za-z\u4e00-\u9fff_]+)[:：]([\w\-.|/]+)")
-PATH = re.compile(r"(?<![\w./])((?:[\w()\[\]\-]+/)+(?:[\w()\[\]\-]+\.[A-Za-z0-9]{1,5}|\*\*|\*))")
+PATH = re.compile(r"(?<![\w./])((?:(?:[\w()\[\]\-]+/)+)?(?:[\w()\[\]\-]+\.[A-Za-z0-9]{1,8}|(?:[\w()\[\]\-]+/)+(?:\*\*|\*)))")
 TAG = re.compile(r"(?:表|資料|帳號|table|data|account)[:：]([\w\-.]+)")
 
 def scope_of(path):
