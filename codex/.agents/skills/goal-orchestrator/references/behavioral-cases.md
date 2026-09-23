@@ -23,3 +23,6 @@
 | 19 | 原生 Goal 與 sidecar 不會因最近修改時間而誤綁。 | 有 id 以 id 匹配；無 id 以 objective 原文與 SHA-256 匹配；多個未完成且無精確匹配時要求使用者指定。 |
 | 20 | 動態模型解析不靠名稱猜測。 | 依 session／主機實際資訊、主機模型目錄、官方 OpenAI 文件依序解析；都無法核對時記 BLOCKED。 |
 | 21 | 研究／系統規劃走 C 線；主線作取捨與正式文件，子代理只交研究包。 | sidecar 有研究範圍、截止時點、來源與反證；子代理回報不含最終系統決策或正式文件修改。 |
+| 22 | 共用資源只記實際正值，禁止值不製造假衝突。 | `scope-overlap.py` 不會把 `.worktrees` 誤切為 `.worktree`；`不安裝`、`不使用`不算衝突，相同的正值 worktree／帳號仍 exit 1。 |
+| 23 | 並行 B 技術包使用同 base commit 的隔離 worktree，整合後才成為 canonical candidate。 | 工作包有 `[工作區]` 與獨立 `worktree:<id>`；子代理不操作 Git，主線核對實際變更後在單一候選版跑整合回歸。 |
+| 24 | sidecar 是快照，超過上限時先封存才派新包。 | `sidecar-guard.py` 在 150 行內 exit 0；151～180 行提醒；超過 180 行 exit 1，active／BLOCKED／當前候選版仍留在 `state.md`。 |
