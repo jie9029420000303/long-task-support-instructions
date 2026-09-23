@@ -14,7 +14,8 @@
 │   ├── templates/state.md          狀態檔範本（cp 後填寫）
 │   ├── templates/state.example.md  實跑一輪後的完整範例
 │   ├── scripts/screenshot.js       無頭截圖落檔工具（子代理把證據存成 PNG 給主線 Read）
-│   └── scripts/scope-overlap.py    並行派工閘：比對工作包可修改範圍，有交集 exit 1
+│   ├── scripts/scope-overlap.py    並行派工閘：比對工作區／可修改範圍／實際共用資源，有交集 exit 1、缺段 exit 2
+│   └── scripts/sidecar-guard.py    狀態檔容量守門：≤150 通過、151–180 提醒、>180 exit 1（只報告不改寫）
 └── agents/                         十二個子代理定義（4 角色 × 3 個 effort 檔）
     ├── lt-visual-checker-{medium,high,xhigh}.md   A 線視覺查核（唯讀＋瀏覽器）
     ├── lt-tech-worker-{medium,high,xhigh}.md      B 線技術實作（可編輯，git 寫入被 hook 擋）
@@ -114,5 +115,23 @@
 | 真實派工 `lt-researcher-medium`（新開 Claude Desktop Code session） | 兩份互相矛盾的本地來源（規格書 600 req/min／page_size 500 vs 維運手冊實測 300／200）、正式文件 `plan.md`、截止時點 2026-06-30；主線讀 subagent transcript `agent-ace5d65a1927f6a29.jsonl` 與檔案雜湊 | transcript 7/7 則 model=`claude-sonnet-5`、effort=`medium`；工具只有 Read×2、Bash×2（`ls`、`cp` 快照進 evidence/）；`plan.md` SHA-256 前後一致；兩份快照與來源逐字相同；回報含 4 條主張（各附檔名＋原句＋日期）、兩條必找反證都有交代、未證實事項 5 處、來源衝突並列不裁決、無「建議採用」字樣 |
 
 未實測：`/goal` 的自動續跑（使用者指令，本輪未設）；`--resume` 續接後讀狀態檔；cloud session（需把 `.claude/` 提交進 repo）；C 線的升檔定義 `lt-researcher-high`／`-xhigh` 與 WebFetch 線上來源（本輪只用本地檔實測 medium）。
+
+
+## 工作區隔離與狀態檔容量守門（2026-09-23，對應 Codex 09536d4）
+
+對應 SPEC 不變量 12 與 tests 17／18：工作區（worktree／整體測試）也是共用資源；多個 B 技術包並行改程式時，主線預設為每包建立綁定同一 base 的隔離 worktree，成果在主線整合進單一候選版並跑完整回歸前只是草稿；否定宣告（不使用／不安裝）不算占用。Claude Code 的落地方式：
+
+- 工作包必填 `[工作區]`（`path:` 絕對路徑、`worktree:` 唯一識別值、`base:` commit／SHA-256）；`scope-overlap.py` 相同 path 或 worktree 判交集、相同 base 可並行，舊工作包缺段 exit 2。只讀或只寫 evidence 的包以自己的 evidence 目錄當工作區，避免 A／C／介面包因共用 canonical 路徑被誤擋。
+- worktree 由主線 `git worktree add` 預建（登記「主線自做」），不用 Agent 的 `isolation: "worktree"`：它的路徑派工前不存在、無法先過閘。子代理 hook 照擋 `git worktree` 等寫入；`lt-tech-worker-*` 只在 `[工作區] path` 內讀寫與測試。
+- 路徑解析改成以空白與標點切出完整 token（根因：舊 regex 的目錄段不收「.」且沒有結尾邊界），保留 Claude 既有的無目錄檔名、行內註記與 `app/(group)/` 支援。
+- 新增 `sidecar-guard.py`（Codex 版同門檻；工作包列與批次列改按節計數，因 Claude 狀態檔的 id 是 `B-1` 形式）。
+
+| 驗證項 | 做法 | 結果 |
+|---|---|---|
+| 可執行回歸測試 | `python3 -m unittest discover -s tests` | 35/35 通過（Codex 既有 7＋Claude 新增 28：閘 17、容量守門 5、agent 定義與 hook 3、規格一致性 3） |
+| 真實 wp 檔新舊解析對照 | `~/worktrees/*/.claude/long-task/*/wp/*.md` 610 檔中舊版讀得到兩段的 80 檔 | 54 檔結果不同，全是舊版截斷（`.test.tsx`→`.test`、`.github/workflows/ai-triage.yml`→`triage.yml`、`evidence/`→`task/…`）被還原成完整路徑；舊有新無的項目只有 1 個，即刻意忽略的否定值 `遠端:不建標籤` |
+| hook | 12 個定義 × 14 組寫入／9 組唯讀 | 寫入（含 `git worktree add`、`git cherry-pick`）全 exit 2；唯讀（含在 `.worktrees` 路徑下跑測試）全 exit 0 |
+
+未實測：真實派出兩個並行 `lt-tech-worker-*` 到兩個隔離 worktree 再由主線整合的完整一輪（本輪只驗閘、hook 與文件）。
 
 已知限制：Browser pane 截圖只存在子代理的對話中，主線看不到；要讓主線目視，子代理需用 `scripts/screenshot.js` 落檔（agent 定義已寫明）。 套件安裝被 hook 一律擋下（含工作包授權的情況）——真需要安裝由主線自己做。Browser pane／playwright MCP／chrome-devtools MCP 各是 session 級共用瀏覽器，同一工具同時只能有一個介面代理。使用者自己的全域 PreToolUse hook 訊息（分支確認提示）會被子代理讀到並當作可疑注入回報，無害但會多一段文字。
