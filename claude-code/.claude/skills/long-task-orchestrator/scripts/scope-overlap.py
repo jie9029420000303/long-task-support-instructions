@@ -96,7 +96,8 @@ def _workspace_items(body):
 
 def scope_of(path):
     """回傳 (項目集合, 缺哪一段或欄位錯誤)；不合格回 (None, 說明)。"""
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
     m = SECTION.search(text)
     if not m:
         return None, "缺 [可修改範圍] 段"
