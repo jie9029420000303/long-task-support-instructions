@@ -321,6 +321,15 @@ class SharedSpecTests(unittest.TestCase):
         for number, text in common.items():
             self.assertEqual(text, adapter.get(number), f"case {number}")
 
+    def test_decisions_go_to_state_list_not_blocking_questions(self):
+        # 阻塞式提問會讓整條主線與 /goal 續跑一起停住（2026-09-25 實測停 10.5 小時），
+        # 所以技能必須明文禁止，狀態檔也必須有承接待決事項的地方。
+        skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("不呼叫 `AskUserQuestion`", skill)
+        template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        self.assertIn("## 待決清單", template)
+        self.assertEqual(0, sidecar_guard.main([str(SKILL / "templates" / "state.md")]))
+
     def test_skill_references_existing_scripts(self):
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         for script in ("scope-overlap.py", "sidecar-guard.py"):

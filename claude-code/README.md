@@ -134,4 +134,19 @@
 
 未實測：真實派出兩個並行 `lt-tech-worker-*` 到兩個隔離 worktree 再由主線整合的完整一輪（本輪只驗閘、hook 與文件）。
 
+
+## 待決事項不阻塞主線（2026-09-25）
+
+對應 SPEC 不變量 16 與 tests 19。起因是 2026-09-25 的 Gateway + Jev UAT 長任務：主線 5 次呼叫 `AskUserQuestion` 共問 11 題，提問等待時整條主線停住，00:40 那次等 74 分鐘、02:05 那次等 176 分鐘；02:05 那題被使用者按掉後，harness 回「STOP… wait」，回合以中斷結束，`/goal` 不觸發，又停 380 分鐘，合計約 10.5 小時。11 題中只有 4 題屬必須由使用者確認的動作（推送、雲端權限、付費建主機、刪主機）；另 4 題不該問（同一題問兩次、已有推薦選項、答案寫在部署手冊），3 題可先採預設。Claude Code 的落地方式：
+
+- SKILL 新增「待決事項」節：長任務期間主線不呼叫 `AskUserQuestion`；可逆事項採推薦選項並記「已採預設」；不可逆／付費／憑證只把該動作記 BLOCKED、其他工作照常；查得到的不問、答過的不重問；無可執行工作時才在回合結尾以文字一次列出。
+- 狀態檔範本新增「待決清單」節。
+
+| 驗證項 | 做法 | 結果 |
+|---|---|---|
+| 規則與範本存在 | `test_decisions_go_to_state_list_not_blocking_questions` | 通過；範本仍在容量守門 150 行內 |
+| 共用案例逐字一致 | `test_common_behavioral_cases_are_verbatim_in_claude_adapter` | 19/19 |
+
+未實測：新規則下的真實長任務一輪（需新開 session 載入後觀察 `AskUserQuestion` 呼叫數）。
+
 已知限制：Browser pane 截圖只存在子代理的對話中，主線看不到；要讓主線目視，子代理需用 `scripts/screenshot.js` 落檔（agent 定義已寫明）。 套件安裝被 hook 一律擋下（含工作包授權的情況）——真需要安裝由主線自己做。Browser pane／playwright MCP／chrome-devtools MCP 各是 session 級共用瀏覽器，同一工具同時只能有一個介面代理。使用者自己的全域 PreToolUse hook 訊息（分支確認提示）會被子代理讀到並當作可疑注入回報，無害但會多一段文字。
