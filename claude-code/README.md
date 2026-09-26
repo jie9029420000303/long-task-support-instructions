@@ -149,4 +149,25 @@
 
 未實測：新規則下的真實長任務一輪（需新開 session 載入後觀察 `AskUserQuestion` 呼叫數）。
 
+
+## 積極派工：可派即派、不留空席（2026-09-27，對應 Codex f4b7c78）
+
+對應 SPEC 不變量 17 與 tests 20；同時把不變量 16／tests 19 對齊 Codex 較新的待決分類（可逆事項限已確認範圍內；上層規則要求事前確認的重大內容／設計變更也只擋該動作；模糊回答採可逆解讀）。並行派工閘只回答「哪些包可以一起跑」，沒規定「現在要派多少」：主線可以只派一包看情況、或等整批回來才派下一批，席位空著，長任務退化成序列。Claude Code 的落地方式：
+
+- SKILL 新增「積極派工」節：開工、每則完成通知、主線做完一段自做工作後各跑一輪——算就緒包（狀態「待派」、依賴全 PASS、不在 BLOCKED）與可用席位（並行上限－本 session 在途子代理數）→ 就緒包連同在途包過 `scope-overlap.py` → 依「依賴它的後續包數」排序，在同一則回覆內以 `run_in_background: true` 派到席位用滿 → 少派必記理由 → 完成通知當輪收回、更新狀態檔、跑 `sidecar-guard.py` 後補派，不等同批 → 子代理在跑時主線做整合、來源查核、確定性操作、驗證與下一批準備 → 無事才結束回合等通知，不 sleep、不輪詢。
+- 席位用平台真實上限（2026-09-27 查 Claude Code 官方文件 sub-agents 頁）：同一 session 預設同時 20 個子代理，`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` 可改，ultracode 不限；超過時 Agent 直接回 `Concurrent subagent limit reached`、不排隊 → 不重試、記執行阻塞、不計品質錯誤。`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 會強制前景、無法逐包補派 → 狀態檔記停用並揭露差距。goal 頁：回合結束時仍有背景工作，`/goal` 跳過該回合評估，所以結束回合等通知不會讓 goal 提前判定。
+- 狀態範本：表頭加「並行上限／背景派工」；工作包狀態限定「待派／在途／PASS／FAIL／BLOCKED」；「並行批次」加「可用席位／就緒／派出」與「少派理由」欄（範本 71 行，仍在 150 行目標內）。
+- 行為案例：共同案例 20 逐字納入；Claude 專屬案例改號 21–24，新增 25（撞並行上限／背景派工停用）。
+- 測試可在兩種佈局跑：正式 repo（`tests/` 旁有 `claude-code/`、`SPEC.md`、`codex/`）與獨立技能副本（本機封裝 repo：`tests/` 旁直接是 `.claude/`）；跨 adapter 比對只在正式 repo 跑，獨立副本明確標 skipped。
+
+| 驗證項 | 做法 | 結果 |
+|---|---|---|
+| 可執行回歸測試（正式 repo） | `python3 -m unittest discover -s tests` | 45/45 通過（Codex 9＋Claude 36；本輪新增 7：積極派工 6、跨 adapter 一致 1） |
+| 獨立技能副本（本機封裝 repo） | 同一支 `tests/test_claude_long_task_orchestrator.py` | 36 項：33 通過、3 skipped（SPEC 三份一致、共同案例逐字、兩 adapter 積極派工一致——獨立副本沒有比對對象） |
+| 反向驗證（刻意改壞） | 在副本上逐一製造 7 種退化再跑全套 | 7/7 各被對應的一項測試抓到：前景派工、刪「少派理由」欄、Codex 退回只管「只派一包」、SPEC 副本漂移、Claude 專屬案例撞號、待決事項拿掉「已確認範圍內」、上限錯誤改成重試 |
+| SPEC 三份 | `shasum -a 256` | 三份相同 |
+| 狀態範本容量 | 兩支 `sidecar-guard.py` 各查兩份範本 | Claude 範本 71 行、Codex 範本 70 行，皆 exit 0 無提醒 |
+
+未實測：新規則下的真實長任務一輪（需新開 session 載入後，看同一則回覆內的 Agent 數是否等於狀態檔記的派出數、完成通知到補派之間有沒有空等）；撞 20 個上限與 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 的實際行為（本輪只依官方文件）。
+
 已知限制：Browser pane 截圖只存在子代理的對話中，主線看不到；要讓主線目視，子代理需用 `scripts/screenshot.js` 落檔（agent 定義已寫明）。 套件安裝被 hook 一律擋下（含工作包授權的情況）——真需要安裝由主線自己做。Browser pane／playwright MCP／chrome-devtools MCP 各是 session 級共用瀏覽器，同一工具同時只能有一個介面代理。使用者自己的全域 PreToolUse hook 訊息（分支確認提示）會被子代理讀到並當作可疑注入回報，無害但會多一段文字。

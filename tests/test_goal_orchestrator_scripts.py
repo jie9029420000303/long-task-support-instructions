@@ -143,5 +143,31 @@ class SidecarGuardTests(unittest.TestCase):
             self.assertEqual(1, sidecar_guard.main([str(self.write_state(directory, 181))]))
 
 
+class CodexDispatchContractTests(unittest.TestCase):
+    # ROOT already resolves both the canonical repository layout and the standalone
+    # installed/copy layout used by Codex workspaces.
+    SKILL = ROOT.parent
+
+    def test_pending_decision_does_not_pause_other_authorized_work(self):
+        # A single unresolved decision must not idle agents or stop integration work that is
+        # already authorized; the state file needs a durable place to carry that decision.
+        skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("待決事項（不阻塞主線）", skill)
+        self.assertIn("其餘已授權工作照常", skill)
+        template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        self.assertIn("## 待決清單", template)
+        self.assertEqual(0, sidecar_guard.main([str(self.SKILL / "templates" / "state.md")]))
+
+    def test_dispatcher_fills_slots_and_refills_without_waiting_for_batch(self):
+        # Merely permitting parallelism is insufficient: the dispatcher must keep available
+        # slots occupied and refill them as dependencies unlock, or long tasks stay serialized.
+        skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
+        execution = (self.SKILL / "references" / "execution.md").read_text(encoding="utf-8")
+        for marker in ("可派即派", "不留空席", "當輪立即補派"):
+            self.assertIn(marker, skill)
+        self.assertIn("完成通知一到", execution)
+        self.assertIn("不等原批全部完成", execution)
+
+
 if __name__ == "__main__":
     unittest.main()
