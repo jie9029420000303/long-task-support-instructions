@@ -1,11 +1,17 @@
-"""Claude Code adapter 回歸測試：並行派工閘、狀態檔容量守門、子代理定義與 hook、共用規格一致性。
+"""Claude Code adapter 回歸測試：並行派工閘、積極派工、狀態檔容量守門、子代理定義與 hook、共用規格一致性。
 
 每個測試都對應一個「為什麼重要」：假衝突會讓可並行的工作被迫排隊，漏判衝突會讓並行包互相踩壞
-工作區；缺 [工作區] 時猜測隔離狀態會讓舊工作包悄悄共用 worktree；狀態檔膨脹會讓主線壓縮後讀不起狀態。
+工作區；缺 [工作區] 時猜測隔離狀態會讓舊工作包悄悄共用 worktree；狀態檔膨脹會讓主線壓縮後讀不起狀態；
+席位空著或整批收齊才補派，長任務就退化成序列執行。
+
+可在兩種佈局執行：正式 repo（adapter 在 claude-code/.claude，旁邊有共用 SPEC.md、tests/behavioral-cases.md、
+codex/），或獨立技能副本（本機封裝 repo：tests/ 旁邊直接是 .claude/，與 ~/.claude 同形）。跨 adapter
+一致性只有正式 repo 才有比對對象，獨立副本會明確標為 skipped。
 """
 import hashlib
 import importlib.util
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,6 +22,12 @@ import yaml
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 ADAPTER = REPOSITORY / "claude-code" / ".claude"
+if not ADAPTER.is_dir():
+    ADAPTER = REPOSITORY / ".claude"
+CANONICAL = (REPOSITORY / "SPEC.md").is_file() and (REPOSITORY / "codex").is_dir()
+canonical_only = unittest.skipUnless(
+    CANONICAL, "獨立技能副本沒有共用 SPEC.md／tests/behavioral-cases.md／codex/，跨 adapter 一致性只在正式 repo 驗"
+)
 SKILL = ADAPTER / "skills" / "long-task-orchestrator"
 SCRIPTS = SKILL / "scripts"
 AGENTS = ADAPTER / "agents"
@@ -221,7 +233,7 @@ class SidecarGuardTests(unittest.TestCase):
         template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
         rows = (
             "| B-1 | B 技術 | lt-tech-worker-medium | — | abc1234 | /tmp/r.worktrees/B-1／B-1／abc1234 | PASS | 0 | medium | x |\n"
-            "| B-2 | B 技術 | lt-tech-worker-medium | — | abc1234 | /tmp/r.worktrees/B-2／B-2／abc1234 | 派工中 | 0 | medium | x |\n"
+            "| B-2 | B 技術 | lt-tech-worker-medium | — | abc1234 | /tmp/r.worktrees/B-2／B-2／abc1234 | 在途 | 0 | medium | x |\n"
         )
         filled = template.replace("|---|---|---|---|---|---|---|---|---|---|\n", "|---|---|---|---|---|---|---|---|---|---|\n" + rows, 1)
         self.assertNotEqual(template, filled, "範本的工作包表頭應有 10 欄（含工作區）")
@@ -297,7 +309,112 @@ class AgentDefinitionTests(unittest.TestCase):
             self.assertIn("[工作區] path", body)
 
 
+def section(text, heading):
+    """取出 `## <heading>` 開頭的那一節（到下一個 `## ` 為止），讓斷言只在該節內成立。"""
+    match = re.search(rf"^## {re.escape(heading)}.*?(?=^## |\Z)", text, re.S | re.M)
+    return match.group(0) if match else ""
+
+
+def table_header(text, heading):
+    return next((line for line in section(text, heading).splitlines() if line.startswith("|")), "")
+
+
+class EagerDispatchTests(unittest.TestCase):
+    """積極派工：可並行的工作要立刻占滿席位，任一包完成就補派；不然長任務會退化成一包一包跑。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+        self.template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def gate(self, *files, in_flight=()):
+        argv = list(files) + (["--in-flight", *in_flight] if in_flight else [])
+        return scope_overlap.main(argv)
+
+    def test_refill_checks_new_package_only_against_still_running_packages(self):
+        # 一完成就補派的前提：新解鎖的包只跟「仍在途」的包比對。已完成的包若還留在在途清單，
+        # 接續它同一檔案的後續包會被自己的前包擋下，只能等整批收齊——正是積極派工要消滅的空等。
+        done = write_wp(self.dir, "B-1.md", "src/auth.py", "無")
+        running = write_wp(self.dir, "B-2.md", "src/report.py", "無")
+        unlocked = write_wp(self.dir, "B-3.md", "src/auth.py\ntests/test_auth.py", "無")
+        self.assertEqual(0, self.gate(unlocked, in_flight=[running]))
+        self.assertEqual(1, self.gate(unlocked, in_flight=[done, running]))
+
+    def test_conflict_names_only_colliding_packages_so_the_rest_still_ship(self):
+        # 一個交集不該讓整批改成序列：閘要指名是哪幾包撞到，主線才能先把其餘互斥包派出去填席位，
+        # 只讓撞到的那包加依賴或隔離後再派。
+        a = write_wp(self.dir, "B-1.md", "src/a.py", "DB:canonical")
+        b = write_wp(self.dir, "B-2.md", "src/b.py", "無")
+        c = write_wp(self.dir, "B-3.md", "src/c.py", "DB:canonical")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "scope-overlap.py"), a, b, c], capture_output=True, text=True,
+        )
+        self.assertEqual(1, result.returncode, result.stdout)
+        hits = "\n".join(line for line in result.stdout.splitlines() if line.strip().startswith("- "))
+        self.assertIn("B-1.md", hits)
+        self.assertIn("B-3.md", hits)
+        self.assertNotIn("B-2.md", hits)
+        self.assertEqual(0, self.gate(a, b))
+        self.assertEqual(1, self.gate(c, in_flight=[a, b]))
+
+    def test_skill_fills_every_free_slot_in_background(self):
+        # 只「允許」並行不夠：主線若每輪只派一包、或用前景 Agent 等整批結果回來，席位就一直空著。
+        # 等待只能是結束回合等完成通知；輪詢只會空轉，也不會比通知更早補派。
+        eager = section(self.skill, "積極派工")
+        self.assertTrue(eager, "SKILL.md 缺「積極派工」節")
+        for marker in (
+            "可派即派", "不留空席", "run_in_background: true", "同一則回覆內",
+            "不等同批其他包收齊", "結束回合等完成通知", "不為填席位切出",
+        ):
+            self.assertIn(marker, eager)
+
+    def test_platform_slot_limit_is_used_and_overflow_is_not_retried(self):
+        # 席位數要用平台真實上限，否則不是少派就是撞牆。Claude Code 超過上限時 Agent 呼叫直接失敗、不排隊；
+        # 重試會空轉，記成品質錯誤會錯誤升檔、甚至冒充錯 3 讓主線接手實作。
+        eager = section(self.skill, "積極派工")
+        for marker in (
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", "Concurrent subagent limit reached", "不重試",
+            "不計品質錯誤", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        ):
+            self.assertIn(marker, eager)
+
+    def test_state_template_shows_slots_ready_set_and_underfill_reason(self):
+        # 壓縮後主線只信狀態檔：看不出上限、當輪席位、派了幾包與為何少派，就分不出「刻意依序」與「漏派」；
+        # 工作包狀態沒有「待派／在途」，下一輪也算不出就緒包與可用席位。
+        head = self.template.split("\n## ", 1)[0]
+        self.assertIn("並行上限", head)
+        self.assertIn("背景派工", head)
+        batch = table_header(self.template, "並行批次")
+        self.assertIn("可用席位／就緒／派出", batch)
+        self.assertIn("少派理由", batch)
+        work = table_header(self.template, "工作包")
+        for status in ("待派", "在途", "PASS", "FAIL", "BLOCKED"):
+            self.assertIn(status, work)
+
+    def test_template_leaves_room_for_guard_before_every_refill(self):
+        # 積極派工在每次補派前都跑 sidecar-guard；範本本身若已逼近 150 行，實跑很快撞 180 行硬上限而停派。
+        # 也確認新增欄位後 guard 仍數得到並行批次列（封存提示靠它）。
+        start = self.template.index("## 並行批次")
+        separator = self.template.index("|---", start)
+        insert_at = self.template.index("\n", separator) + 1
+        row = "| 1 | B-1、B-2 | 20／2／2 | exit 0，無 | — | 並行派出 | 2026-09-27 10:00 |\n"
+        filled = self.template[:insert_at] + row + self.template[insert_at:]
+        path = Path(self.dir) / "state.md"
+        path.write_text(filled, encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "sidecar-guard.py"), str(path)], capture_output=True, text=True,
+        )
+        self.assertEqual(0, result.returncode)
+        self.assertIn("並行批次 1 列", result.stdout)
+        self.assertNotIn("提醒", result.stdout)
+
+
 class SharedSpecTests(unittest.TestCase):
+    @canonical_only
     def test_spec_copies_match_root_spec(self):
         spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
         for copy in (
@@ -306,26 +423,49 @@ class SharedSpecTests(unittest.TestCase):
         ):
             self.assertEqual(spec, copy.read_text(encoding="utf-8"), copy)
 
+    @canonical_only
     def test_common_behavioral_cases_are_verbatim_in_claude_adapter(self):
         common = {}
         for line in (REPOSITORY / "tests" / "behavioral-cases.md").read_text(encoding="utf-8").splitlines():
             number, _, text = line.partition(". ")
             if number.isdigit():
                 common[int(number)] = text
-        adapter = {}
+        adapter, numbers = {}, []
         for line in (SKILL / "references" / "behavioral-cases.md").read_text(encoding="utf-8").splitlines():
             cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
             if len(cells) == 3 and cells[0].isdigit():
                 adapter[int(cells[0])] = cells[1]
-        self.assertGreaterEqual(len(common), 18)
+                numbers.append(int(cells[0]))
+        # Claude 專屬案例若沿用共同案例的編號，會把共同案例蓋掉，新增的共同案例就沒人驗。
+        self.assertEqual(len(numbers), len(set(numbers)), f"案例編號重複：{numbers}")
+        self.assertGreaterEqual(len(common), 20)
         for number, text in common.items():
             self.assertEqual(text, adapter.get(number), f"case {number}")
+
+    @canonical_only
+    def test_both_adapters_carry_the_shared_eager_dispatch_rule(self):
+        # 積極派工是共同語意：只有一個平台做到，另一個平台的長任務仍會一包一包跑；
+        # 少派必記理由也要兩邊都有，否則該平台的空席位無從稽核。
+        spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
+        self.assertIn("17. 積極派工（可派即派、不留空席）", spec)
+        codex = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator"
+        for skill_dir in (SKILL, codex):
+            text = "".join(
+                (skill_dir / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md")
+            )
+            for marker in ("可派即派", "不留空席", "只派一包", "少於可用席位"):
+                self.assertIn(marker, text, f"{skill_dir.name}: {marker}")
 
     def test_decisions_go_to_state_list_not_blocking_questions(self):
         # 阻塞式提問會讓整條主線與 /goal 續跑一起停住（2026-09-25 實測停 10.5 小時），
         # 所以技能必須明文禁止，狀態檔也必須有承接待決事項的地方。
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("不呼叫 `AskUserQuestion`", skill)
+        # 「不阻塞」不等於主線可自行拍板：只有已確認範圍內的可逆事項能先採預設；上層規則要求事前確認的
+        # 重大變更只 BLOCKED 該動作；模糊回答只能採可逆解讀，否則不問就等於越權。
+        pending = section(skill, "待決事項")
+        for marker in ("已確認範圍內", "上層規則", "可逆解讀", "其餘已授權工作照常"):
+            self.assertIn(marker, pending)
         template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
         self.assertIn("## 待決清單", template)
         self.assertEqual(0, sidecar_guard.main([str(SKILL / "templates" / "state.md")]))
