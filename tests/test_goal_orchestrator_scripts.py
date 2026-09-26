@@ -144,7 +144,9 @@ class SidecarGuardTests(unittest.TestCase):
 
 
 class CodexDispatchContractTests(unittest.TestCase):
-    SKILL = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator"
+    # ROOT already resolves both the canonical repository layout and the standalone
+    # installed/copy layout used by Codex workspaces.
+    SKILL = ROOT.parent
 
     def test_pending_decision_does_not_pause_other_authorized_work(self):
         # A single unresolved decision must not idle agents or stop integration work that is
