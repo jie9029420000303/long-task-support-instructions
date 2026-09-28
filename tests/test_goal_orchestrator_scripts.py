@@ -148,6 +148,23 @@ class CodexDispatchContractTests(unittest.TestCase):
     # installed/copy layout used by Codex workspaces.
     SKILL = ROOT.parent
 
+    def test_new_goal_updates_main_model_without_replacing_accepted_workers(self):
+        # Terra research and coding packages passed prior acceptance; without a matched
+        # speed/cost comparison, a new main model must not force worker migration.
+        skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
+        template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        self.assertIn("主線：GPT-6 Sol；High", skill)
+        self.assertIn("B 技術實作、C 研究子代理：GPT-5.6 Terra；Medium", skill)
+        self.assertIn("介面子代理：具備所需瀏覽器", skill)
+        self.assertIn("Goal 續跑／恢復沿用已鎖定模型", skill)
+        for row in (
+            "| 主線 | GPT-6 Sol | High |",
+            "| B 技術實作 | GPT-5.6 Terra | Medium |",
+            "| C 研究 | GPT-5.6 Terra | Medium |",
+            "| 介面操作 | | Low |",
+        ):
+            self.assertIn(row, template)
+
     def test_pending_decision_does_not_pause_other_authorized_work(self):
         # A single unresolved decision must not idle agents or stop integration work that is
         # already authorized; the state file needs a durable place to carry that decision.
