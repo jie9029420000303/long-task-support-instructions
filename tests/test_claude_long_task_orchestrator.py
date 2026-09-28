@@ -413,6 +413,131 @@ class EagerDispatchTests(unittest.TestCase):
         self.assertNotIn("提醒", result.stdout)
 
 
+def acceptance_state(rows, verdict, approvals=(), padding=0):
+    """寫一份含驗收逐條表的狀態檔內容；rows＝[(條文, 狀態, 核准依據)]。padding 用來撐大行數。"""
+    text = "# 長任務狀態：t\n\n## 核准變更\n| 日期 | 變更 | 核准者 |\n|---|---|---|\n"
+    text += "".join(f"| {a} |\n" for a in approvals)
+    text += ("\n## 驗收標準（逐條）\n| # | 條文（原文） | 狀態（PASS／未達／部分／待決／核准不做） | 證據 | 核准依據 |\n"
+             "|---|---|---|---|---|\n")
+    text += "".join(f"| {i} | {t} | {st} | evidence/x.png＋abc1234 | {ok} |\n" for i, (t, st, ok) in enumerate(rows, 1))
+    text += "\n" + "填充\n" * padding + f"\n## 最終判定\n{verdict}\n"
+    return text
+
+
+def run_script(script, text, directory):
+    path = Path(directory) / "state.md"
+    path.write_text(text, encoding="utf-8")
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    result = subprocess.run([sys.executable, str(script), str(path)], capture_output=True, text=True)
+    assert before == hashlib.sha256(path.read_bytes()).hexdigest(), "sidecar-guard 只能報告，不得改寫狀態檔"
+    return result.returncode, result.stdout
+
+
+# 2026-09-28 稽核：主線看得到條文、甚至自記「未達」仍宣稱完成（online-e2e 25 項未過報完成、capture-defects
+# 部分 PASS→全數通過、online-check「PASS（附條件）」）。這些情境是守門工具必須擋下的；誠實的進度回報則絕不能誤擋，
+# 否則主線會被迫停住（等於另一種卡死）。
+GATE_CASES = [
+    ("全部 PASS 才宣稱完成", [("A", "PASS", ""), ("B", "PASS", "")], "PASS（候選版 abc1234）", 0),
+    ("有部分仍宣稱完成", [("A", "PASS", ""), ("B", "部分", "")], "PASS（候選版 abc1234）", 3),
+    ("有待決仍說全部通過", [("A", "PASS", ""), ("B", "待決", "")], "九條全部通過", 3),
+    ("條目寫附條件", [("A", "PASS（附條件）", "")], "PASS", 3),
+    ("最終判定寫附條件", [("A", "PASS", "")], "PASS（附條件）", 3),
+    ("核准不做缺使用者原話", [("A", "PASS", ""), ("B", "核准不做", "")], "完成", 3),
+    ("核准不做有原話與時間", [("A", "PASS", ""), ("B", "核准不做", "Jay 09-27 01:11「這條不修」")], "完成", 0),
+    ("誠實回報未完成", [("A", "PASS", ""), ("B", "未達", "")], "未完成（1／2，剩 #2）", 0),
+    ("誠實判 FAIL", [("A", "PASS", ""), ("B", "未達", "")], "FAIL（#2 未達；其餘已完成）", 0),
+    ("範本佔位", [("A", "未達", "")], "<未完成／PASS／FAIL>", 0),
+]
+
+
+class AcceptanceGateTests(unittest.TestCase):
+    """放行紀律：判定只能照驗收逐條，宣稱完成而逐條不符時 exit 3，交主線修正、不等人。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.guard = SCRIPTS / "sidecar-guard.py"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_completion_gate_cases(self):
+        for name, rows, verdict, expected in GATE_CASES:
+            code, out = run_script(self.guard, acceptance_state(rows, verdict), self.dir)
+            self.assertEqual(expected, code, f"{name}\n{out}")
+
+    def test_mismatch_names_the_open_criteria(self):
+        # 只說「不一致」不夠：主線要知道是哪幾條，才能改判定或補證據。
+        code, out = run_script(self.guard, acceptance_state(
+            [("A", "PASS", ""), ("B", "部分", ""), ("C", "待決", "")], "PASS"), self.dir)
+        self.assertEqual(3, code)
+        self.assertIn("#2", out)
+        self.assertIn("#3", out)
+        self.assertNotIn("#1［", out)
+
+    def test_every_run_reprints_criteria_and_latest_approval(self):
+        # 壓縮後狀態檔 15 次只附回 2 次；每次派工前／判定後跑的守門工具把條文原文與最新核准重印，主線就不必靠記憶。
+        rows = [("線上 80 品批次跑完 80/80", "PASS", ""), ("首重通路規格未驗 0", "未達", "")]
+        code, out = run_script(self.guard, acceptance_state(
+            rows, "未完成", approvals=["2026-09-27 | 重新界定目標 | Jay"]), self.dir)
+        self.assertEqual(0, code)
+        for text, _, _ in rows:
+            self.assertIn(text, out)
+        self.assertIn("重新界定目標", out)
+
+    def test_legacy_numbered_criteria_are_printed_but_not_gated(self):
+        # 進行中的舊任務沒有狀態欄；守門只能印出條文提醒改格式，不能因為讀不懂而擋住它們。
+        text = "## 驗收標準\n1. 舊格式條文甲\n2. 舊格式條文乙\n\n## 最終判定\nPASS\n"
+        code, out = run_script(self.guard, text, self.dir)
+        self.assertEqual(0, code)
+        self.assertIn("舊格式條文甲", out)
+        self.assertIn("舊格式", out)
+
+    def test_capacity_block_wins_but_both_problems_are_reported(self):
+        # 超過 180 行本來就不得派工（exit 1）；同時存在的完成宣稱不一致也要印出來，否則封存後才發現又得多跑一輪。
+        code, out = run_script(self.guard, acceptance_state([("A", "部分", "")], "PASS", padding=200), self.dir)
+        self.assertEqual(1, code)
+        self.assertIn("不得開新工作包", out)
+        self.assertIn("#1［部分］", out)
+
+    def test_template_has_gateable_criteria_table_and_prerequisite_category(self):
+        template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        header = table_header(template, "驗收標準")
+        for column in ("條文", "狀態", "證據", "核准"):
+            self.assertIn(column, header)
+        self.assertIn("前置", table_header(template, "待決清單"))
+
+
+class DisciplineContractTests(unittest.TestCase):
+    """技能文字必須寫明放行紀律、前置盤點、外部等待喚醒與提問紀律——這四項是 2026-09-28 稽核的根因修正。"""
+
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_release_discipline_forbids_conditional_pass_and_unapproved_criteria_edits(self):
+        # 已查證：主線自寫「未達」仍判 PASS（附條件）、自改 AC2 條文；/goal 評估只看主線說法擋不住。
+        body = self.skill[self.skill.index("**放行紀律**"):]
+        for marker in ("附條件 PASS", "核准變更", "使用者原話與時間", "exit 3", "不停下來等人"):
+            self.assertIn(marker, body)
+
+    def test_launch_lists_prerequisites_once_and_keeps_working(self):
+        # 16 個任務有約 100 小時花在執行到一半才回頭要權限、帳號、決定。
+        start = section(self.skill, "啟動與續接")
+        for marker in ("前置盤點", "一次列給使用者", "不等回答"):
+            self.assertIn(marker, start)
+
+    def test_external_waits_arm_a_wakeup_before_ending_the_turn(self):
+        # CI／主機排程不會通知主線；沒掛監看就結束回合，實測 11 小時沒動靜直到使用者回來。
+        eager = section(self.skill, "積極派工")
+        for marker in ("run_in_background", "Monitor", "不得只說"):
+            self.assertIn(marker, eager)
+
+    def test_question_discipline_limits_what_may_be_asked(self):
+        # 2026-09-27：17 題中 13 題是 /goal 已授權且有推薦的修正選擇，1 題使用者前一天已定調。
+        pending = section(self.skill, "待決事項")
+        for marker in ("**提問紀律**", "要不要修（推薦修）", "集中成一次", "先查待決清單", "單獨看懂"):
+            self.assertIn(marker, pending)
+
+
 class SharedSpecTests(unittest.TestCase):
     @canonical_only
     def test_spec_copies_match_root_spec(self):
@@ -438,7 +563,7 @@ class SharedSpecTests(unittest.TestCase):
                 numbers.append(int(cells[0]))
         # Claude 專屬案例若沿用共同案例的編號，會把共同案例蓋掉，新增的共同案例就沒人驗。
         self.assertEqual(len(numbers), len(set(numbers)), f"案例編號重複：{numbers}")
-        self.assertGreaterEqual(len(common), 20)
+        self.assertGreaterEqual(len(common), 25)
         for number, text in common.items():
             self.assertEqual(text, adapter.get(number), f"case {number}")
 
@@ -454,6 +579,29 @@ class SharedSpecTests(unittest.TestCase):
                 (skill_dir / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md")
             )
             for marker in ("可派即派", "不留空席", "只派一包", "少於可用席位"):
+                self.assertIn(marker, text, f"{skill_dir.name}: {marker}")
+
+    @canonical_only
+    def test_both_guards_enforce_the_same_completion_gate(self):
+        # 放行紀律是共同語意：兩個平台的守門工具對同一份狀態檔必須給出同一個結論，否則同一個任務換平台就換標準。
+        codex_guard = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator" / "scripts" / "sidecar-guard.py"
+        with tempfile.TemporaryDirectory() as directory:
+            for name, rows, verdict, expected in GATE_CASES:
+                text = acceptance_state(rows, verdict)
+                claude_code, _ = run_script(SCRIPTS / "sidecar-guard.py", text, directory)
+                codex_code, _ = run_script(codex_guard, text, directory)
+                self.assertEqual((expected, expected), (claude_code, codex_code), name)
+
+    @canonical_only
+    def test_spec_and_both_adapters_carry_release_prerequisite_wait_and_question_rules(self):
+        spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
+        for marker in ("18. 驗收逐條與放行紀律", "19. 驗收條文只能依使用者明確授權變更", "20. 開工前置盤點", "21. 外部等待須有喚醒",
+                       "使用者要求逐項確認待決事項時"):
+            self.assertIn(marker, spec)
+        codex = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator"
+        for skill_dir in (SKILL, codex):
+            text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            for marker in ("**放行紀律**", "**提問紀律**", "附條件 PASS", "前置", "監看", "exit 3"):
                 self.assertIn(marker, text, f"{skill_dir.name}: {marker}")
 
     def test_decisions_go_to_state_list_not_blocking_questions(self):

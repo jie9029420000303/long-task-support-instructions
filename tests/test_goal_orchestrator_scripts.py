@@ -169,5 +169,45 @@ class CodexDispatchContractTests(unittest.TestCase):
         self.assertIn("不等原批全部完成", execution)
 
 
+def acceptance_sidecar(rows, verdict):
+    """rows＝[(條文, 狀態, 核准依據)]；產生含驗收逐條表與最終判定的 sidecar。"""
+    text = ("## 驗收標準（逐條）\n| # | 條文（原文） | 狀態（PASS／未達／部分／待決／核准不做） | 證據 | 核准依據 |\n"
+            "|---|---|---|---|---|\n")
+    text += "".join(f"| {i} | {t} | {st} | evidence | {ok} |\n" for i, (t, st, ok) in enumerate(rows, 1))
+    return text + f"\n## 最終判定\n{verdict}\n"
+
+
+class CodexAcceptanceGateTests(unittest.TestCase):
+    # 已查證的長任務事故：主線看得到條文、甚至自記「未達」仍宣稱完成或寫「PASS（附條件）」。
+    # 守門工具要把這種宣稱擋回主線（exit 3，不等使用者），同時絕不能誤擋誠實的「未完成」進度回報。
+    SKILL = ROOT.parent
+
+    def run_guard(self, text):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.md"
+            path.write_text(text, encoding="utf-8")
+            return sidecar_guard.main([str(path)])
+
+    def test_completion_claim_must_match_every_criterion(self):
+        self.assertEqual(0, self.run_guard(acceptance_sidecar([("A", "PASS", ""), ("B", "PASS", "")], "PASS")))
+        self.assertEqual(3, self.run_guard(acceptance_sidecar([("A", "PASS", ""), ("B", "部分", "")], "PASS")))
+        self.assertEqual(3, self.run_guard(acceptance_sidecar([("A", "PASS", "")], "PASS（附條件）")))
+        self.assertEqual(3, self.run_guard(acceptance_sidecar([("A", "核准不做", "")], "完成")))
+        self.assertEqual(0, self.run_guard(acceptance_sidecar([("A", "核准不做", "使用者 09-27「不修」")], "完成")))
+
+    def test_honest_progress_report_is_never_blocked(self):
+        self.assertEqual(0, self.run_guard(acceptance_sidecar([("A", "PASS", ""), ("B", "未達", "")], "未完成（剩 #2）")))
+        self.assertEqual(0, self.run_guard(acceptance_sidecar([("A", "PASS", ""), ("B", "未達", "")], "FAIL（#2 未達；其餘已完成）")))
+
+    def test_template_keeps_gateable_table_and_skill_states_the_rules(self):
+        template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        self.assertIn("| # | 條文", template)
+        self.assertIn("前置", template)
+        self.assertEqual(0, sidecar_guard.main([str(self.SKILL / "templates" / "state.md")]))
+        skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
+        for marker in ("**放行紀律**", "附條件 PASS", "**提問紀律**", "前置", "監看"):
+            self.assertIn(marker, skill)
+
+
 if __name__ == "__main__":
     unittest.main()
