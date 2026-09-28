@@ -537,6 +537,16 @@ class DisciplineContractTests(unittest.TestCase):
         for marker in ("**提問紀律**", "要不要修（推薦修）", "集中成一次", "先查待決清單", "單獨看懂"):
             self.assertIn(marker, pending)
 
+    def test_release_approval_is_scoped_and_persists_across_resume(self):
+        # The old UAT waited again at release even after its work was prepared.
+        # Preserve approval scope so the agent acts when covered and stops only
+        # the particular operation when the target or scope changes.
+        template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        for marker in ("發布授權核對", "使用者原話與時間", "候選提交", "直接執行、不重問", "範圍或目標改變", "不在續接回合重提"):
+            self.assertIn(marker, self.skill)
+        for marker in ("## 發布授權", "來源→目標分支／環境", "允許的候選變更範圍與放行條件", "實際候選提交與核對結果"):
+            self.assertIn(marker, template)
+
 
 class SharedSpecTests(unittest.TestCase):
     @canonical_only
