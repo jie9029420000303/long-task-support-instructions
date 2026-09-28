@@ -175,6 +175,16 @@ class CodexDispatchContractTests(unittest.TestCase):
         self.assertIn("## 待決清單", template)
         self.assertEqual(0, sidecar_guard.main([str(self.SKILL / "templates" / "state.md")]))
 
+    def test_release_approval_is_scoped_and_persists_across_resume(self):
+        # A tested candidate with approval for the same actions and targets must not
+        # ask again; an added action or changed target still needs authorization.
+        skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
+        template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        for marker in ("發布授權核對", "使用者原話與時間", "候選提交", "直接執行、不重問", "範圍或目標改變", "不在續接回合重提"):
+            self.assertIn(marker, skill)
+        for marker in ("## 發布授權", "來源→目標分支／環境", "允許的候選變更範圍與放行條件", "實際候選提交與核對結果"):
+            self.assertIn(marker, template)
+
     def test_dispatcher_fills_slots_and_refills_without_waiting_for_batch(self):
         # Merely permitting parallelism is insufficient: the dispatcher must keep available
         # slots occupied and refill them as dependencies unlock, or long tasks stay serialized.
