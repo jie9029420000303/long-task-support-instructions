@@ -1,0 +1,4 @@
+{"type":"assistant","uuid":"c041fcdd-a2d6-48aa-a5db-2839b16203e7","message":{"id":"msg_011CfX97ibdMFL9wV1DqiDcs","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"[redacted]"}]}}
+{"type":"assistant","uuid":"42079699-079a-4eea-8d3b-22c1b96aaf73","message":{"id":"msg_011CfX97ibdMFL9wV1DqiDcs","stop_reason":"end_turn","content":[{"type":"text","text":"Work continues.\nLONG_TASK_EVENT {\"kind\":\"question\"}"}]}}
+{"type":"assistant","uuid":"55ce75c0-1b26-41e6-afc7-4c1cca2f916f","message":{"id":"msg_011CfX9Uv3oMoQpvXP38mv54","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"[redacted]"}]}}
+{"type":"assistant","uuid":"5ad8c754-fc83-4ee7-ad8c-94a0950745d7","message":{"id":"msg_011CfX9Uv3oMoQpvXP38mv54","stop_reason":"end_turn","content":[{"type":"text","text":"Work continues.\nLONG_TASK_EVENT {\"kind\":\"question\"}"}]}}
