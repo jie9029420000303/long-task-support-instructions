@@ -22,12 +22,12 @@ function delivered(file,marker){
   }
   return false;
 }
-function call(run,tools,prompt){
+function call(run,mode,tools,prompt){
   const dir=path.join(run,'relay');fs.mkdirSync(dir,{recursive:true});
   const env={...process.env};delete env.CLAUDECODE;
   const result=spawnSync(process.env.CLAUDE_CLI_PATH||'claude',
     ['-p','--model','haiku','--safe-mode','--strict-mcp-config','--no-session-persistence',
-      '--tools',tools,'--permission-mode','auto','--output-format','json',prompt],
+      '--tools',tools,'--permission-mode',mode,'--output-format','json',prompt],
     {cwd:dir,env,encoding:'utf8',timeout:60000,maxBuffer:1024*1024});
   if(result.error||result.status!==0)throw Error('Desktop wake relay failed: '+(result.error?.message||result.stderr||result.stdout).slice(0,300));
   let output;try{output=JSON.parse(result.stdout);}catch{throw Error('Desktop wake relay returned invalid JSON');}
@@ -42,13 +42,14 @@ async function wake(run,binding,state,event,checkpoint){
   if(state.wake?.eventId===event.id&&state.wake.attemptedAt)throw Error('Desktop wake delivery uncertain; reconcile '+marker+' before retry');
   const title=titleOf(binding.supervisorLog);
   if(!title)throw Error('Supervisor desktop title is missing');
-  const list=call(run,'ListAgents','Call ListAgents once and reply with its complete output verbatim, nothing else.');
+  if(!binding.supervisorMode)throw Error('Supervisor permission mode missing from binding; migrate the run before desktop wake');
+  const list=call(run,binding.supervisorMode,'ListAgents','Call ListAgents once and reply with its complete output verbatim, nothing else.');
   const peers=[...list.matchAll(/^\s+(.+?) \[([0-9a-f]+)\]\s+·/gm)].filter(match=>match[1].trim()===title);
   if(peers.length!==1)throw Error('Expected one supervisor desktop peer titled '+title+'; found '+peers.length);
   const to=title+' ['+peers[0][2]+']';
   const message=marker+'\n長任務執行對話有待處理事件。請讀 '+path.join(run,'daemon-state.json')+' 的 pending，依鎖定契約處理事件 '+event.id+'，完成判定後重新掛上監看。同一事件只處理一次。';
   state.wake={eventId:event.id,marker,attemptedAt:new Date().toISOString()};checkpoint();
-  const response=call(run,'SendMessage',[
+  const response=call(run,binding.supervisorMode,'SendMessage',[
     'Call SendMessage exactly once. Set to and message to the exact text between the delimiters. Reply with the tool result only.',
     '<<<TO',to,'TO>>>','<<<MESSAGE',message,'MESSAGE>>>'
   ].join('\n'));

@@ -118,7 +118,7 @@ test('Claude binds two verified desktop chats and does not claim startup early',
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:executorId,
     entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker+' QA prompt'}]}})+'\n');
   fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' Use long-task-orchestrator for this isolated QA.',contract:f.contract}));
   const script=versions[1][1]+'/supervise.cjs';
   const env={...process.env,CLAUDE_CONFIG_DIR:config,CLAUDE_SESSION_ID:supervisorId};
@@ -142,7 +142,7 @@ test('Claude auto tool session resolves back to the visible supervisor session',
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:executorId,
     entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}})+'\n');
   fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId:inner,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' QA executor prompt; supervisor '+inner,contract:f.contract}));
   const script=versions[1][1]+'/supervise.cjs';
   const env={...process.env,CLAUDE_CONFIG_DIR:config,CLAUDE_SESSION_ID:inner};
@@ -162,7 +162,7 @@ test('Claude rejects a CLI-created executor as a desktop mainline',()=>{
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:executorId,
     entrypoint:'cli',message:{content:[{type:'text',text:marker}]}})+'\n');
   fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' QA',contract:f.contract}));
   assert.throws(()=>execFileSync(process.execPath,[versions[1][1]+'/supervise.cjs','init',run,input],
     {env:{...process.env,CLAUDE_CONFIG_DIR:config,CLAUDE_SESSION_ID:supervisorId},stdio:'pipe'}),/Command failed/);
