@@ -44,12 +44,18 @@ function eventOf(text,id){
   const line=text.split('\n').map(value=>value.trim()).filter(value=>value.startsWith('LONG_TASK_EVENT ')).pop();
   let value={kind:'unmarked_final'};
   if(line){try{value=JSON.parse(line.slice('LONG_TASK_EVENT '.length));}catch{value={kind:'protocol_error'};}}
-  if(!value||!['progress','question','blocked','submission'].includes(value.kind))value={kind:line?'protocol_error':'unmarked_final'};
-  if(value.kind==='progress'&&!(typeof value.nextAction==='string'&&value.nextAction.trim()))value={kind:'protocol_error'};
+  if(!value||!['progress','question','blocked','waiting','submission'].includes(value.kind))value={kind:line?'protocol_error':'unmarked_final'};
+  if(['progress','waiting'].includes(value.kind)&&!(typeof value.nextAction==='string'&&value.nextAction.trim()))value={kind:'protocol_error'};
   if(value.kind==='submission'&&(!/^sha256:[a-f0-9]{64}$/.test(value.revision||'')||typeof value.manifest!=='string'))value={kind:'protocol_error'};
   return {id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
     nextAction:value.nextAction||null,waitMinutes:Number.isFinite(value.waitMinutes)?value.waitMinutes:null,
     text:text.slice(-8000),at:now()};
+}
+function waitingHasBlocker(text){
+  // These phrases identify the observed permission block and explicit user-decision requests.
+  // Keep the entire reply in the event so the supervisor decides, not this keyword check.
+  const body=text.split('\n').filter(line=>!line.trim().startsWith('LONG_TASK_EVENT ')).join('\n');
+  return /(?:權限.{0,16}(?:審查|拒絕|阻擋)|(?:審查|核准).{0,16}(?:拒絕|阻擋)|(?:merge|push|合併|發版).{0,40}(?:被擋|遭擋|阻塞|拒絕)|(?:需要|等待|等).{0,20}(?:Jay|使用者).{0,20}(?:決定|核准|授權)|(?:待決|需要授權|授權或處置))/i.test(body);
 }
 async function waitChange(){
   await new Promise(resolve=>{
@@ -84,12 +90,20 @@ async function watch(){
       if(row.type!=='assistant'||!row.message)continue;
       if(!row.uuid || row.isSidechain)continue;
       const own=(row.message.content||[]).filter(block=>block?.type==='text').map(block=>block.text);
-      if(state.progressWait){state.progressWait=null;checkpoint();}
+      if(state.progressWait && row.message.stop_reason==='end_turn'){state.progressWait=null;checkpoint();}
       if(own.length)state.turnText.push(...own);
       if(row.message.stop_reason!=='end_turn'||!state.turnText.join('').trim())continue;
       const event=eventOf(state.turnText.join('\n'),row.uuid);
       state.turnText=[];
       if(state.seen.includes(event.id))continue;
+      if(event.kind==='waiting'){
+        if(waitingHasBlocker(event.text))event.kind='blocked';
+        else{
+          const minutes=event.waitMinutes;
+          if(!(minutes>0&&minutes<=120))event.kind='protocol_error';
+          else{state.progressWait={event,deadline:Date.now()+minutes*60000};state.seen.push(event.id);checkpoint();continue;}
+        }
+      }
       if(event.kind==='progress'){
         state.repeatedProgress=state.lastProgressAction===event.nextAction?(state.repeatedProgress||0)+1:1;
         state.lastProgressAction=event.nextAction;

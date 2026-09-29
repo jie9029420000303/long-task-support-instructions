@@ -108,3 +108,36 @@ test('real split-turn rows produce one event per reply and delivery works withou
     assert.equal(state.pending.kind,'question');
   }finally{child?.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('a waiting reply with a merge approval block wakes the supervisor immediately',async()=>{
+  // Redacted structure of the Rillet executor reply that was silently treated as background waiting.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'rillet-waiting-block-'));
+  const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});
+  const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
+  const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
+  const executorLog=path.join(project,executorId+'.jsonl');
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
+  const run=path.join(root,'run'),input=path.join(root,'input.json');
+  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
+    executorPrompt:marker+' test',contract:{goal:'Catch actionable waiting reply',authorization:'Isolated QA',
+      criteria:[{id:'A1',requirement:'Review blocked merge',source:'source.md:1',verify:'Replay transcript'}],
+      sources:[{path:source,sha256:sha(source)}]}}));
+  const env={...process.env,CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
+  const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
+  try{
+    await until(()=>fs.existsSync(path.join(run,'native-ready.json')));
+    const id=crypto.randomUUID(),messageId='msg-rillet-block';
+    line(executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:messageId,
+      content:[{type:'thinking',thinking:'[redacted]'}],stop_reason:'end_turn'}});
+    line(executorLog,{type:'assistant',uuid:id,message:{id:messageId,stop_reason:'end_turn',content:[{type:'text',text:
+      '需要 Jay 決定的阻塞（最急）：PR #26 合併 develop 被自動化權限審查擋下。背景子代理仍在跑。\n'+
+      'LONG_TASK_EVENT {"kind":"waiting","nextAction":"等 WP-W1 回報；同時等 Jay 對 P-3 合併發版的授權"}'}]}});
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id===id);
+    const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(state.pending.kind,'blocked');
+    assert.match(state.pending.text,/權限審查擋下/);
+  }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+});
