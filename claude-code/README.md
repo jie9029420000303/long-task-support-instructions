@@ -32,8 +32,8 @@
 
 ## 使用
 
-1. 先在原對話研究並定案，再說「依剛才定案內容啟動長任務監督」。原對話保留作監督入口；技能會準備 prompt，並在原回合結束後建立另一個執行 session。
-2. 執行 session 使用 `long-task-orchestrator`，建立 `.claude/long-task/<日期>-<slug>/state.md`，完成工作並送候選版給監督。監督退件時沿同一 session 修正；監督逐條接受才算整體完成。背景監看只在事件到來時喚醒模型。
+1. 先在 Claude Desktop Code 原對話研究並定案，再說「依剛才定案內容啟動長任務監督」。原對話保留作監督入口；技能準備帶唯一標記的執行 prompt。沒有桌面原生建對話工具時，在 App 新開 Code 對話並送出該 prompt，保留完整可見的執行紀錄和隨時插話能力。不得用背景 CLI session 當執行主線。
+2. 執行對話使用 `long-task-orchestrator`，建立 `.claude/long-task/<日期>-<slug>/state.md`，完成工作並送候選版給監督。監督以桌面原生跨對話傳訊退件或代答；背景工具只讀執行對話的新完成回合並喚醒監督。監督逐條接受才算整體完成。
 3. 若只想使用單對話長任務，仍可說「啟動長任務：<目標>」或 `/long-task-orchestrator <目標>`；`/goal` 只由使用者視需要自行設定。監督中斷後先查原 run 狀態並對帳續接，不另開一輪相同任務。
 
 ## Codex → Claude Code 對應與已揭露差距
