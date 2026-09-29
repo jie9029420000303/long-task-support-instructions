@@ -1,30 +1,33 @@
-# Claude Code 監督啟動與事件協定
+# Claude Desktop Code 監督啟動與事件協定
 
-監督在原 Claude Code session 準備 task-owned `input.json`，其中 `projectRoot` 與 `allowedRoots` 是本次專案及執行工作區，`supervisorId` 取當前工具環境的 `CLAUDE_SESSION_ID`；`init` 會核對 transcript，若 `auto` 模式把工具放在臨時子 session，便從此子 session 的精確引用解析出使用者可見的原監督 session，回傳值列出兩個 ID。若無法唯一解析，不啟動監看。`executorId` 可省略讓監看建立新 session。`contract` 逐條保存 `goal`、`authorization`、`criteria:[{id,requirement,source,verify}]` 與 `sources:[{path,sha256}]`。來源需先保存定案原文快照並重算雜湊。`executorPrompt` 是可直接執行的完整 prompt，包含契約路徑、監督 session ID、已定案授權、可執行工作與本頁事件格式，不要求使用者自己複製。背景 CLI 預設使用 Claude 原生 `auto` 權限模式審核每項工具動作；可在 input 設 `permissionMode:"default"` 或 `"acceptEdits"` 沿用較嚴的模式，但無人值守時遇到需人工核准的動作會停下交監督處理，不能用 `bypassPermissions` 略過上層授權。
+監督先保存已定案對話、規格與附件的原文快照，建立 `contract`：`goal`、`authorization`、`criteria:[{id,requirement,source,verify}]`、`sources:[{path,sha256}]`。本次 `executorPrompt` 是可直接在**另一個 Claude Desktop Code 對話**送出的完整指示，首行帶 `LONG_TASK_BIND:<uuid>`；不能從背景 CLI 建立執行主線。若桌面原生工具可建立對話就用它，否則交付 prompt 檔及桌面操作入口，讓使用者在新桌面對話送出。監督必須用桌面對話清單／搜尋核對顯示中的 `local_...` ID，並在本機 transcript 看到同一標記的 `user` 訊息及 `entrypoint=claude-desktop`；`claude --resume` 或 CLI 清單不構成桌面可見證據。
+
+`input.json` 需要 `projectRoot`、`allowedRoots`、監督工具環境的 `supervisorId`、監督桌面對話 `supervisorDesktopId`、桌面執行的 transcript `executorId`、桌面對話 `executorDesktopId`、`executorMarker`、`executorPrompt`、`contract`。Claude `auto` 模式可能用臨時工具子 session；`init` 解析可見原監督對話。執行對話與監督對話必須不同，來源及工作區須逐項核對。
 
 ```text
 node <installed-skill>/scripts/supervise.cjs init RUN INPUT.json
-node <installed-skill>/scripts/supervise.cjs start RUN
+node <installed-skill>/scripts/claude-watch.cjs RUN
 node <installed-skill>/scripts/supervise.cjs status RUN
 node <installed-skill>/scripts/supervise.cjs decision RUN DECISION.json
 node <installed-skill>/scripts/supervise.cjs stop RUN
 ```
 
-第二行會用獨立本機程序持有監看，命令本身短時間回傳 `armed=true`；**不要把 `run-watch.cjs` 放進 Claude Code 的背景 Bash 並等待它**，那會讓本回合不結束，而監看又要等本回合結束，造成死鎖。Run 建議 `<projectRoot>/.claude/long-task-supervisor/<executorId>`，不得把 QA 合成資料寫入真實業務專案。`start` 後正常結束本監督回合，背景程序才建立新執行 session；若指定既有 session，只綁定新事件，不回放舊歷史。啟動當回合只回報「已布署，正在啟動」；後續 `status` 的 `active` 與 `readVerified` 都是真的才回報「已啟動」。
+第二行必須作為**監督桌面對話的背景 Bash 工具**執行，不能由 CLI detached 程序代替：它讀同一執行 transcript 的新完整回合，輸出 `LONG_TASK_WAKE` 後結束，原桌面監督回合收到完成通知才作判斷。普通讀取不啟動模型；一次只掛一個 watcher。每次處理事件、送達確認及 `decision` 後再掛下一次。未掛好背景工具或 `status.active` 為假，不得稱持續監看。
 
-執行技能在**最終回覆末尾**放一行事件：
+## 執行對話的事件
+
+執行者每個完成回合在**最終回覆末尾**放一行：
 
 ```text
 LONG_TASK_EVENT {"kind":"progress","nextAction":"接下來要執行的具體工作"}
 LONG_TASK_EVENT {"kind":"question"}
 LONG_TASK_EVENT {"kind":"blocked"}
+LONG_TASK_EVENT {"kind":"waiting","nextAction":"正在等待的背景工作與完成後動作","waitMinutes":30}
 LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
 ```
 
-普通進度盡量在回合中通報；回合結束仍有工作才用 `progress`，由背景程式以短訊息續接，不定時重送全案 prompt。相同下一步連續三次轉為停滯事件交監督。無事件或格式錯誤會送異常事件，不會當作完成。
+若工作正在執行而回合尚未結束，背景監看保持安靜。若完成回合仍有可執行工作，`progress` 附下一步，監督用桌面原生跨對話傳訊送一則短續接。`waiting` 只用於純背景等待；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。
 
-送驗前用 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...` 產生候選清單及**可直接貼在最終回覆末尾的完整事件行**，不要手寫或截短雜湊。清單至少列一個，含所有直接修改的交付檔。改版後須另建清單並重交。監督接受時會重算清單及每個候選檔，不能合併不同版本的證據。
+監督寫 `RUN/decision-<eventId>.json`。`eventId` 精確相同，`disposition` 為 `accept`、`reject`、`reply` 或 `needs_user`。執行者問到待核准動作、但仍有其他工作可做時，使用 `reply` 指明已決定的可逆方案、暫停的具體動作與繼續項目，**不可用 `needs_user` 凍結整條主線**；只有其他可做工作已完成、具體待核准操作也已準備好時才用 `needs_user`。`reject/reply` 有具體 `reply`；`accept` 有同一 `revision` 和每條 `PASS` 的 `method`、`expected`、`actual`、`evidence:[{path,sha256}]`。需向執行者續接、退件或代答時，訊息首行加入 `LONG_TASK_DELIVERY:<eventId>`，呼叫桌面原生送訊工具，保存它回報的 `delivered` 或 `queued` 及 `messageId` 到 `decision.delivery`；`decision` 還會檢查標記已進精確執行 transcript。結果只有「已排隊」時不可聲稱執行者已讀，重新掛監看等待該回合。送達不確定先對帳，不重送。`needs_user` 保留待決；取得使用者答覆後重新判定，不改原契約。
 
-監督把決策寫進 `RUN/decision-<eventId>.json`。`eventId` 必須精確相同；`disposition` 是 `accept`、`reject`、`reply` 或 `needs_user`。`reject/reply` 必須有具體 `reply`；`accept` 必須有同一 `revision` 及全部逐條 `results`，每列包含 `id,status:"PASS",method,expected,actual,evidence:[{path,sha256}]`。執行 `decision` 檢查成功才可放行。背景程式把退件或代答用 `claude -p --resume` 送到精確執行 session，並核對 transcript 中的唯一送達標記；不確定是否送達時先對帳，不盲重送。`needs_user` 保留待決，使用者回覆後由監督改寫判定；不改原契約。
-
-決策檔寫入後，監看可能先於 `decision` 命令處理它；命令對保存的同一事件與決策雜湊仍回傳 `valid:true, processed:true`，事後改動的檔案則拒絕。此回讀不會重送訊息或重作決策。
+決策檔已處理後，同一檔重查會回傳 `processed:true`；事後改動會被拒絕。背景工具停止、App 關閉或綁定檔損壞時停止宣稱即時監看，從既有狀態及 transcript 對帳後續接。
