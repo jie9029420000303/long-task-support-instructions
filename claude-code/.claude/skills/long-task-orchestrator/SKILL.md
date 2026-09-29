@@ -1,12 +1,14 @@
 ---
 name: long-task-orchestrator
-description: 使用者明確啟動、續接或正在執行長任務（說「啟動長任務」「用長任務模式做…」「續接長任務」「長任務狀態」，或已設定 /goal 後要求分工、派子代理、驗收）時，安排設計、技術或研究規劃的主執行緒／子代理分工、鎖定模型與 effort、同一候選版驗收與三次品質錯誤接手。一般談論「長任務」或本技能設計時不啟動；不取代網頁、簡報、PDF 等專業製作技能。
+description: 使用者明確啟動、續接長任務，或由 long-task-supervisor 明確交辦監督中的執行對話時，安排主執行緒／子代理分工、模型、同版驗收與三次品質錯誤接手。一般談論「長任務」或本技能設計時不啟動；不取代網頁、簡報、PDF 等專業製作技能。
 argument-hint: "[目標描述 | 續接 | 狀態]"
 ---
 
 # 長任務協作（Claude Code adapter）
 
 本 adapter 實作共用規格 [references/spec.md](references/spec.md)，只管理長任務的分工、鎖定、驗收與續接。Claude Code 對應 Codex Goal 的機制是 `/goal`（使用者指令，技能不能代下）；任務狀態一律落在狀態檔，不靠對話記憶（對話會被壓縮）。使用者最新明確指示與上層授權優先；子代理不得建立或更動狀態檔的目標與驗收標準。
+
+**監督中的執行對話**：收到 `long-task-supervisor` 指定的精確監督 session、驗收契約與來源後，保留本技能原有派工、隔離、品質錯誤與同版自查；不自行改寫監督契約，也不替使用者設定 `/goal`。每次最終回覆末尾依監督技能的 [事件協定](../long-task-supervisor/references/runtime.md#執行對話的事件) 放一行 `LONG_TASK_EVENT`：未完工作用含具體 `nextAction` 的 `progress`，需代答用 `question`，只剩未授權動作用 `blocked`，本地自查後用監督技能 `scripts/candidate.cjs` 產生候選清單與完整 `submission` 事件行，原樣貼上，不手寫雜湊。監督逐條接受前不得宣稱整體完成；退件沿原任務狀態修正並重交。
 
 目前 session：effort = `${CLAUDE_EFFORT}`；session id = `${CLAUDE_SESSION_ID}`；引數 = `$ARGUMENTS`。
 

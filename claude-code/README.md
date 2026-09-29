@@ -6,6 +6,7 @@
 
 ```
 .claude/
+├── skills/long-task-supervisor/     研究對話承接、執行 session 建立、事件監看及獨立驗收
 ├── skills/long-task-orchestrator/
 │   ├── SKILL.md                    技能本體：觸發、A／B／C 分工、路徑枚舉閘、C 研究線、模型／effort 鎖定、驗收與三次錯誤規則
 │   ├── references/spec.md          共用規格逐字複本（不得在此改共同語意）
@@ -25,15 +26,15 @@
 
 ## 安裝
 
-- 全域（所有專案）：把 `.claude/skills/long-task-orchestrator/` 複製到 `~/.claude/skills/`，`.claude/agents/lt-*.md` 複製到 `~/.claude/agents/`。
+- 全域（所有專案）：把 `.claude/skills/long-task-supervisor/` 和 `.claude/skills/long-task-orchestrator/` 複製到 `~/.claude/skills/`，`.claude/agents/lt-*.md` 複製到 `~/.claude/agents/`。
 - 單一專案／cloud session：把上述兩個目錄提交進該 repo 的 `.claude/`（cloud session 看不到 `~/.claude/`）。
 - 後續新 session 會載入已安裝的技能與子代理；既有 session 更新技能後需重新呼叫 Skill，新增子代理定義須開新 session。
 
 ## 使用
 
-1. 在專案裡說「啟動長任務：<目標>」或 `/long-task-orchestrator <目標>`；主線建立 `.claude/long-task/<日期>-<slug>/state.md` 並鎖定模型與 effort。
-2. 建議接著下 `/goal <可由對話證據判定的完成條件>`，session 會自動續跑到條件成立。
-3. 續接：`/long-task-orchestrator 續接`（或「長任務狀態」）；`claude --resume` 會一併恢復未完成的 `/goal`。
+1. 先在原對話研究並定案，再說「依剛才定案內容啟動長任務監督」。原對話保留作監督入口；技能會準備 prompt，並在原回合結束後建立另一個執行 session。
+2. 執行 session 使用 `long-task-orchestrator`，建立 `.claude/long-task/<日期>-<slug>/state.md`，完成工作並送候選版給監督。監督退件時沿同一 session 修正；監督逐條接受才算整體完成。背景監看只在事件到來時喚醒模型。
+3. 若只想使用單對話長任務，仍可說「啟動長任務：<目標>」或 `/long-task-orchestrator <目標>`；`/goal` 只由使用者視需要自行設定。監督中斷後先查原 run 狀態並對帳續接，不另開一輪相同任務。
 
 ## Codex → Claude Code 對應與已揭露差距
 

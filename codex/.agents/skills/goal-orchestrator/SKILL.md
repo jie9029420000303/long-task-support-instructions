@@ -1,11 +1,13 @@
 ---
 name: goal-orchestrator
-description: 使用者明確啟動、續接或正在執行 Codex Goal（目標功能）時，安排長任務的設計、技術或研究規劃分工、動態模型、驗收與三次錯誤接手。一般談論「目標」或本技能設計時不啟動；不取代網頁、簡報、PDF 等專業製作技能。
+description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 long-task-supervisor 明確交辦監督中的執行對話時，安排長任務分工、模型、驗收與三次錯誤接手。一般談論「目標」或本技能設計時不啟動；不取代網頁、簡報、PDF 等專業製作技能。
 ---
 
 # Goal 長任務協作
 
 本 adapter 實作[共用規格](references/spec.md)，只管理 Goal 的分工、鎖定、驗收與續接。已有 Goal 就沿用；僅在使用者明確要求時建立 Goal 或設定 Token 預算。子代理不得建立或更動父 Goal。使用者最新明確指示與上層授權優先。
+
+**監督中的執行對話**：若啟動訊息由 `long-task-supervisor` 指定精確監督對話、驗收契約及來源，照本技能原有的派工、隔離、品質錯誤與同版自查流程執行；這種交辦本身不等於要求建立原生 Goal。驗收條文只讀監督鎖定的契約，不自行縮窄。每次最終回覆末尾依監督技能的 [事件協定](../long-task-supervisor/references/runtime.md#執行對話的事件) 放一行 `LONG_TASK_EVENT`：有未完工作用含具體 `nextAction` 的 `progress`，需代答用 `question`，只剩未授權動作用 `blocked`，本地自查通過後用監督技能 `scripts/candidate.cjs` 產生候選清單與完整 `submission` 事件行，原樣貼上，不手寫雜湊。未收到監督逐條接受前，自己的 PASS 只表示「已送驗」，不得向使用者宣稱整體完成；退件沿原候選版修正再重交。
 
 ## 啟動與續接
 
