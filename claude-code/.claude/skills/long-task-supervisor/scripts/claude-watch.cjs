@@ -11,6 +11,7 @@ const readyPath=path.join(run,'native-ready.json');
 const contractPath=path.join(run,'contract.json');
 let state=read(statePath),ownsLock=false;
 const now=()=>new Date().toISOString();
+const settleMs=Number(process.env.CLAUDE_WATCH_SETTLE_MS||15000);
 function save(file,value){fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2)+'\n');fs.renameSync(file+'.tmp',file);}
 function checkpoint(){state.updatedAt=now();save(statePath,state);}
 function stopped(){return fs.existsSync(path.join(run,'STOP'));}
@@ -82,42 +83,62 @@ async function watch(){
   fs.writeFileSync(lockPath,JSON.stringify({pid:process.pid,run,at:now()}),{flag:'wx'});ownsLock=true;
   state.pid=process.pid;state.phase='watching';checkpoint();
   save(readyPath,{pid:process.pid,executorId:binding.executorId,executorDesktopId:binding.executorDesktopId,readVerified:true,at:now()});
+  let lastGrowthAt=Date.now();
+  function finishFinal(){
+    const final=state.message;
+    state.message=null;
+    state.executorOffset=final.finalEnd;
+    const event=eventOf(final.texts.join('\n'),final.finalId);
+    if(state.seen.includes(event.id)){checkpoint();return false;}
+    if(event.kind==='waiting'){
+      if(waitingHasBlocker(event.text))event.kind='blocked';
+      else{
+        const minutes=event.waitMinutes;
+        if(!(minutes>0&&minutes<=120))event.kind='protocol_error';
+        else{state.progressWait={event,deadline:Date.now()+minutes*60000};state.seen.push(event.id);checkpoint();return false;}
+      }
+    }
+    if(event.kind==='progress'){
+      state.repeatedProgress=state.lastProgressAction===event.nextAction?(state.repeatedProgress||0)+1:1;
+      state.lastProgressAction=event.nextAction;
+      if(state.repeatedProgress>=3)event.kind='stalled';
+      else if(event.waitMinutes!==null){
+        if(!(event.waitMinutes>0&&event.waitMinutes<=120)){event.kind='protocol_error';}
+        else{state.progressWait={event,deadline:Date.now()+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
+      }
+    }
+    state.pending=event;state.phase='awaiting_decision';checkpoint();
+    console.log('LONG_TASK_WAKE '+JSON.stringify(event));
+    return true;
+  }
   while(!stopped()){
-    for(const {row,end} of readNew()){
+    const rows=readNew();
+    if(rows.length)lastGrowthAt=Date.now();
+    let finalized=false;
+    for(const {row,end} of rows){
+      const id=row?.type==='assistant'&&row.message&&!row.isSidechain?(row.message.id||row.uuid):null;
+      if(state.message?.finalId && ((id&&id!==state.message.id)||row?.type==='user')){
+        if(finishFinal())return;
+        finalized=true;
+        break;
+      }
       state.executorOffset=end;
       if(!row)continue;
-      if(row.type==='user'&&row.origin?.kind==='human')state.turnText=[];
-      if(row.type!=='assistant'||!row.message)continue;
-      if(!row.uuid || row.isSidechain)continue;
+      if(row.type==='user'){state.message=null;continue;}
+      if(!id||!row.uuid)continue;
+      if(state.message?.id!==id){state.message={id,texts:[],finalId:null,finalEnd:null};
+        if(state.progressWait)state.progressWait=null;}
       const own=(row.message.content||[]).filter(block=>block?.type==='text').map(block=>block.text);
-      if(state.progressWait && row.message.stop_reason==='end_turn'){state.progressWait=null;checkpoint();}
-      if(own.length)state.turnText.push(...own);
-      if(row.message.stop_reason!=='end_turn'||!state.turnText.join('').trim())continue;
-      const event=eventOf(state.turnText.join('\n'),row.uuid);
-      state.turnText=[];
-      if(state.seen.includes(event.id))continue;
-      if(event.kind==='waiting'){
-        if(waitingHasBlocker(event.text))event.kind='blocked';
-        else{
-          const minutes=event.waitMinutes;
-          if(!(minutes>0&&minutes<=120))event.kind='protocol_error';
-          else{state.progressWait={event,deadline:Date.now()+minutes*60000};state.seen.push(event.id);checkpoint();continue;}
-        }
-      }
-      if(event.kind==='progress'){
-        state.repeatedProgress=state.lastProgressAction===event.nextAction?(state.repeatedProgress||0)+1:1;
-        state.lastProgressAction=event.nextAction;
-        if(state.repeatedProgress>=3)event.kind='stalled';
-        else if(event.waitMinutes!==null){
-          if(!(event.waitMinutes>0&&event.waitMinutes<=120)){event.kind='protocol_error';}
-          else{state.progressWait={event,deadline:Date.now()+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();continue;}
-        }
-      }
-      state.pending=event;state.phase='awaiting_decision';checkpoint();
-      console.log('LONG_TASK_WAKE '+JSON.stringify(event));
-      return;
+      state.message.texts.push(...own);
+      if(row.message.stop_reason==='end_turn')state.message.finalId=row.uuid;
+      if(state.message.finalId)state.message.finalEnd=end;
     }
     checkpoint();
+    if(finalized)continue;
+    if(state.message?.finalId&&Date.now()-lastGrowthAt>=settleMs){
+      if(finishFinal())return;
+      continue;
+    }
     if(state.progressWait&&Date.now()>=state.progressWait.deadline){
       const event={...state.progressWait.event,kind:'continue'};
       state.progressWait=null;state.pending=event;state.phase='awaiting_decision';checkpoint();

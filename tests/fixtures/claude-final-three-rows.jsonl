@@ -1,0 +1,3 @@
+{"parentUuid":"18780813-a5e2-43d5-8fa1-b78be631fd03","isSidechain":false,"type":"assistant","uuid":"c041fcdd-a2d6-48aa-a5db-2839b16203e7","message":{"id":"msg_011CfX97ibdMFL9wV1DqiDcs","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"[redacted]"}]}}
+{"parentUuid":"c041fcdd-a2d6-48aa-a5db-2839b16203e7","isSidechain":false,"type":"assistant","uuid":"42079699-079a-4eea-8d3b-22c1b96aaf73","message":{"id":"msg_011CfX97ibdMFL9wV1DqiDcs","stop_reason":"end_turn","content":[{"type":"text","text":"[redacted real final reply]\nLONG_TASK_EVENT {\"kind\":\"question\"}"}]}}
+{"parentUuid":"42079699-079a-4eea-8d3b-22c1b96aaf73","type":"system","subtype":"stop_hook_summary","uuid":"d8c403aa-f475-4600-be10-72ccfbdeb6ab"}
