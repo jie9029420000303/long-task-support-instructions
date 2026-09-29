@@ -14,6 +14,19 @@ test('legacy detached runner cannot start a hidden CLI mainline',()=>{
   assert.throws(()=>execFileSync(process.execPath,[path.join(scripts,'run-watch.cjs')],{stdio:'pipe'}),/Command failed/);
 });
 
+test('stopped legacy run exits cleanly before desktop binding validation',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-stopped-watch-'));
+  try{
+    fs.writeFileSync(path.join(root,'binding.json'),JSON.stringify({platform:'claude-code'}));
+    fs.writeFileSync(path.join(root,'daemon-state.json'),JSON.stringify({phase:'error',executorOffset:0}));
+    fs.writeFileSync(path.join(root,'STOP'),'stopped\n');
+    execFileSync(process.execPath,[path.join(scripts,'claude-watch.cjs'),root],{stdio:'pipe'});
+    const state=JSON.parse(fs.readFileSync(path.join(root,'daemon-state.json'),'utf8'));
+    assert.equal(state.phase,'stopped');
+    assert.equal(fs.existsSync(path.join(root,'watcher.lock')),false);
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
 test('desktop watcher ignores a thinking-only end_turn and wakes on the real event',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-desktop-watch-'));
   const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});

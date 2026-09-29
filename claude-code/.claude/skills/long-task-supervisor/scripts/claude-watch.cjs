@@ -60,6 +60,7 @@ async function waitChange(){
   });
 }
 async function watch(){
+  if(stopped()){state.phase='stopped';checkpoint();return;}
   need(binding.platform==='claude-code'&&binding.executorDesktopId,'Desktop executor binding required');
   need(hash(contractPath)===binding.contractSha256,'Locked contract changed');
   validateContract(read(contractPath));
@@ -115,6 +116,9 @@ async function watch(){
 }
 (async()=>{
   try{await watch();}
-  catch(error){state.phase='error';state.error={message:error.message,at:now()};checkpoint();console.error(error.stack||error);process.exitCode=1;}
+  catch(error){
+    if(stopped()){state.phase='stopped';checkpoint();return;}
+    state.phase='error';state.error={message:error.message,at:now()};checkpoint();console.error(error.stack||error);process.exitCode=1;
+  }
   finally{if(ownsLock){try{if(read(lockPath).pid===process.pid)fs.unlinkSync(lockPath);}catch{}}}
 })();
