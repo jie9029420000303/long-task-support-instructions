@@ -9,23 +9,6 @@ const scripts=path.resolve(__dirname,'../claude-code/.claude/skills/long-task-su
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const line=(file,value)=>fs.appendFileSync(file,JSON.stringify(value)+'\n');
 async function until(check,ms=6000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('Timed out waiting for desktop watcher');}
-function fakeRelay(root,supervisorLog){
-  line(supervisorLog,{type:'custom-title',customTitle:'QA supervisor'});
-  const cli=path.join(root,'fake-claude.cjs');
-  fs.writeFileSync(cli,`#!/usr/bin/env node
-const fs=require('node:fs');
-const prompt=process.argv.at(-1);
-if(process.argv.includes('ListAgents'))console.log(JSON.stringify({result:'Peer sessions (1):\\n  QA supervisor [abc123]  ·  interactive  ·  idle  ·  Claude Desktop session'}));
-else {
-  const marker=prompt.match(/LONG_TASK_WAKE:[a-f0-9-]+/)?.[0];
-  if(!marker)process.exit(2);
-  fs.appendFileSync(process.env.CLAUDE_TEST_SUPERVISOR_LOG,JSON.stringify({type:'queue-operation',content:'<cross-session-message>\\n'+marker+'\\nDelivered</cross-session-message>'})+'\\n');
-  console.log(JSON.stringify({result:'Sent → QA supervisor (delivered)'}));
-}
-`);
-  fs.chmodSync(cli,0o755);
-  return {CLAUDE_CLI_PATH:cli,CLAUDE_TEST_SUPERVISOR_LOG:supervisorLog,CLAUDE_WAKE_CONFIRM_MS:'2000'};
-}
 
 test('legacy detached runner cannot start a hidden CLI mainline',()=>{
   assert.throws(()=>execFileSync(process.execPath,[path.join(scripts,'run-watch.cjs')],{stdio:'pipe'}),/Command failed/);
@@ -54,10 +37,10 @@ test('desktop watcher ignores a thinking-only end_turn and wakes on the real eve
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
   fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Test desktop event',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Valid event',source:'source.md:1',verify:'Read transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
-  const env={...process.env,...fakeRelay(root,supervisorLog),CLAUDE_WATCH_SETTLE_MS:'600',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'600',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
   let output='',errors='';child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>errors+=chunk);
@@ -70,7 +53,6 @@ test('desktop watcher ignores a thinking-only end_turn and wakes on the real eve
     line(executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:messageId,
       content:[{type:'text',text:'Still working.\nLONG_TASK_EVENT {"kind":"progress","nextAction":"Run QA"}'}],stop_reason:'end_turn'}});
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.kind==='progress');
-    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).wake?.confirmedAt);
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.pending.nextAction,'Run QA');
     assert.match(output,/LONG_TASK_WAKE/);
@@ -86,17 +68,16 @@ test('earlier turn text cannot make a thinking row swallow the real final questi
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
   const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
   const executorLog=path.join(project,executorId+'.jsonl');
-  const supervisorLog=path.join(project,supervisorId+'.jsonl');
-  line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
   fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Catch final question',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Final question must reach supervisor',source:'source.md:1',verify:'Replay transcript'}],
       sources:[{path:source,sha256:sha(source)}]}}));
-  const env={...process.env,...fakeRelay(root,supervisorLog),CLAUDE_WATCH_SETTLE_MS:'600',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'600',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
   let errors='';child.stderr.on('data',chunk=>errors+=chunk);
@@ -129,17 +110,16 @@ test('replayed progress uses the original reply time instead of extending its de
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
   const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
   const executorLog=path.join(project,executorId+'.jsonl');
-  const supervisorLog=path.join(project,supervisorId+'.jsonl');
-  line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
   fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep wait deadlines',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Replay does not postpone a wake',source:'source.md:1',verify:'Replay old progress'}],
       sources:[{path:source,sha256:sha(source)}]}}));
-  const env={...process.env,...fakeRelay(root,supervisorLog),CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   const writtenAt=new Date(Date.now()-120000).toISOString(),id=crypto.randomUUID();
   line(executorLog,{type:'assistant',uuid:id,timestamp:writtenAt,message:{id:'msg_old_progress',
@@ -166,17 +146,16 @@ test('real split-turn rows produce one event per reply and delivery works withou
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
   const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
   const executorLog=path.join(project,executorId+'.jsonl');
-  const supervisorLog=path.join(project,supervisorId+'.jsonl');
-  line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
   fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Check real split rows',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'One event per reply',source:'source.md:1',verify:'Replay transcript'}],
       sources:[{path:source,sha256:sha(source)}]}}));
-  const env={...process.env,...fakeRelay(root,supervisorLog),PATH:emptyBin,CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const env={...process.env,PATH:emptyBin,CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   const script=path.join(scripts,'supervise.cjs');
   execFileSync(process.execPath,[script,'init',run,input],{env});
   const start=()=>spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
@@ -214,16 +193,15 @@ test('a waiting reply with a merge approval block wakes the supervisor immediate
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
   const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
   const executorLog=path.join(project,executorId+'.jsonl');
-  const supervisorLog=path.join(project,supervisorId+'.jsonl');
-  line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
   fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
-    supervisorDesktopId:'local_'+crypto.randomUUID(),supervisorMode:'auto',executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' test',contract:{goal:'Catch actionable waiting reply',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Review blocked merge',source:'source.md:1',verify:'Replay transcript'}],
       sources:[{path:source,sha256:sha(source)}]}}));
-  const env={...process.env,...fakeRelay(root,supervisorLog),CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
   try{

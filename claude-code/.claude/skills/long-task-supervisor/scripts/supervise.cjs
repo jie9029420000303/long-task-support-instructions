@@ -71,7 +71,6 @@ function init() {
   need(typeof input.executorId === 'string' && /^[a-f0-9-]{36}$/.test(input.executorId), 'A visible desktop executor session is required');
   need(typeof input.executorDesktopId === 'string' && /^local_[a-f0-9-]{36}$/.test(input.executorDesktopId), 'Missing desktop executor ID');
   need(typeof input.supervisorDesktopId === 'string' && /^local_[a-f0-9-]{36}$/.test(input.supervisorDesktopId), 'Missing desktop supervisor ID');
-  need(['auto','default','acceptEdits','bypassPermissions','dontAsk','plan'].includes(input.supervisorMode), 'Missing desktop supervisor permission mode');
   need(input.supervisorDesktopId!==input.executorDesktopId,'Supervisor and executor desktop chats must differ');
   need(typeof input.executorMarker === 'string' && /^LONG_TASK_BIND:[a-f0-9-]{36}$/.test(input.executorMarker), 'Missing unique executor marker');
   need(input.executorPrompt.includes(input.executorMarker), 'Executor prompt must contain its bind marker');
@@ -100,7 +99,7 @@ function init() {
     input.executorPrompt.replaceAll(input.supervisorId,visible.id).replaceAll('{{SUPERVISOR_ID}}',visible.id));
   save(path.join(run, 'binding.json'), {
     platform:'claude-code', projectRoot:input.projectRoot, allowedRoots:input.allowedRoots.concat(run),
-    supervisorId:visible.id, supervisorDesktopId:input.supervisorDesktopId, supervisorMode:input.supervisorMode, toolSessionId:visible.toolSessionId,
+    supervisorId:visible.id, supervisorDesktopId:input.supervisorDesktopId, toolSessionId:visible.toolSessionId,
     executorId, executorDesktopId:input.executorDesktopId,
     executorMarker:input.executorMarker, executorLog:existingLog, supervisorLog,
     contractSha256:hash(path.join(run,'contract.json')), promptSha256:hash(path.join(run,'executor-prompt.txt')),

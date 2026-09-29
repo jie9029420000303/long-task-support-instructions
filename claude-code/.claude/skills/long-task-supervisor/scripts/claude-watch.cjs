@@ -3,7 +3,6 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {hash,read,need,validateContract}=require('./guard.cjs');
-const {wake}=require('./desktop-wake.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
 const statePath=path.join(run,'daemon-state.json');
@@ -74,8 +73,7 @@ async function watch(){
   validateContract(read(contractPath));
   need(hash(path.join(run,'executor-prompt.txt'))===binding.promptSha256,'Executor prompt changed');
   need(!stopped(),'Run was stopped');
-  need(state.phase!=='accepted','Accepted run cannot be watched again');
-  if(state.pending){await wake(run,binding,state,state.pending,checkpoint);return;}
+  need(!state.pending&&state.phase!=='accepted','Resolve the pending event before listening again');
   if(fs.existsSync(lockPath)){
     const old=read(lockPath);let alive=false;
     try{process.kill(old.pid,0);alive=true;}catch{}
@@ -86,7 +84,7 @@ async function watch(){
   state.pid=process.pid;state.phase='watching';checkpoint();
   save(readyPath,{pid:process.pid,executorId:binding.executorId,executorDesktopId:binding.executorDesktopId,readVerified:true,at:now()});
   let lastGrowthAt=Date.now();
-  async function finishFinal(){
+  function finishFinal(){
     const final=state.message;
     state.message=null;
     state.executorOffset=final.finalEnd;
@@ -111,7 +109,6 @@ async function watch(){
       }
     }
     state.pending=event;state.phase='awaiting_decision';checkpoint();
-    await wake(run,binding,state,event,checkpoint);
     console.log('LONG_TASK_WAKE '+JSON.stringify(event));
     return true;
   }
@@ -122,7 +119,7 @@ async function watch(){
     for(const {row,end} of rows){
       const id=row?.type==='assistant'&&row.message&&!row.isSidechain?(row.message.id||row.uuid):null;
       if(state.message?.finalId && ((id&&id!==state.message.id)||row?.type==='user')){
-        if(await finishFinal())return;
+        if(finishFinal())return;
         finalized=true;
         break;
       }
@@ -143,13 +140,12 @@ async function watch(){
     checkpoint();
     if(finalized)continue;
     if(state.message?.finalId&&Date.now()-lastGrowthAt>=settleMs){
-      if(await finishFinal())return;
+      if(finishFinal())return;
       continue;
     }
     if(state.progressWait&&Date.now()>=state.progressWait.deadline){
       const event={...state.progressWait.event,kind:'continue'};
       state.progressWait=null;state.pending=event;state.phase='awaiting_decision';checkpoint();
-      await wake(run,binding,state,event,checkpoint);
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;
     }
