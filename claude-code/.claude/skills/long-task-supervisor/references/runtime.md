@@ -12,7 +12,7 @@ node <installed-skill>/scripts/supervise.cjs decision RUN DECISION.json
 node <installed-skill>/scripts/supervise.cjs stop RUN
 ```
 
-第二行必須作為**監督桌面對話的背景 Bash 工具**執行，不能由 CLI detached 程序代替：它讀同一執行 transcript 的新完整回合，輸出 `LONG_TASK_WAKE` 後結束，原桌面監督回合收到完成通知才作判斷。普通讀取不啟動模型；一次只掛一個 watcher。每次處理事件、送達確認及 `decision` 後再掛下一次。未掛好背景工具或 `status.active` 為假，不得稱持續監看。
+第二行必須作為**監督桌面對話的背景 Bash 工具**執行，不能由 CLI detached 程序代替：它讀同一執行 transcript 的新完整回合。有待判定事件時，背景程式用一次性桌面跨對話傳訊送出帶事件 ID 的短喚醒訊息，核對精確監督 transcript 出現同一標記，才輸出 `LONG_TASK_WAKE` 並結束。背景工具完成通知只是備援，不能單獨當成監督已醒。喚醒訊息只帶事件 ID 和狀態檔路徑，不重送整份 prompt；發送結果不明時留下待對帳狀態，禁止盲重送。普通讀取不啟動模型；一次只掛一個 watcher。每次處理事件、送達確認及 `decision` 後再掛下一次。未掛好背景工具或 `status.active` 為假，不得稱持續監看。
 
 ## 執行對話的事件
 
