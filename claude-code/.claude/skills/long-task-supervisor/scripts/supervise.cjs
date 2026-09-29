@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
+const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
 const now = () => new Date().toISOString();
@@ -103,6 +104,7 @@ function init() {
     executorId, executorDesktopId:input.executorDesktopId,
     executorMarker:input.executorMarker, executorLog:existingLog, supervisorLog,
     contractSha256:hash(path.join(run,'contract.json')), promptSha256:hash(path.join(run,'executor-prompt.txt')),
+    dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json'},
     createdAt:now()
   });
   save(path.join(run, 'daemon-state.json'), {phase:'idle',executorOffset:markerOffset,turnText:[],seen:[],pending:null,reads:0});
@@ -144,11 +146,14 @@ function decision() {
   return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true};
 }
 function stop() {load();fs.writeFileSync(path.join(run,'STOP'),now()+'\n');return {run,stopRequested:true};}
+function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
+function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
 (async()=>{
   try {
     const value=command==='init'?init():command==='status'?status()
       :command==='decision'?decision():command==='stop'?stop()
-      :(()=>{throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, stop RUN; start the desktop watcher in App background Bash');})();
+      :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
+      :(()=>{throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));
   } catch(error) {console.error(error.message);process.exitCode=1;}
 })();

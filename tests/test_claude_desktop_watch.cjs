@@ -36,7 +36,7 @@ test('desktop watcher ignores a thinking-only end_turn and wakes on the real eve
   line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Test desktop event',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Valid event',source:'source.md:1',verify:'Read transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
@@ -53,6 +53,7 @@ test('desktop watcher ignores a thinking-only end_turn and wakes on the real eve
     line(executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:messageId,
       content:[{type:'text',text:'Still working.\nLONG_TASK_EVENT {"kind":"progress","nextAction":"Run QA"}'}],stop_reason:'end_turn'}});
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.kind==='progress');
+    await until(()=>/LONG_TASK_WAKE/.test(output)||child.exitCode!==null);
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.pending.nextAction,'Run QA');
     assert.match(output,/LONG_TASK_WAKE/);
@@ -72,7 +73,7 @@ test('earlier turn text cannot make a thinking row swallow the real final questi
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Catch final question',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Final question must reach supervisor',source:'source.md:1',verify:'Replay transcript'}],
@@ -114,7 +115,7 @@ test('replayed progress uses the original reply time instead of extending its de
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep wait deadlines',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Replay does not postpone a wake',source:'source.md:1',verify:'Replay old progress'}],
@@ -150,7 +151,7 @@ test('real split-turn rows produce one event per reply and delivery works withou
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Check real split rows',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'One event per reply',source:'source.md:1',verify:'Replay transcript'}],
@@ -196,7 +197,7 @@ test('a waiting reply with a merge approval block wakes the supervisor immediate
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' test',contract:{goal:'Catch actionable waiting reply',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Review blocked merge',source:'source.md:1',verify:'Replay transcript'}],

@@ -9,6 +9,8 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 
 **監督中的執行對話**：若啟動訊息由 `long-task-supervisor` 指定精確監督對話、驗收契約及來源，照本技能原有的派工、隔離、品質錯誤與同版自查流程執行；這種交辦本身不等於要求建立原生 Goal。驗收條文只讀監督鎖定的契約，不自行縮窄。每次最終回覆末尾依監督技能的 [事件協定](../long-task-supervisor/references/runtime.md#執行對話的事件) 放一行 `LONG_TASK_EVENT`：有未完工作用含具體 `nextAction` 的 `progress`，需代答用 `question`，只剩未授權動作用 `blocked`，本地自查通過後用監督技能 `scripts/candidate.cjs` 產生候選清單與完整 `submission` 事件行，原樣貼上，不手寫雜湊。未收到監督逐條接受前，自己的 PASS 只表示「已送驗」，不得向使用者宣稱整體完成；退件沿原候選版修正再重交。
 
+監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，用監督技能 `dispatch.cjs write` 原子更新指定 run 的 `dispatch.json`。只記實際工作包、代理 handle、已核實容量與排他資源；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。未綁定監督的單對話任務不需此快照。
+
 ## 啟動與續接
 
 1. 依序讀本技能、[執行協定](references/execution.md)、原生 Goal，再找專案根目錄 `.codex/long-task/` 的 sidecar。使用者指名者優先；其次以原生 Goal id 精確匹配，無 id 時以 objective 原文與 SHA-256 匹配。多個未完成 sidecar 無法精確匹配時必須請使用者指定，不得以最近更新者猜測。原生 Goal 管理目標、狀態與 Token 預算；sidecar 保存 Goal 綁定、模型鎖定、工作包、錯誤次數與證據。沒有匹配 sidecar 時，依執行協定建立。

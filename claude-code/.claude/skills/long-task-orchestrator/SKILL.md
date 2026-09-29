@@ -10,6 +10,8 @@ argument-hint: "[目標描述 | 續接 | 狀態]"
 
 **監督中的執行對話**：收到 `long-task-supervisor` 指定的精確監督 session、驗收契約與來源後，保留本技能原有派工、隔離、品質錯誤與同版自查；不自行改寫監督契約，也不替使用者設定 `/goal`。每次最終回覆末尾依監督技能的 [事件協定](../long-task-supervisor/references/runtime.md#執行對話的事件) 放一行 `LONG_TASK_EVENT`：未完工作用含具體 `nextAction` 的 `progress`，需代答用 `question`，只剩未授權動作用 `blocked`，本地自查後用監督技能 `scripts/candidate.cjs` 產生候選清單與完整 `submission` 事件行，原樣貼上，不手寫雜湊。監督逐條接受前不得宣稱整體完成；退件沿原任務狀態修正並重交。
 
+監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，用監督技能 `dispatch.cjs write` 原子更新指定 run 的 `dispatch.json`。只記實際工作包、代理 handle、已核實容量與排他資源；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。未綁定監督的單對話任務不需此快照。
+
 目前 session：effort = `${CLAUDE_EFFORT}`；session id = `${CLAUDE_SESSION_ID}`；引數 = `$ARGUMENTS`。
 
 ## 啟動與續接

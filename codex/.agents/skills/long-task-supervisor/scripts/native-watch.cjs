@@ -5,6 +5,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createClient } = require('./mcp-client.cjs');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
+const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const run = path.resolve(process.argv[2] || '');
 const binding = read(path.join(run, 'binding.json'));
 const statePath = path.join(run, 'daemon-state.json');
@@ -132,12 +133,16 @@ async function exactFinal(turnId) {
   throw Error('Completed executor turn has no exact readable final message: '+turnId);
 }
 function reviewPrompt(event) {
+  const shellQuote=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
+  const dispatch=event.kind==='dispatch_review'
+    ? '\n這是派工快照檢查，只是要求人工判斷，不代表應增加代理。先重讀目前快照，並核對平台代理 handle/狀態、依賴與可行性、工作區/瀏覽器/帳號/資料庫/測試環境衝突、實際驗收進度。執行對話仍是唯一 dispatcher；若問題已消失，不得送出舊指示。'
+    : '';
   return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
     + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
     + '\n請依原始條件自行核對候選版與真實證據，不採信執行者的 PASS 自述。'
     + '以 ' + path.join(run,'decision-' + event.id + '.json') + ' 寫入 eventId、disposition（accept/reject/reply/needs_user）、revision（accept 時）、results（accept 時每條含 id,status,method,expected,actual,evidence[{path,sha256}]）、reply（reject/reply 時）。'
-    + '寫完執行 node ' + path.join(__dirname,'supervise.cjs') + ' decision ' + run + ' ' + path.join(run,'decision-' + event.id + '.json')
-    + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。';
+    + '寫完執行 ' + [process.execPath,path.join(__dirname,'supervise.cjs'),'decision',run,path.join(run,'decision-' + event.id + '.json')].map(shellQuote).join(' ')
+    + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。'+dispatch;
 }
 async function changed(directory, alreadyChanged = () => false) {
   await new Promise(resolve => {
@@ -163,6 +168,10 @@ async function pendingDecision() {
   const file = path.join(run,'decision-' + event.id + '.json');
   if (!fs.existsSync(file)) {await changed(run,()=>fs.existsSync(file));return;}
   const decision = validateDecision(binding,checkSources(),event,read(file));
+  if(event.kind==='dispatch_review'){
+    const preflight=stillCurrent(run,binding,state,event);checkpoint();
+    if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
+  }
   if (decision.disposition === 'needs_user') {
     state.phase = 'needs_user'; checkpoint();
     const previousDecision = hash(file);
@@ -208,6 +217,8 @@ async function watch() {
       if (state.phase === 'accepted') break;
       continue;
     }
+    const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);checkpoint();
+    if(auditEvent){markAnnounced(state,auditEvent);state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const started = Date.now();
     const response = unpack(await rpc('wait_threads',{
       targets:[{threadId:binding.executorId,...(state.cursor ? {afterCursor:state.cursor} : {})}],
