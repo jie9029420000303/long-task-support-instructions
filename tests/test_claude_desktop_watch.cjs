@@ -103,6 +103,40 @@ test('earlier turn text cannot make a thinking row swallow the real final questi
   }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });
 
+test('replayed progress uses the original reply time instead of extending its deadline',async()=>{
+  // A desktop supervisor can reconnect after a missed background wake; old waits must already be due.
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-replayed-wait-'));
+  const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});
+  const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
+  const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
+  const executorLog=path.join(project,executorId+'.jsonl');
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
+    message:{content:[{type:'text',text:marker+' test'}]}});
+  const input=path.join(root,'input.json'),run=path.join(root,'run');
+  fs.writeFileSync(input,JSON.stringify({projectRoot:root,allowedRoots:[root],supervisorId,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
+    executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep wait deadlines',authorization:'Isolated QA',
+      criteria:[{id:'A1',requirement:'Replay does not postpone a wake',source:'source.md:1',verify:'Replay old progress'}],
+      sources:[{path:source,sha256:sha(source)}]}}));
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'150',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
+  const writtenAt=new Date(Date.now()-120000).toISOString(),id=crypto.randomUUID();
+  line(executorLog,{type:'assistant',uuid:id,timestamp:writtenAt,message:{id:'msg_old_progress',
+    stop_reason:'end_turn',content:[{type:'text',text:'Background work still running.\n'+
+      'LONG_TASK_EVENT {"kind":"progress","nextAction":"Check the job","waitMinutes":1}'}]}});
+  const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
+  let errors='';child.stderr.on('data',chunk=>errors+=chunk);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.kind==='continue');
+    const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(state.pending.id,id);
+    assert.equal(state.pending.nextAction,'Check the job');
+    assert.deepEqual(state.seen,[id]);
+    assert.equal(errors,'');
+  }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+});
+
 test('real split-turn rows produce one event per reply and delivery works without rg',async()=>{
   // Structural rows from Gateway executor transcript lines 241-242 and 294-295; private text is redacted.
   const rows=fs.readFileSync(path.join(__dirname,'fixtures/claude-split-end-turn.jsonl'),'utf8').trim().split('\n');

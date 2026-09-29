@@ -89,13 +89,14 @@ async function watch(){
     state.message=null;
     state.executorOffset=final.finalEnd;
     const event=eventOf(final.texts.join('\n'),final.finalId);
+    const writtenAt=Date.parse(final.finalAt)||Date.now();
     if(state.seen.includes(event.id)){checkpoint();return false;}
     if(event.kind==='waiting'){
       if(waitingHasBlocker(event.text))event.kind='blocked';
       else{
         const minutes=event.waitMinutes;
         if(!(minutes>0&&minutes<=120))event.kind='protocol_error';
-        else{state.progressWait={event,deadline:Date.now()+minutes*60000};state.seen.push(event.id);checkpoint();return false;}
+        else{state.progressWait={event,deadline:writtenAt+minutes*60000};state.seen.push(event.id);checkpoint();return false;}
       }
     }
     if(event.kind==='progress'){
@@ -104,7 +105,7 @@ async function watch(){
       if(state.repeatedProgress>=3)event.kind='stalled';
       else if(event.waitMinutes!==null){
         if(!(event.waitMinutes>0&&event.waitMinutes<=120)){event.kind='protocol_error';}
-        else{state.progressWait={event,deadline:Date.now()+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
+        else{state.progressWait={event,deadline:writtenAt+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
       }
     }
     state.pending=event;state.phase='awaiting_decision';checkpoint();
@@ -130,7 +131,10 @@ async function watch(){
         if(state.progressWait)state.progressWait=null;}
       const own=(row.message.content||[]).filter(block=>block?.type==='text').map(block=>block.text);
       state.message.texts.push(...own);
-      if(row.message.stop_reason==='end_turn')state.message.finalId=row.uuid;
+      if(row.message.stop_reason==='end_turn'){
+        state.message.finalId=row.uuid;
+        state.message.finalAt=row.timestamp;
+      }
       if(state.message.finalId)state.message.finalEnd=end;
     }
     checkpoint();
