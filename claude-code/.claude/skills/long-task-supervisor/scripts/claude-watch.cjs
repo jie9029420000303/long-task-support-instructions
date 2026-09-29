@@ -3,6 +3,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {hash,read,need,validateContract}=require('./guard.cjs');
+const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
 const statePath=path.join(run,'daemon-state.json');
@@ -113,6 +114,11 @@ async function watch(){
     return true;
   }
   while(!stopped()){
+    if(!state.pending){const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);if(auditEvent){
+      auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
+      markAnnounced(state,auditEvent);state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
+      console.log('LONG_TASK_WAKE '+JSON.stringify(auditEvent));return;
+    }}
     const rows=readNew();
     if(rows.length)lastGrowthAt=Date.now();
     let finalized=false;

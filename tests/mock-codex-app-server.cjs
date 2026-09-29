@@ -5,8 +5,8 @@ const sentFile=process.env.MOCK_CODEX_SENT;
 const reply=value=>({content:[{type:'text',text:JSON.stringify(value)}]});
 function call(name,args) {
   if (name==='wait_threads') return reply({polls:[{thread:{id:data.executorId},cursor:'cursor-1',
-    latestTurn:{id:'executor-turn-1',status:'completed'},
-    latestAssistantMessage:{phase:'final_answer',turnId:'executor-turn-1',text:'LONG_TASK_EVENT {"kind":"submission","revision":"sha256"}'}}]});
+    ...(data.noTurn?{}:{latestTurn:{id:'executor-turn-1',status:'completed'},
+    latestAssistantMessage:{phase:'final_answer',turnId:'executor-turn-1',text:'LONG_TASK_EVENT {"kind":"submission","revision":"sha256"}'}})}]});
   if (name==='read_thread') {
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
     if (args.threadId===data.executorId) return reply({thread:{id:data.executorId},turns:[{id:'executor-turn-1',status:'completed',items:[{type:'agentMessage',phase:'final_answer',text:data.final}]}]});

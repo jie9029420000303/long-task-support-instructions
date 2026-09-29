@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
+const { stillCurrent } = require('./dispatch-audit.cjs');
 const [command, runArg, other] = process.argv.slice(2);
 const run = runArg && path.resolve(runArg);
 const now = () => new Date().toISOString();
@@ -47,7 +48,7 @@ function init() {
     platform: 'codex', projectRoot: input.projectRoot, allowedRoots: input.allowedRoots.concat(run),
     executorId: input.executorId, supervisorId: input.supervisorId,
     callerTurnId: currentTurn(input.supervisorId),
-    contractSha256: hash(path.join(run, 'contract.json')), createdAt: now()
+    contractSha256: hash(path.join(run, 'contract.json')), dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json'}, createdAt: now()
   };
   write(path.join(run, 'binding.json'), binding);
   write(path.join(run, 'daemon-state.json'), {
@@ -90,12 +91,27 @@ function stop() {
   fs.writeFileSync(path.join(run, 'STOP'), now() + '\n');
   return { run, stopRequested: true };
 }
+function attachDispatch() {
+  const {binding}=load();
+  binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};
+  write(path.join(run,'binding.json'),binding);
+  fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');
+  return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};
+}
+function dispatchPreflight() {
+  const {binding}=load(),state=read(path.join(run,'daemon-state.json'));
+  need(state.pending?.id===other&&state.pending.kind==='dispatch_review','No matching pending dispatch review');
+  const copy=JSON.parse(JSON.stringify(state)),result=stillCurrent(run,binding,copy,state.pending);
+  return {eventId:other,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};
+}
 try {
   const result = command === 'init' ? init()
     : command === 'status' ? status()
     : command === 'decision' ? decision()
+    : command === 'attach-dispatch' ? attachDispatch()
+    : command === 'dispatch-preflight' ? dispatchPreflight()
     : command === 'stop' ? stop()
-    : (() => { throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, stop RUN'); })();
+    : (() => { throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN'); })();
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(error.message);
