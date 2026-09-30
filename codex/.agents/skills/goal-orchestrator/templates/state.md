@@ -7,6 +7,7 @@
 - 原生 Goal objective（逐字）：<無則寫未設>
 - objective SHA-256：<UTF-8 原文雜湊；無則寫不適用>
 - 原生 Goal status／Token 預算：<無則寫未設>
+- 執行期資源：同目錄 `resources.json`（`scripts/resource-ledger.py` 登記與收尾；`sidecar-guard.py` 每次核對，未收尾 exit 4）
 
 ## 原始目標
 <使用者原句>

@@ -1,4 +1,7 @@
+import datetime as dt
 import importlib.util
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,6 +22,7 @@ def load(name, filename):
 
 scope_overlap = load("scope_overlap", "scope-overlap.py")
 sidecar_guard = load("sidecar_guard", "sidecar-guard.py")
+resource_ledger = load("resource_ledger", "resource-ledger.py")
 
 
 class ScopeOverlapTests(unittest.TestCase):
@@ -234,6 +238,50 @@ class CodexAcceptanceGateTests(unittest.TestCase):
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         for marker in ("**放行紀律**", "附條件 PASS", "**提問紀律**", "前置", "監看"):
             self.assertIn(marker, skill)
+
+
+class CodexResourceGateTests(unittest.TestCase):
+    # 2026-09-30：Codex 長任務留下 50 個容器（佔 Docker 95% CPU）。sidecar 旁的資源帳本讓守門在
+    # 工作包判定後或宣稱完成時發現還在跑的服務，回 4 交主線收尾；誠實進行中的服務不得誤擋。
+    STARTED = dt.datetime(2026, 9, 30, 12, 5)
+
+    def sidecar(self, root, state, verdict, resources):
+        directory = Path(root) / ".codex" / "long-task" / "g1"
+        directory.mkdir(parents=True)
+        (directory / "state.md").write_text(
+            "# Codex 長任務 sidecar：g1\n\n- 建立：2026-09-30 12:00\n\n## 工作包\n"
+            "| id | 類型 | 負責者 | 依賴 | 候選版 | 工作區／base commit | 狀態（待派／在途／PASS／FAIL／BLOCKED） |\n"
+            "|---|---|---|---|---|---|---|\n"
+            f"| B21 | B | 技術 | — | abc | path:{root}/wt-b21 | {state} |\n\n## 最終判定\n{verdict}\n", encoding="utf-8")
+        (directory / "resources.json").write_text(json.dumps({"resources": resources}), encoding="utf-8")
+        return directory / "state.md"
+
+    def live(self, *pids):
+        procs = {pid: {"pid": pid, "ppid": 1, "pgid": pid, "uid": os.getuid(), "start": self.STARTED,
+                       "command": "npm run dev", "cwd": "/"} for pid in pids}
+        return {"procs": procs, "uid": os.getuid(), "launchd": set(), "containers": []}
+
+    def resource(self, close="wp"):
+        return [{"id": "r1", "wp": "B21" if close == "wp" else "主線", "kind": "process", "pgid": 301,
+                 "start": self.STARTED.isoformat(), "command": "npm run dev", "close": close, "reason": ""}]
+
+    def test_judged_package_or_completion_with_running_service_returns_4(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = os.path.realpath(root)
+            path = self.sidecar(root, "PASS", "未完成", self.resource())
+            self.assertEqual(4, sidecar_guard.main([str(path)], snapshot=self.live(301)))
+            self.assertEqual(0, sidecar_guard.main([str(path)], snapshot=self.live()))
+        with tempfile.TemporaryDirectory() as root:
+            root = os.path.realpath(root)
+            path = self.sidecar(root, "在途", "PASS", self.resource("final"))
+            self.assertEqual(4, sidecar_guard.main([str(path)], snapshot=self.live(301)))
+
+    def test_in_flight_service_is_not_blocked(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = os.path.realpath(root)
+            path = self.sidecar(root, "在途", "未完成", self.resource())
+            self.assertEqual(0, sidecar_guard.main([str(path)], snapshot=self.live(301)))
+            self.assertTrue(resource_ledger.audit(path, snapshot=self.live(301))[0])
 
 
 if __name__ == "__main__":

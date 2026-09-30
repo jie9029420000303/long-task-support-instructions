@@ -22,10 +22,11 @@ hooks:
 - 動手前先讀相關 exports、直接呼叫端與共用工具；改既有機制前先讀 docstring／SPEC 確認設計意圖，不只看它做了什麼。
 - 最小修改：只寫解決問題的程式碼，不順手重構、不加沒被要求的功能，沿用既有風格。
 - 每項判準自己先跑過驗證（測試指令、curl、build），把指令與輸出原文放進回報。可用 Browser pane 做冒煙檢查，但你的截圖不算前台驗收證據（那由介面子代理做）。
+- 自測要起 dev server／預覽時，用工作包 `[常駐資源]` 給的 `resource-ledger.py start --state <狀態檔> --wp <本包 id> -- <指令>` 啟動，不用 `&`／`nohup` 丟到背景；交回前 `stop --state <狀態檔> --wp <本包 id>` 並把輸出放進回報，工作包明寫要保留的除外（回報列 resource id）。
 - 完成後在 `[工作區] path` 內執行 `git rev-parse --short HEAD` 與 `git status --short`（非 git 專案用 `shasum -a 256` 算交付檔），把候選版寫進回報。
 
 ## 絕不做
-- 不改可修改範圍以外的檔案、不改正式規格／SPEC／規則庫、不動 `.claude/long-task/` 狀態檔。
+- 不改可修改範圍以外的檔案、不改正式規格／SPEC／規則庫、不動 `.claude/long-task/` 狀態檔（`resource-ledger.py` 自己寫的帳本 `resources.json` 除外）。
 - 不執行 git commit／push／merge／rebase／tag／reset／checkout 等寫入（有 hook 會擋，被擋就回報主線）。
 - 不安裝／升級／移除套件、不改 lockfile、不切換套件管理器（npm／pnpm／yarn，有 hook 會擋）；不重啟、重建或重灌共用的 dev server／DB／node_modules；migration 等全域編號只用工作包配發的，沒配就寫待決。這些一旦動了會讓其他在途工作包一起壞。
 - 不對外發送、不做付款／刪除正式資料／憑證等不可逆或敏感操作；遇到就停在操作前回報 BLOCKED。

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""狀態檔守門：容量（派工前讀得起的快照）＋驗收逐條（每次重看條文、擋住與逐條不符的完成宣稱）。
+"""狀態檔守門：容量（派工前讀得起的快照）＋驗收逐條（每次重看條文、擋住與逐條不符的完成宣稱）
+＋執行期資源（已判定工作包或宣稱完成時還在跑的服務／容器、未登記的脫離程序）。
 
 用法：python3 sidecar-guard.py <狀態目錄>/state.md [--soft-limit 150] [--hard-limit 180]
 輸出：先報容量，再印「驗收標準」逐條（條文與狀態）和最新一筆核准變更——每次派工前與判定後都跑，
@@ -7,13 +8,16 @@
 exit：0 通過；1 超過 hard limit（不得開新工作包）；2 參數或檔案錯誤；
       3 「最終判定」宣稱 PASS／完成／達成，但逐條仍有不是 PASS 或「核准不做」的條目，或寫了「附條件」
         ——主線把最終判定改成「未完成」並列剩餘條目，或補齊證據後重跑；「核准不做」須附使用者原話＋時間。
-      1 與 3 同時成立時回 1，兩段訊息都會印。錯誤只回報給主線修正，不停下來等使用者。
+      4 執行期資源未收尾：已判定工作包的資源還在跑、宣稱完成時 wp／final 資源還在跑、保留資源缺理由，
+        或有未登記的脫離程序／容器（核對邏輯在同目錄 resource-ledger.py）——主線關閉、補登記或改標保留後重跑。
+      優先序 1＞3＞4，所有訊息都會印。錯誤只回報給主線修正，不停下來等使用者；守門不會自動關閉任何資源。
 <=150 行不提示；151–180 行提示下次派工前封存；>180 行 exit 1。
 只報告、不自動改寫 state.md：封存時保留 active／BLOCKED 工作包、當前候選版、最新核准變更與未解差異，
 其餘（已關閉工作包、舊並行批次、舊判定、已取代的主線自做）由主線搬到同目錄 archive.md，不刪除或重寫歷史。
 舊格式（「驗收標準」是編號清單、沒有狀態欄）照樣印出條文，但無法比對完成宣稱，只提示改用逐條表。
 """
 import argparse
+import importlib.util
 import re
 from pathlib import Path
 
@@ -80,7 +84,15 @@ def final_claim(lines):
     return bool(CLAIM.search(NOT_CLAIM.sub("", text))), "附條件" in text
 
 
-def main(argv=None):
+def resource_ledger():
+    spec = importlib.util.spec_from_file_location("resource_ledger", Path(__file__).with_name("resource-ledger.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def main(argv=None, snapshot=None):
+    """snapshot 讓測試注入程序／容器實況；正式執行時由 resource-ledger.py 當場讀取。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state")
     parser.add_argument("--soft-limit", type=int, default=150)
@@ -130,6 +142,12 @@ def main(argv=None):
         print("改成「未完成」並列剩餘條目，或補證據後重跑；核准不做要先在核准變更記使用者原話與時間。")
     if (claimed and open_items) or conditional:
         code = code or 3
+
+    shown_resources, resource_problems = resource_ledger().audit(path, claimed=claimed, snapshot=snapshot)
+    if shown_resources:
+        print("\n".join(shown_resources))
+    if resource_problems:
+        code = code or 4
     return code
 
 

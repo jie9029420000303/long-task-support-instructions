@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""檢查 Goal sidecar 是否仍是可快速重載的當前快照，並逐條重列驗收標準、核對完成宣稱。
+"""檢查 Goal sidecar 是否仍是可快速重載的當前快照，並逐條重列驗收標準、核對完成宣稱與執行期資源收尾。
 
 用法：python3 sidecar-guard.py <state.md> [--soft-limit 150] [--hard-limit 180]
 輸出：先報容量，再印「驗收標準」逐條（條文與狀態）與最新一筆核准變更；每次派工前與判定後都執行，
 主線因此每次重看條文原文。
 exit：不超過 hard limit 且判定一致回 0；超過 hard limit 回 1；參數或檔案錯誤回 2；
 「最終判定」宣稱 PASS／完成／達成，但逐條仍有不是 PASS 或「核准不做」的條目，或寫了「附條件」，回 3
-（主線改判定或補證據後重跑；核准不做須附使用者原話與時間）。1 與 3 同時成立回 1，兩段訊息都印。
+（主線改判定或補證據後重跑；核准不做須附使用者原話與時間）。
+執行期資源未收尾回 4：已判定工作包的資源還在跑、宣稱完成時 wp／final 資源還在跑、保留資源缺理由，或有未登記的
+脫離程序／容器（核對邏輯在同目錄 resource-ledger.py）。優先序 1＞3＞4，所有訊息都印；不自動關閉任何資源。
 本工具只報告、不自動改寫 state.md，避免錯誤封存未解工作；錯誤交主線修正，不等待使用者確認。
 舊格式（驗收標準為編號清單、無狀態欄）照樣印出條文，但不核對完成宣稱。
 """
 
 import argparse
+import importlib.util
 from pathlib import Path
 import re
 
@@ -75,7 +78,14 @@ def final_claim(lines):
     return bool(CLAIM.search(NOT_CLAIM.sub("", text))), "附條件" in text
 
 
-def report_acceptance(lines):
+def resource_ledger():
+    spec = importlib.util.spec_from_file_location("resource_ledger", Path(__file__).with_name("resource-ledger.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def report_acceptance(lines, path=None, snapshot=None):
     shown, unmet, legacy = acceptance(lines)
     if shown:
         print(f"驗收標準（每次派工前與判定後重看；{len(shown)} 條，未達成 {len(unmet)} 條）：")
@@ -94,10 +104,18 @@ def report_acceptance(lines):
     if claimed and unmet:
         print("最終判定宣稱完成，但這些條目仍不是 PASS 或核准不做：" + "、".join(unmet))
         print("改為「未完成」並列出剩餘條目，或補證據後重跑；核准不做須先在核准變更記錄使用者原話與時間。")
-    return 3 if (claimed and unmet) or conditional else 0
+    code = 3 if (claimed and unmet) or conditional else 0
+    if path is not None:
+        shown, problems = resource_ledger().audit(path, claimed=claimed, snapshot=snapshot)
+        if shown:
+            print("\n".join(shown))
+        if problems:
+            code = code or 4
+    return code
 
 
-def main(argv=None):
+def main(argv=None, snapshot=None):
+    """snapshot 讓測試注入程序／容器實況；正式執行時由 resource-ledger.py 當場讀取。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state")
     parser.add_argument("--soft-limit", type=int, default=150)
@@ -120,7 +138,7 @@ def main(argv=None):
             f"sidecar 快照：{line_count} 行，在 {args.soft_limit} 行目標內；"
             f"並行批次 {batches}，可封存的已關閉工作列 {closed_rows}。"
         )
-        return report_acceptance(lines)
+        return report_acceptance(lines, path, snapshot)
 
     detail = (
         f"sidecar 快照：{line_count} 行，超過 {args.soft_limit} 行目標；"
@@ -129,14 +147,14 @@ def main(argv=None):
     if line_count <= args.hard_limit:
         print(detail)
         print("下次派工前應移出舊批次、已關閉工作包與舊判定到 archive.md。")
-        return report_acceptance(lines)
+        return report_acceptance(lines, path, snapshot)
 
     print(detail)
     print(
         f"已超過 {args.hard_limit} 行派工上限；先保留 active/BLOCKED/當前候選版/"
         "最新核准變更，再把其餘歷史移至 archive.md。"
     )
-    report_acceptance(lines)
+    report_acceptance(lines, path, snapshot)
     return 1
 
 
