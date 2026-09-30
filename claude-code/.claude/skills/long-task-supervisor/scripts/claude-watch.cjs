@@ -4,6 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {hash,read,need,validateContract}=require('./guard.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
+const {digest,persist,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
 const statePath=path.join(run,'daemon-state.json');
@@ -16,6 +17,17 @@ const settleMs=Number(process.env.CLAUDE_WATCH_SETTLE_MS||15000);
 function save(file,value){fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2)+'\n');fs.renameSync(file+'.tmp',file);}
 function checkpoint(){state.updatedAt=now();save(statePath,state);}
 function stopped(){return fs.existsSync(path.join(run,'STOP'));}
+function handoffRequest(){
+  const names=fs.readdirSync(run).filter(name=>/^handoff-request-[a-f0-9-]{36}\.json$/.test(name)).sort();
+  if(!names.length)return false;
+  const request=read(path.join(run,names[0])),event=read(request.eventFile);
+  need(digest(event)===request.eventHash,'Handoff event changed after request');
+  const result=persist(run,state,event);state=read(statePath);
+  need(!result.alreadyProcessed,'Processed handoff cannot be pending again');
+  save(path.join(run,'handoff-ack-'+event.id+'.json'),{pending:true,...result,at:now()});
+  fs.unlinkSync(path.join(run,names[0]));
+  return true;
+}
 function readNew(){
   const file=binding.executorLog;
   const end=fs.statSync(file).size;
@@ -49,9 +61,13 @@ function eventOf(text,id){
   if(!value||!['progress','question','blocked','waiting','submission'].includes(value.kind))value={kind:line?'protocol_error':'unmarked_final'};
   if(['progress','waiting'].includes(value.kind)&&!(typeof value.nextAction==='string'&&value.nextAction.trim()))value={kind:'protocol_error'};
   if(value.kind==='submission'&&(!/^sha256:[a-f0-9]{64}$/.test(value.revision||'')||typeof value.manifest!=='string'))value={kind:'protocol_error'};
-  return {id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
+  if(value.id!==undefined){
+    need(typeof value.id==='string'&&/^[a-f0-9-]{36}$/.test(value.id),'Invalid explicit event ID');
+    need(Boolean(state.handoffEvents?.[value.id]),'Explicit event ID has no persisted handoff');
+  }
+  return {id:value.id||id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
     nextAction:value.nextAction||null,waitMinutes:Number.isFinite(value.waitMinutes)?value.waitMinutes:null,
-    text:text.slice(-8000),at:now()};
+    text,at:now()};
 }
 function waitingHasBlocker(text){
   // These phrases identify the observed permission block and explicit user-decision requests.
@@ -68,20 +84,20 @@ async function waitChange(){
   });
 }
 async function watch(){
+  if(fs.existsSync(lockPath)){
+    const old=read(lockPath);
+    need(!ownerAlive(old.pid),'Another desktop watcher owns this run');
+    fs.unlinkSync(lockPath);
+  }
+  fs.writeFileSync(lockPath,JSON.stringify({pid:process.pid,run,at:now()}),{flag:'wx'});ownsLock=true;
+  state=read(statePath);
   if(stopped()){state.phase='stopped';checkpoint();return;}
+  if(state.pending||state.phase==='accepted')return;
   need(binding.platform==='claude-code'&&binding.executorDesktopId,'Desktop executor binding required');
   need(hash(contractPath)===binding.contractSha256,'Locked contract changed');
   validateContract(read(contractPath));
   need(hash(path.join(run,'executor-prompt.txt'))===binding.promptSha256,'Executor prompt changed');
-  need(!stopped(),'Run was stopped');
-  need(!state.pending&&state.phase!=='accepted','Resolve the pending event before listening again');
-  if(fs.existsSync(lockPath)){
-    const old=read(lockPath);let alive=false;
-    try{process.kill(old.pid,0);alive=true;}catch{}
-    need(!alive,'Another desktop watcher owns this run');
-    fs.unlinkSync(lockPath);
-  }
-  fs.writeFileSync(lockPath,JSON.stringify({pid:process.pid,run,at:now()}),{flag:'wx'});ownsLock=true;
+  if(stopped()){state.phase='stopped';checkpoint();return;}
   state.pid=process.pid;state.phase='watching';checkpoint();
   save(readyPath,{pid:process.pid,executorId:binding.executorId,executorDesktopId:binding.executorDesktopId,readVerified:true,at:now()});
   let lastGrowthAt=Date.now();
@@ -91,7 +107,9 @@ async function watch(){
     state.executorOffset=final.finalEnd;
     const event=eventOf(final.texts.join('\n'),final.finalId);
     const writtenAt=Date.parse(final.finalAt)||Date.now();
-    if(state.seen.includes(event.id)){checkpoint();return false;}
+    const recorded=state.handoffEvents?.[event.id];
+    if(recorded)need(recorded===digest(event),'Same event ID has different content');
+    if(state.seen.includes(event.id)||recorded){state.seen.includes(event.id)||(state.seen.push(event.id));checkpoint();return false;}
     if(event.kind==='waiting'){
       if(waitingHasBlocker(event.text))event.kind='blocked';
       else{
@@ -114,6 +132,7 @@ async function watch(){
     return true;
   }
   while(!stopped()){
+    if(handoffRequest()){console.log('LONG_TASK_WAKE '+JSON.stringify(state.pending));return;}
     if(!state.pending){const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);if(auditEvent){
       auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
       markAnnounced(state,auditEvent);state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
@@ -162,8 +181,11 @@ async function watch(){
 (async()=>{
   try{await watch();}
   catch(error){
-    if(stopped()){state.phase='stopped';checkpoint();return;}
-    state.phase='error';state.error={message:error.message,at:now()};checkpoint();console.error(error.stack||error);process.exitCode=1;
+    if(ownsLock){
+      if(stopped()){state.phase='stopped';checkpoint();return;}
+      state.phase='error';state.error={message:error.message,at:now()};checkpoint();
+    }
+    console.error(error.stack||error);process.exitCode=1;
   }
   finally{if(ownsLock){try{if(read(lockPath).pid===process.pid)fs.unlinkSync(lockPath);}catch{}}}
 })();
