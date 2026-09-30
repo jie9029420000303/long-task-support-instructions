@@ -219,3 +219,68 @@ test('a waiting reply with a merge approval block wakes the supervisor immediate
     assert.match(state.pending.text,/權限審查擋下/);
   }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('Claude observe clears a known approval block without delivery and the next question is watched',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-observe-'));
+  const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});
+  const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
+  const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
+  const executorLog=path.join(project,executorId+'.jsonl');
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
+  const run=path.join(root,'run'),input=path.join(root,'input.json');
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Observe known approval',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Watch next event',source:'source.md:1',verify:'Replay transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'120',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const script=path.join(scripts,'supervise.cjs');execFileSync(process.execPath,[script,'init',run,input],{env});
+  const first=crypto.randomUUID();
+  line(executorLog,{type:'assistant',uuid:first,timestamp:new Date().toISOString(),message:{id:'msg-block',stop_reason:'end_turn',content:[{type:'text',text:'PR #26 still needs Jay approval.\nLONG_TASK_EVENT {"kind":"blocked"}'}]}});
+  let child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
+  try {
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id===first);
+    await until(()=>!fs.existsSync(path.join(run,'watcher.lock')));
+    const decision=path.join(root,'observe.json');
+    fs.writeFileSync(decision,JSON.stringify({eventId:first,disposition:'observe',reason:'Approval is already pending and no executor response is needed.',pendingApprovals:['Merge PR #26 into develop']}));
+    const result=JSON.parse(execFileSync(process.execPath,[script,'decision',run,decision],{env,encoding:'utf8'}));
+    assert.equal(result.processed,true);
+    let state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(state.pending,null);assert.equal(state.phase,'idle');
+    assert.deepEqual(state.resolved[first].decision.pendingApprovals,['Merge PR #26 into develop']);
+    assert.equal(fs.readFileSync(executorLog,'utf8').includes('LONG_TASK_DELIVERY:'+first),false);
+    child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).phase==='watching');
+    const second=crypto.randomUUID();
+    line(executorLog,{type:'assistant',uuid:second,timestamp:new Date().toISOString(),message:{id:'msg-question',stop_reason:'end_turn',content:[{type:'text',text:'A new independent question.\nLONG_TASK_EVENT {"kind":"question"}'}]}});
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id===second);
+    state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));assert.equal(state.pending.kind,'question');
+  } finally {child?.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('Claude observe honors an existing STOP without consuming the pending event',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-observe-stop-'));
+  const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});
+  const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
+  const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
+  const executorLog=path.join(project,executorId+'.jsonl');
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
+  const run=path.join(root,'run'),input=path.join(root,'input.json');
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep STOP authoritative',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Do not consume pending after STOP',source:'source.md:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]}}));
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'120',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  const script=path.join(scripts,'supervise.cjs');execFileSync(process.execPath,[script,'init',run,input],{env});
+  const eventId=crypto.randomUUID();
+  line(executorLog,{type:'assistant',uuid:eventId,timestamp:new Date().toISOString(),message:{id:'msg-block',stop_reason:'end_turn',content:[{type:'text',text:'PR #26 still needs Jay approval.\nLONG_TASK_EVENT {"kind":"blocked"}'}]}});
+  const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
+  try {
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id===eventId);
+    await until(()=>!fs.existsSync(path.join(run,'watcher.lock')));
+    const before=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    fs.writeFileSync(path.join(run,'STOP'),'stop\n');
+    const decision=path.join(root,'observe.json');
+    fs.writeFileSync(decision,JSON.stringify({eventId,disposition:'observe',reason:'Record the known approval while honoring STOP.',pendingApprovals:['Merge PR #26 into develop']}));
+    const result=JSON.parse(execFileSync(process.execPath,[script,'decision',run,decision],{env,encoding:'utf8'}));
+    assert.equal(result.processed,false);assert.match(result.reason,/stopped/i);
+    const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(state.phase,'stopped');assert.deepEqual(state.pending,before.pending);
+    assert.deepEqual(state.seen,before.seen);assert.equal(state.resolved?.[eventId],undefined);
+  } finally {child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+});

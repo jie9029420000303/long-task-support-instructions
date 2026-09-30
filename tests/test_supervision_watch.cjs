@@ -56,3 +56,68 @@ test('resident Codex watcher reads exact final, confirms one delivery, and accep
   } finally {child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
   assert.equal(stderr,'');
 });
+
+test('Codex observe sends no executor reply, preserves approval, and continues to a new submission',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'supervision-observe-'));
+  const source=path.join(root,'source.txt'),candidate=path.join(root,'candidate.txt'),manifest=path.join(root,'manifest.json');
+  fs.writeFileSync(source,'Required output: done\n');fs.writeFileSync(candidate,'done\n');
+  save(manifest,{files:[{path:candidate,sha256:sha(candidate)}]});
+  const contract={goal:'Finish after a known approval block',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Exact output',source:'source.txt:1',verify:'Read bytes'}],sources:[{path:source,sha256:sha(source)}]};
+  const run=path.join(root,'run');fs.mkdirSync(run);
+  save(path.join(run,'contract.json'),contract);
+  const supervisorId='supervisor-qa',executorId='executor-qa';
+  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json'))});
+  save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
+  const finals=[
+    'PR #26 is still waiting for Jay approval.\nLONG_TASK_EVENT {"kind":"blocked"}',
+    'Candidate ready.\nLONG_TASK_EVENT '+JSON.stringify({kind:'submission',revision:'sha256:'+sha(manifest),manifest})
+  ];
+  const fixture=path.join(root,'mock.json'),sentFile=path.join(root,'sent.json'),secondTurnGate=path.join(root,'allow-second-turn');
+  save(fixture,{supervisorId,executorId,finals,secondTurnGate});
+  const start=()=>spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sentFile},stdio:['ignore','pipe','pipe']});
+  let child=start(),stderr='';child.stderr.on('data',chunk=>stderr+=chunk.toString());
+  try {
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id==='executor-turn-1');
+    save(path.join(run,'decision-executor-turn-1.json'),{eventId:'executor-turn-1',disposition:'observe',reason:'This exact merge approval is already pending; do not repeat it to the executor.',pendingApprovals:['Merge PR #26 into develop']});
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).resolved?.['executor-turn-1']);
+    child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));
+    const observed=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(observed.resolved['executor-turn-1'].decision.reason,'This exact merge approval is already pending; do not repeat it to the executor.');
+    assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
+    fs.writeFileSync(secondTurnGate,'go\n');
+    child=start();child.stderr.on('data',chunk=>stderr+=chunk.toString());
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id==='executor-turn-2');
+    const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(state.pending.kind,'submission');
+    assert.equal(state.resolved['executor-turn-1'].decision.disposition,'observe');
+    assert.deepEqual(state.resolved['executor-turn-1'].decision.pendingApprovals,['Merge PR #26 into develop']);
+    const sends=JSON.parse(fs.readFileSync(sentFile));
+    assert.equal(sends.length,2);
+    assert.equal(sends.some(message=>message.includes('LONG_TASK_DELIVERY:answer-executor-turn-1')),false);
+  } finally {child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+  assert.equal(stderr,'');
+});
+
+test('Codex observe honors an existing STOP and does not restart watching',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'supervision-observe-stop-'));
+  const source=path.join(root,'source.txt');fs.writeFileSync(source,'Criterion\n');
+  const contract={goal:'Stop after recording a known block',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Remain stopped',source:'source.txt:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]};
+  const run=path.join(root,'run');fs.mkdirSync(run);save(path.join(run,'contract.json'),contract);
+  const supervisorId='supervisor-qa',executorId='executor-qa';
+  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json'))});
+  save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
+  const fixture=path.join(root,'mock.json'),sentFile=path.join(root,'sent.json');
+  save(fixture,{supervisorId,executorId,final:'Known approval remains pending.\nLONG_TASK_EVENT {"kind":"blocked"}'});
+  const child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sentFile},stdio:['ignore','pipe','pipe']});
+  try {
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id==='executor-turn-1');
+    fs.writeFileSync(path.join(run,'STOP'),'stop\n');
+    save(path.join(run,'decision-executor-turn-1.json'),{eventId:'executor-turn-1',disposition:'observe',reason:'Record the known approval while honoring STOP.',pendingApprovals:['Merge PR #26 into develop']});
+    await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Watcher did not stop')),6000);child.once('exit',()=>{clearTimeout(timer);resolve();});});
+    const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+    assert.equal(state.phase,'stopped');assert.equal(state.pending.id,'executor-turn-1');
+    assert.equal(state.resolved?.['executor-turn-1'],undefined);
+    assert.equal(fs.existsSync(path.join(run,'STOP')),true);
+    assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
+  } finally {child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+});
