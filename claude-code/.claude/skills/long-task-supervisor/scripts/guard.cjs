@@ -29,7 +29,7 @@ function validateContract(contract) {
 }
 function validateDecision(config, contract, event, decision) {
   need(decision && decision.eventId === event.id, 'Decision belongs to another event');
-  need(['accept', 'reject', 'reply', 'needs_user'].includes(decision.disposition), 'Unknown disposition');
+  need(['accept', 'reject', 'reply', 'needs_user', 'observe'].includes(decision.disposition), 'Unknown disposition');
   if (decision.disposition === 'accept') {
     need(event.kind === 'submission', 'Only a submitted candidate can be accepted');
     need(typeof event.revision === 'string' && /^sha256:[a-f0-9]{64}$/.test(event.revision) && decision.revision === event.revision, 'Decision version differs from submission');
@@ -64,6 +64,14 @@ function validateDecision(config, contract, event, decision) {
     need(rows.size === contract.criteria.length, 'Unknown acceptance criterion');
   } else if (decision.disposition === 'reject' || decision.disposition === 'reply') {
     need(typeof decision.reply === 'string' && decision.reply.trim(), 'Missing specific reply');
+  } else if (decision.disposition === 'observe') {
+    need(typeof decision.reason === 'string' && decision.reason.trim(), 'Missing observe reason');
+    for (const field of ['reply', 'delivery', 'revision', 'results']) {
+      need(!Object.prototype.hasOwnProperty.call(decision, field), 'Observe cannot include ' + field);
+    }
+    if (Object.prototype.hasOwnProperty.call(decision, 'pendingApprovals')) {
+      need(Array.isArray(decision.pendingApprovals) && decision.pendingApprovals.length > 0 && decision.pendingApprovals.every(item => typeof item === 'string' && item.trim()), 'Invalid pending approvals');
+    }
   }
   return decision;
 }

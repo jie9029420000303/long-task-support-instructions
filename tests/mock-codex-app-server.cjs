@@ -2,14 +2,24 @@ const fs=require('node:fs');
 const readline=require('node:readline');
 const data=JSON.parse(fs.readFileSync(process.env.MOCK_CODEX_FIXTURE,'utf8'));
 const sentFile=process.env.MOCK_CODEX_SENT;
+let waitCount=0,currentTurn=0;
 const reply=value=>({content:[{type:'text',text:JSON.stringify(value)}]});
 function call(name,args) {
-  if (name==='wait_threads') return reply({polls:[{thread:{id:data.executorId},cursor:'cursor-1',
-    ...(data.noTurn?{}:{latestTurn:{id:'executor-turn-1',status:'completed'},
-    latestAssistantMessage:{phase:'final_answer',turnId:'executor-turn-1',text:'LONG_TASK_EVENT {"kind":"submission","revision":"sha256"}'}})}]});
+  if (name==='wait_threads') {
+    const gateClosed=data.secondTurnGate && !fs.existsSync(data.secondTurnGate);
+    const next=data.secondTurnGate ? (waitCount++ + 1) : waitCount++;
+    currentTurn=gateClosed?0:Math.min(next,Math.max(0,(data.finals?.length||1)-1));
+    const turnId='executor-turn-'+(currentTurn+1);
+    return reply({polls:[{thread:{id:data.executorId},cursor:'cursor-'+(currentTurn+1),
+    ...(data.noTurn?{}:{latestTurn:{id:turnId,status:'completed'},
+    latestAssistantMessage:{phase:'final_answer',turnId,text:'LONG_TASK_EVENT {"kind":"submission","revision":"sha256"}'}})}]});
+  }
   if (name==='read_thread') {
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
-    if (args.threadId===data.executorId) return reply({thread:{id:data.executorId},turns:[{id:'executor-turn-1',status:'completed',items:[{type:'agentMessage',phase:'final_answer',text:data.final}]}]});
+    if (args.threadId===data.executorId) {
+      const finals=data.finals||[data.final],turnId='executor-turn-'+(currentTurn+1);
+      return reply({thread:{id:data.executorId},turns:[{id:turnId,status:'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]}]}]});
+    }
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
     return reply({thread:{id:data.supervisorId},turns:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'agentMessage',phase:'commentary',text:prompt}]}))});
   }

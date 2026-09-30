@@ -140,7 +140,7 @@ function reviewPrompt(event) {
   return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
     + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
     + '\n請依原始條件自行核對候選版與真實證據，不採信執行者的 PASS 自述。'
-    + '以 ' + path.join(run,'decision-' + event.id + '.json') + ' 寫入 eventId、disposition（accept/reject/reply/needs_user）、revision（accept 時）、results（accept 時每條含 id,status,method,expected,actual,evidence[{path,sha256}]）、reply（reject/reply 時）。'
+    + '以 ' + path.join(run,'decision-' + event.id + '.json') + ' 寫入 eventId、disposition（accept/reject/reply/needs_user/observe）、revision（accept 時）、results（accept 時每條含 id,status,method,expected,actual,evidence[{path,sha256}]）、reply（reject/reply 時）、reason（observe 時非空，可另列 pendingApprovals 字串陣列；observe 不送訊也不代表核准）。'
     + '寫完執行 ' + [process.execPath,path.join(__dirname,'supervise.cjs'),'decision',run,path.join(run,'decision-' + event.id + '.json')].map(shellQuote).join(' ')
     + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。'+dispatch;
 }
@@ -178,13 +178,18 @@ async function pendingDecision() {
     await changed(run,()=>!fs.existsSync(file) || hash(file)!==previousDecision);
     return;
   }
+  if (decision.disposition === 'observe') {
+    (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
+    state.seen.push(event.id); state.pending = null;
+    state.phase = 'watching'; checkpoint(); return;
+  }
   if (decision.disposition === 'accept') {
-    (state.resolved ||= {})[event.id] = {event,decisionSha256:hash(file)};
+    (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
     state.seen.push(event.id); state.pending = null;
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
   }
   await sendAndRead(binding.executorId,decision.reply,'answer-' + event.id);
-  (state.resolved ||= {})[event.id] = {event,decisionSha256:hash(file)};
+  (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
   state.seen.push(event.id); state.pending = null;
   state.phase = 'watching'; checkpoint();
 }

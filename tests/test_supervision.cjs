@@ -62,6 +62,35 @@ for (const [platform,dir] of versions) {
     assert.throws(()=>guard.validateDecision(f.config,f.contract,{...f.event,kind:'progress'},f.decision),/Only a submitted/);
     fs.rmSync(f.root,{recursive:true,force:true});
   });
+  test(platform+' observe records a reason without reply, delivery, or acceptance fields',()=>{
+    const f=fixture(),event={id:'rillet-known-block',kind:'blocked'};
+    const observe={eventId:event.id,disposition:'observe',reason:'The merge remains pending explicit user approval; no repeated executor message is useful.',
+      pendingApprovals:['Merge PR #26 into develop']};
+    assert.doesNotThrow(()=>guard.validateDecision(f.config,f.contract,event,observe));
+    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,reason:'  '}),/Missing observe reason/);
+    for (const field of ['reply','delivery','revision','results']) {
+      assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,[field]:field==='results'?[]:'x'}),/Observe cannot include/);
+    }
+    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,pendingApprovals:[]}),/Invalid pending approvals/);
+    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,pendingApprovals:['']}),/Invalid pending approvals/);
+    fs.rmSync(f.root,{recursive:true,force:true});
+  });
+  test(platform+' confirms the original observe decision and rejects later edits',()=>{
+    const f=fixture(),run=path.join(f.root,'run'),event={id:'rillet-known-block',kind:'blocked'};
+    const decision={eventId:event.id,disposition:'observe',reason:'The approval is already pending.',pendingApprovals:['Merge PR #26 into develop']};
+    const decisionFile=path.join(run,'decision-rillet-known-block.json');fs.mkdirSync(run);
+    fs.writeFileSync(path.join(run,'contract.json'),JSON.stringify(f.contract));
+    fs.writeFileSync(path.join(run,'binding.json'),JSON.stringify({allowedRoots:[f.root],contractSha256:sha(path.join(run,'contract.json'))}));
+    fs.writeFileSync(decisionFile,JSON.stringify(decision));
+    fs.writeFileSync(path.join(run,'daemon-state.json'),JSON.stringify({phase:'idle',pending:null,
+      resolved:{[event.id]:{event,decision,decisionSha256:sha(decisionFile)}}}));
+    const command=[path.join(dir,'supervise.cjs'),'decision',run,decisionFile];
+    const checked=JSON.parse(execFileSync(process.execPath,command,{encoding:'utf8'}));
+    assert.equal(checked.processed,true);
+    fs.writeFileSync(decisionFile,JSON.stringify({...decision,reason:'Changed after resolution'}));
+    assert.throws(()=>execFileSync(process.execPath,command,{stdio:'pipe'}),/Command failed/);
+    fs.rmSync(f.root,{recursive:true,force:true});
+  });
   test(platform+' locks the original acceptance source',()=>{
     const f=fixture();
     fs.writeFileSync(f.source,'weakened criterion');

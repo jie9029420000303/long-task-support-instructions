@@ -132,13 +132,17 @@ function decision() {
   const value=validateDecision(binding,contract,event,input);
   if (resolved) return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true};
   if (value.disposition==='needs_user') return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:false};
-  if (value.disposition!=='accept') {
+  if (value.disposition==='observe' && fs.existsSync(path.join(run,'STOP'))) {
+    state.phase='stopped';save(path.join(run,'daemon-state.json'),state);
+    return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:false,reason:'Run was stopped before observe could be processed'};
+  }
+  if (!['accept','observe'].includes(value.disposition)) {
     const marker='LONG_TASK_DELIVERY:'+event.id;
     need(input.delivery?.marker===marker && ['delivered','queued'].includes(input.delivery.status) &&
       typeof input.delivery.messageId==='string' && input.delivery.messageId, 'Missing desktop message receipt');
     need(fs.readFileSync(binding.executorLog,'utf8').includes(marker), 'Desktop delivery not recorded in executor transcript');
   }
-  (state.resolved ||= {})[event.id]={event,decisionSha256:hash(inputArgument)};
+  (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
   state.phase=value.disposition==='accept'?'accepted':'idle';
   if (state.phase==='accepted') state.acceptedAt=now();
