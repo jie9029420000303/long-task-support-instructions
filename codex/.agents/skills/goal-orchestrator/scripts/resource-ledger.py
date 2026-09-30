@@ -258,9 +258,35 @@ def members(res, snap):
 def containers_of(res, snap):
     if snap.get("containers") is None:
         return None
+    recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
+    return [c["id"] for c in snap["containers"] if c["id"] in recorded]
+
+
+def container_candidates(res, snap):
+    """用可讀名稱找現在的容器；只用於回報身分不符，不能當成停止目標。"""
+    if snap.get("containers") is None:
+        return None
     if res["kind"] == "compose":
-        return [c["id"] for c in snap["containers"] if c["project"] == res["project"]]
-    return [c["id"] for c in snap["containers"] if c["name"] == res["container"]]
+        return [c for c in snap["containers"] if c["project"] == res["project"]]
+    return [c for c in snap["containers"] if c["name"] == res["container"]]
+
+
+def container_identity(c):
+    created = c.get("created")
+    return {"id": c["id"], "name": c["name"],
+            "created": created.isoformat() if isinstance(created, dt.datetime) else created}
+
+
+def inactive_note(res, snap):
+    if res["kind"] == "process":
+        return "已不在執行（帳本尚未標記停止）"
+    candidates = container_candidates(res, snap) or []
+    recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
+    different = [c for c in candidates if c["id"] not in recorded]
+    if different:
+        names = "、".join(c["name"] for c in different[:4])
+        return f"原登記身分已不在執行；目前同名／同專案容器身分不符（{names}），未動它們"
+    return "已不在執行（帳本尚未標記停止）"
 
 
 def alive(res, snap):
@@ -442,7 +468,7 @@ def audit(state, claimed=False, snapshot=None):
     for res in running:
         state_now = alive(res, snap)
         if state_now is False:
-            shown.append(f"  {describe(res)}：已不在執行（帳本尚未標記停止）")
+            shown.append(f"  {describe(res)}：{inactive_note(res, snap)}")
             continue
         if res.get("close") in NEEDS_REASON and not res.get("reason"):
             problems.append(f"{describe(res)}：標為 {res.get('close')} 卻沒寫理由")
@@ -516,16 +542,62 @@ def cmd_run(args):
         note = f"指令自行結束（exit {code}）"
     except subprocess.TimeoutExpired:
         code, note = 0, f"到期自動關（{human(args.ttl)}）"
-    mark_stopped(args.ledger, args.id, note)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     with contextlib.suppress(ProcessLookupError):
         os.killpg(0, signal.SIGTERM)
     deadline = time.monotonic() + 10
-    while child.poll() is None and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        remaining = process_group_members(os.getpgrp(), {os.getpid()})
+        if remaining == []:
+            break
+        if remaining is None:
+            print("無法讀取 process group 實況，帳本未標記停止", file=sys.stderr)
+            return code or 1
         time.sleep(0.2)
-    if child.poll() is None:
-        os.killpg(0, signal.SIGKILL)
-    return code
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        remaining = process_group_members(os.getpgrp(), {os.getpid()})
+        if remaining == []:
+            mark_stopped(args.ledger, args.id, note)
+            return code
+        if remaining is None:
+            print("無法讀取 process group 實況，帳本未標記停止", file=sys.stderr)
+            return code or 1
+        for pid in remaining:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        time.sleep(0.1)
+    remaining = process_group_members(os.getpgrp(), {os.getpid()})
+    if remaining == []:
+        mark_stopped(args.ledger, args.id, note)
+        return code
+    if remaining is None:
+        print("無法讀取 process group 實況，帳本未標記停止", file=sys.stderr)
+        return code or 1
+    print(f"無法收整 process group，仍在執行：pid {','.join(map(str, remaining))}", file=sys.stderr)
+    return code or 1
+
+
+def process_group_members(pgid, exclude=()):
+    """只讀 numeric pid/pgid；不讓 lstart locale 解析失敗把活著的後代漏掉。"""
+    excluded = set(exclude)
+    try:
+        result = subprocess.run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True,
+                                timeout=30, start_new_session=True)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    found = []
+    for line in result.stdout.splitlines():
+        try:
+            pid_text, group_text, state = line.split(None, 2)
+            pid, group = int(pid_text), int(group_text)
+        except (ValueError, TypeError):
+            continue
+        if group == pgid and pid not in excluded and not state.startswith("Z"):
+            found.append(pid)
+    return sorted(found)
 
 
 def cmd_register(args):
@@ -542,9 +614,23 @@ def cmd_register(args):
         record.update(kind="process", pid=None if group else args.pid, pgid=args.pid if group else None,
                       start=info["start"].isoformat(), command=info["command"], cwd=cwds([args.pid]).get(args.pid))
     elif args.compose_project:
-        record.update(kind="compose", project=args.compose_project)
+        containers = docker_containers()
+        if containers is None:
+            die("docker 不可用，無法讀取 compose 容器身分")
+        found = [c for c in containers if c["project"] == args.compose_project]
+        if not found:
+            die(f"找不到執行中的 compose 專案 {args.compose_project}")
+        record.update(kind="compose", project=args.compose_project,
+                      container_identities=[container_identity(c) for c in found])
     else:
-        record.update(kind="container", container=args.container)
+        containers = docker_containers()
+        if containers is None:
+            die("docker 不可用，無法讀取容器身分")
+        found = [c for c in containers if c["name"] == args.container]
+        if not found:
+            die(f"找不到執行中的容器 {args.container}")
+        record.update(kind="container", container=args.container,
+                      container_identities=[container_identity(c) for c in found])
     with locked(path) as data:
         record["id"] = next_id(data)
         data["resources"].append(record)
@@ -575,11 +661,28 @@ def terminate(res, snap):
     ids = containers_of(res, snap)
     if ids is None:
         return False, "docker 不可用，無法關閉"
-    if not ids:
+    candidates = container_candidates(res, snap) or []
+    recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
+    different = [c for c in candidates if c["id"] not in recorded]
+    mismatch = (f"；同名／同專案的 {len(different)} 個新容器身分不符，未動"
+                if different else "")
+    if not recorded:
+        if candidates:
+            return False, "帳本沒有不可變容器身分，為避免誤停同名新容器而未操作"
         return True, "已不在執行"
-    subprocess.run(["docker", "stop", *ids], capture_output=True, timeout=120)
-    left = containers_of(res, {"containers": docker_containers()})
-    return (not left), ("已停止並核對" if not left else f"仍有 {len(left)} 個容器在跑")
+    if not ids:
+        return True, "原登記身分已不在執行" + mismatch
+    try:
+        result = subprocess.run(["docker", "stop", *ids], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return False, "docker 停止指令失敗"
+    if result.returncode != 0:
+        return False, f"docker stop 失敗（exit {result.returncode}）"
+    current = docker_containers()
+    if current is None:
+        return False, "docker 不可用，無法核對停止結果"
+    left = containers_of(res, {"containers": current})
+    return (not left), ("已停止並核對" + mismatch if not left else f"原登記身分仍有 {len(left)} 個容器在跑")
 
 
 def cmd_stop(args):

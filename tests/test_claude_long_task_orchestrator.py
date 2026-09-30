@@ -713,6 +713,33 @@ class ResourceAuditTests(unittest.TestCase):
         self.assertEqual([], problems)
         self.assertIn("docker 不可用", shown[0])
 
+    def test_container_stop_uses_registered_ids_and_leaves_replacements_alone(self):
+        # Compose 專案名會被重用；舊任務的帳本若只記名稱，會把之後重建的新容器誤停。
+        state = task_state(self.root, [("B-1", "在途")])
+        old = container("old-api", "shared", self.root)
+        original = resource_ledger.docker_containers
+        try:
+            resource_ledger.docker_containers = lambda: [old]
+            self.assertEqual(0, resource_ledger.main([
+                "register", "--state", str(state), "--wp", "B-1", "--compose-project", "shared"]))
+        finally:
+            resource_ledger.docker_containers = original
+        saved = resource_ledger.load(state.parent / "resources.json")["resources"][0]
+        self.assertEqual([old["id"]], [item["id"] for item in saved["container_identities"]])
+
+        replacement = container("new-api", "shared", self.root)
+        calls = []
+        old_run = resource_ledger.subprocess.run
+        try:
+            resource_ledger.subprocess.run = lambda argv, **kwargs: calls.append(argv)
+            ok, note = resource_ledger.terminate(saved, snapshot(containers=[replacement]))
+        finally:
+            resource_ledger.subprocess.run = old_run
+        self.assertTrue(ok)
+        self.assertEqual([], calls, "身分不符的新容器不得交給 docker stop")
+        self.assertIn("身分不符", note)
+        self.assertIn("未動", note)
+
     def test_state_outside_a_task_layout_is_not_scanned(self):
         # 沒有帳本、不在長任務目錄、也沒有工作區時不掃系統：既有測試與舊任務不該多出環境依賴。
         path = Path(self.root) / "state.md"
@@ -810,6 +837,26 @@ class ResourceLedgerProcessTests(unittest.TestCase):
         pgid = self.ledger()[0]["pgid"]
         self.assertTrue(self.wait_until(lambda: not self.group_alive(pgid), 8), "TTL 到期後程序仍在")
         self.assertTrue(self.wait_until(lambda: "到期" in (self.ledger()[0].get("stop_note") or ""), 3), self.ledger())
+
+    def test_natural_child_exit_still_reaps_term_ignoring_descendant_before_stopped(self):
+        # 直接 child 結束不代表服務整組結束；忽略 TERM 的後代必須升級 KILL，帳本才能寫 stopped。
+        pid_file = Path(self.root) / "descendant.pid"
+        descendant = ("import os,pathlib,signal,time; "
+                      f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                      "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)")
+        child = ("import subprocess,sys,time; "
+                 f"subprocess.Popen([sys.executable, '-c', {descendant!r}]); time.sleep(0.5)")
+        result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--",
+                          sys.executable, "-c", child)
+        self.assertEqual(0, result.returncode, result.stderr)
+        pgid = self.ledger()[0]["pgid"]
+        self.assertTrue(self.wait_until(pid_file.exists, 3), "後代未啟動")
+        descendant_pid = int(pid_file.read_text())
+        self.assertTrue(self.wait_until(lambda: bool(self.ledger()[0].get("stopped_at")), 16),
+                        (self.ledger(), [p for p in resource_ledger.ps_table().values() if p["pgid"] == pgid]))
+        self.assertTrue(self.wait_until(lambda: descendant_pid not in resource_ledger.ps_table(), 3),
+                        "忽略 TERM 的後代沒有被 KILL")
+        self.assertTrue(self.wait_until(lambda: not self.group_alive(pgid), 3), "stopped 後 process group 仍存活")
 
     def test_acceptance_preview_needs_a_reason_and_defaults_to_72_hours(self):
         result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--close", "acceptance", "--", "sleep", "63")
