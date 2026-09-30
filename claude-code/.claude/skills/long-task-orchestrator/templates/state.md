@@ -5,6 +5,7 @@
 - 封存：已完成工作包搬到同目錄 archive.md；本檔目標 150 行，派工前不得超過 180 行（用 scripts/sidecar-guard.py 檢查）
 - /goal 條件：<使用者設定的條件，或「未設」>
 - 並行上限：<20（Claude Code 預設）／N（CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS）／N（使用者指定）>　背景派工：<可用／停用（CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1，已揭露差距）>
+- 執行期資源：同目錄 `resources.json`（`scripts/resource-ledger.py` 登記與收尾；`sidecar-guard.py` 每次核對，未收尾 exit 4）
 
 ## 原始目標
 <使用者原句>

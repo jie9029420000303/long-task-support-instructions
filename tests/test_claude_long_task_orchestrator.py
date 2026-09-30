@@ -1,4 +1,4 @@
-"""Claude Code adapter 回歸測試：並行派工閘、積極派工、狀態檔容量守門、子代理定義與 hook、共用規格一致性。
+"""Claude Code adapter 回歸測試：並行派工閘、積極派工、狀態檔容量守門、執行期資源收尾、子代理定義與 hook、共用規格一致性。
 
 每個測試都對應一個「為什麼重要」：假衝突會讓可並行的工作被迫排隊，漏判衝突會讓並行包互相踩壞
 工作區；缺 [工作區] 時猜測隔離狀態會讓舊工作包悄悄共用 worktree；狀態檔膨脹會讓主線壓縮後讀不起狀態；
@@ -8,13 +8,18 @@
 codex/），或獨立技能副本（本機封裝 repo：tests/ 旁邊直接是 .claude/，與 ~/.claude 同形）。跨 adapter
 一致性只有正式 repo 才有比對對象，獨立副本會明確標為 skipped。
 """
+import datetime as dt
 import hashlib
 import importlib.util
+import json
+import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -43,6 +48,7 @@ def load(name, filename):
 
 scope_overlap = load("claude_scope_overlap", "scope-overlap.py")
 sidecar_guard = load("claude_sidecar_guard", "sidecar-guard.py")
+resource_ledger = load("claude_resource_ledger", "resource-ledger.py")
 
 
 def write_wp(directory, name, scope, shared, workspace=None, path=None, worktree=None, base=BASE):
@@ -548,6 +554,398 @@ class DisciplineContractTests(unittest.TestCase):
             self.assertIn(marker, template)
 
 
+# ---------- 執行期資源收尾 ----------
+# 2026-09-30 實測：16GB 機器記憶體需求 39.8GB、swap 97%。已結束的長任務留下 50 個容器（佔 Docker 95% CPU）、
+# 前一波工作包的 dev server 活了 10.5 小時、預覽 server 活了 22–30 天、6 個等待迴圈沒有逾時空轉 12–23 小時。
+# 並行閘只問「誰在用」，沒有任何一步問「誰負責關」，所以下面每個測試都在守「關得掉、找得到、不誤殺」。
+
+T0 = dt.datetime(2026, 9, 30, 12, 0, 0)
+AFTER = T0 + dt.timedelta(minutes=5)
+BEFORE = T0 - dt.timedelta(days=3)
+
+
+def proc(pid, cwd, ppid=1, pgid=None, start=AFTER, uid=None, command="node server.js"):
+    return {"pid": pid, "ppid": ppid, "pgid": pgid or pid, "uid": os.getuid() if uid is None else uid,
+            "start": start, "command": command, "cwd": cwd}
+
+
+def container(name, project="", working_dir="", task="", created=AFTER):
+    return {"id": f"id-{name}", "name": name, "created": created, "project": project,
+            "working_dir": working_dir, "task": task}
+
+
+def snapshot(procs=(), containers=(), launchd=()):
+    return {"procs": {p["pid"]: p for p in procs}, "uid": os.getuid(), "launchd": set(launchd),
+            "containers": None if containers is None else list(containers)}
+
+
+def resource(rid, wp, pgid, close="wp", reason="", kind="process", **extra):
+    record = {"id": rid, "wp": wp, "kind": kind, "close": close, "reason": reason, "command": "npm run dev"}
+    if kind == "process":
+        record.update(pgid=pgid, start=AFTER.isoformat())
+    record.update(extra)
+    return record
+
+
+def task_state(root, packages=(), verdict="未完成", resources=(), task="t", created="2026-09-30 12:00"):
+    """在 <root>/.claude/long-task/<task>/ 寫狀態檔（可選帳本）；packages＝[(id, 狀態)]，工作區在 <root>/wt-<id>。"""
+    directory = Path(root) / ".claude" / "long-task" / task
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = "".join(f"| {i} | B | {state} | path:{root}/wt-{i}／worktree:{i}／base:{BASE} |\n" for i, state in packages)
+    (directory / "state.md").write_text(
+        f"# 長任務狀態：{task}\n\n- 建立：{created}\n\n## 工作包\n"
+        "| id | 類型 | 狀態（待派／在途／PASS／FAIL） | 工作區（path／worktree／base） |\n|---|---|---|---|\n"
+        f"{rows}\n## 最終判定\n{verdict}\n", encoding="utf-8")
+    if resources:
+        (directory / "resources.json").write_text(
+            json.dumps({"resources": list(resources)}, ensure_ascii=False), encoding="utf-8")
+    return directory / "state.md"
+
+
+class ResourceAuditTests(unittest.TestCase):
+    """注入程序／容器實況，驗證守門的判斷；不碰真實系統，結果可重現。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_judged_package_server_must_be_closed_but_in_flight_one_may_run(self):
+        # Rillet 前一波 ui-w1 的 next dev 在該波判定後又活了 10.5 小時；在途包的服務則是正在用，不能誤報。
+        state = task_state(self.root, [("B-1", "PASS"), ("B-2", "在途")],
+                           resources=[resource("r1", "B-1", 101), resource("r2", "B-2", 102)])
+        _, problems = resource_ledger.audit(state, snapshot=snapshot([
+            proc(101, f"{self.root}/wt-B-1", ppid=1), proc(102, f"{self.root}/wt-B-2", ppid=1)]))
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn("r1", problems[0])
+        self.assertIn("B-1 已判定", problems[0])
+
+    def test_completion_claim_requires_closing_but_keeps_the_acceptance_preview(self):
+        # 最終版預覽要留給使用者驗收（使用者定案），但必須寫理由；主線自用服務在宣稱完成前一定要關。
+        state = task_state(self.root, [("B-1", "PASS")], verdict="PASS", resources=[
+            resource("r1", "主線", 201, close="final"),
+            resource("r2", "B-1", 202, close="acceptance", reason="最終候選版交 Jay 驗收"),
+            resource("r3", "B-1", 203, close="acceptance"),
+            resource("r4", "主線", 204, close="external", reason="使用者自己的開發資料庫"),
+        ])
+        live = snapshot([proc(pid, self.root) for pid in (201, 202, 203, 204)])
+        _, problems = resource_ledger.audit(state, claimed=True, snapshot=live)
+        flagged = sorted(p.split("［")[0] for p in problems)
+        self.assertEqual(["r1", "r3"], flagged, problems)
+        _, problems = resource_ledger.audit(state, claimed=False, snapshot=live)
+        self.assertEqual(["r3"], [p.split("［")[0] for p in problems], "未宣稱完成時 final 資源可以繼續跑")
+
+    def test_unregistered_detached_process_in_workspace_is_reported_without_false_positives(self):
+        # 真正漏掉的是「脫離 session、沒人登記」的程序；開機常駐服務、任務前就在跑的服務、別的任務的資源、
+        # 還掛在 session 底下的程序、不在任務範圍的程序、別的使用者的程序都不能被當成本任務的殘留。
+        other = task_state(self.root, task="other", resources=[resource("r9", "B-9", 207)])
+        state = task_state(self.root, [("B-1", "在途")])
+        self.assertTrue(other.is_file())
+        live = snapshot([
+            proc(201, f"{self.root}/wt-B-1"),                    # 要抓：脫離、任務開始後、在工作區內
+            proc(202, self.root, start=BEFORE),                  # 任務開始前就在跑
+            proc(203, self.root),                                # launchd 常駐
+            proc(204, self.root, ppid=4242),                     # 還掛在 session 底下
+            proc(205, "/somewhere/else"),                        # 不在任務範圍
+            proc(206, self.root, uid=os.getuid() + 1),           # 別的使用者
+            proc(207, self.root),                                # 其他任務帳本登記過
+        ], launchd={203})
+        _, problems = resource_ledger.audit(state, snapshot=live)
+        self.assertEqual(1, len(problems), problems)
+        self.assertIn("pid 201", problems[0])
+
+    def test_unregistered_compose_project_is_reported_once_per_project(self):
+        # 今天最大宗是 compose：一個專案 7 個容器，回報要以專案為單位，主線才知道要收哪一組。
+        state = task_state(self.root, [("B-1", "在途")], resources=[
+            resource("r1", "B-1", None, kind="compose", project="lt-registered")])
+        live = snapshot(containers=[
+            container("lt-b1-api-1", "lt-b1", f"{self.root}/wt-B-1"),
+            container("lt-b1-db-1", "lt-b1", f"{self.root}/wt-B-1"),
+            container("ops-db", "ops", self.root, created=BEFORE),          # 任務前就在跑的開發資料庫
+            container("reg-1", "lt-registered", self.root),                  # 已登記
+            container("pg-x", task="t"),                                     # docker run 帶 lt.task 標籤
+            container("elsewhere-1", "far", "/somewhere/else"),
+        ])
+        _, problems = resource_ledger.audit(state, snapshot=live)
+        self.assertEqual(2, len(problems), problems)
+        self.assertTrue(any("compose 專案 lt-b1（2 個容器" in p for p in problems), problems)
+        self.assertTrue(any("容器 pg-x" in p for p in problems), problems)
+
+    def test_candidate_and_archived_workspaces_named_in_task_records_are_in_scope(self):
+        # 2026-09-30 對現役 Rillet 任務唯讀演練：整合候選版 worktree 不屬任何工作包，前一波工作包
+        # 又已封存進 archive.md；只看工作包表時 next dev 3850 與兩個 vite-node 全都掃不到。紀錄提到的同 repo
+        # worktree 與封存工作包的工作區要納入；紀錄沒提到的（別的 session 剛開的 worktree）不能納入。
+        repo = Path(self.root) / "repo"
+        git = lambda *args: subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+        repo.mkdir()
+        git("init", "-q")
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init")
+        for name in ("wt-candidate", "wt-other"):
+            git("worktree", "add", "-q", "--detach", f"{self.root}/{name}")
+        state = task_state(str(repo), [("B-1", "在途")])
+        (state.parent / "archive.md").write_text(
+            f"## 工作包\n| id | 類型 | 狀態 | 工作區（path／worktree／base） |\n|---|---|---|---|\n"
+            f"| B-0 | B | PASS | path:{self.root}/wt-archived／worktree:B-0／base:{BASE} |\n\n"
+            f"整合候選版在 {self.root}/wt-candidate/app 起 next dev 3850。\n", encoding="utf-8")
+        live = snapshot([proc(301, f"{self.root}/wt-candidate/app"), proc(302, f"{self.root}/wt-archived"),
+                         proc(303, f"{self.root}/wt-other")])
+        _, problems = resource_ledger.audit(state, snapshot=live)
+        self.assertEqual(["pid 301", "pid 302"], sorted(p.split("程序 ")[1].split("（")[0] for p in problems), problems)
+
+    def test_resources_started_after_the_last_state_write_belong_to_no_finished_task(self):
+        # 202 份真實狀態檔實測：被 git 帶進整合候選版 worktree 的 6 份舊任務（09-15～22 已結案）會把今天才啟動的
+        # Rillet 服務算到自己頭上。狀態檔最後寫入之後才出現的程序與容器，不能歸給這個任務。
+        state = task_state(self.root, [("B-1", "PASS")], verdict="PASS")
+        written = dt.datetime.fromtimestamp(state.stat().st_mtime)
+        later = written + dt.timedelta(minutes=10)
+        live = snapshot([proc(401, self.root, start=later)],
+                        containers=[container("late-1", "late", self.root, created=later)])
+        self.assertEqual([], resource_ledger.audit(state, snapshot=live)[1])
+        live = snapshot([proc(402, self.root, start=written - dt.timedelta(minutes=1))])
+        self.assertEqual(1, len(resource_ledger.audit(state, snapshot=live)[1]))
+
+    def test_docker_unavailable_is_disclosed_not_treated_as_clean(self):
+        # docker 沒開時不能默默當成「沒有容器」，否則最大宗的殘留會被當成已清乾淨。
+        state = task_state(self.root, [("B-1", "在途")])
+        shown, problems = resource_ledger.audit(state, snapshot=snapshot(containers=None))
+        self.assertEqual([], problems)
+        self.assertIn("docker 不可用", shown[0])
+
+    def test_container_stop_uses_registered_ids_and_leaves_replacements_alone(self):
+        # Compose 專案名會被重用；舊任務的帳本若只記名稱，會把之後重建的新容器誤停。
+        state = task_state(self.root, [("B-1", "在途")])
+        old = container("old-api", "shared", self.root)
+        original = resource_ledger.docker_containers
+        try:
+            resource_ledger.docker_containers = lambda: [old]
+            self.assertEqual(0, resource_ledger.main([
+                "register", "--state", str(state), "--wp", "B-1", "--compose-project", "shared"]))
+        finally:
+            resource_ledger.docker_containers = original
+        saved = resource_ledger.load(state.parent / "resources.json")["resources"][0]
+        self.assertEqual([old["id"]], [item["id"] for item in saved["container_identities"]])
+
+        replacement = container("new-api", "shared", self.root)
+        calls = []
+        old_run = resource_ledger.subprocess.run
+        try:
+            resource_ledger.subprocess.run = lambda argv, **kwargs: calls.append(argv)
+            ok, note = resource_ledger.terminate(saved, snapshot(containers=[replacement]))
+        finally:
+            resource_ledger.subprocess.run = old_run
+        self.assertTrue(ok)
+        self.assertEqual([], calls, "身分不符的新容器不得交給 docker stop")
+        self.assertIn("身分不符", note)
+        self.assertIn("未動", note)
+
+    def test_state_outside_a_task_layout_is_not_scanned(self):
+        # 沒有帳本、不在長任務目錄、也沒有工作區時不掃系統：既有測試與舊任務不該多出環境依賴。
+        path = Path(self.root) / "state.md"
+        path.write_text(acceptance_state([("A", "PASS", "")], "PASS"), encoding="utf-8")
+        original = resource_ledger.take_snapshot
+        resource_ledger.take_snapshot = lambda: self.fail("不應讀取系統實況")
+        try:
+            self.assertEqual(([], []), resource_ledger.audit(path))
+        finally:
+            resource_ledger.take_snapshot = original
+
+    def test_guard_exit_4_only_after_capacity_and_claim_checks(self):
+        # 優先序 1＞3＞4：容量爆了本來就不得派工；宣稱不一致也先處理；資源問題不能蓋掉這兩個訊息。
+        state = task_state(self.root, [("B-1", "PASS")], resources=[resource("r1", "B-1", 101)])
+        live = snapshot([proc(101, self.root)])
+        before = hashlib.sha256(state.read_bytes()).hexdigest()
+        self.assertEqual(4, sidecar_guard.main([str(state)], snapshot=live))
+        self.assertEqual(before, hashlib.sha256(state.read_bytes()).hexdigest(), "守門只能報告，不得改寫狀態檔")
+        self.assertEqual(0, sidecar_guard.main([str(state)], snapshot=snapshot()))
+        text = state.read_text(encoding="utf-8").replace("## 最終判定\n未完成", "## 最終判定\nPASS（附條件）")
+        state.write_text(text, encoding="utf-8")
+        self.assertEqual(3, sidecar_guard.main([str(state)], snapshot=live))
+        state.write_text(text + "填充\n" * 200, encoding="utf-8")
+        self.assertEqual(1, sidecar_guard.main([str(state)], snapshot=live))
+
+
+class ResourceLedgerProcessTests(unittest.TestCase):
+    """用真的程序驗證：關得掉整組、到期自己關、不誤殺 PID 被重用的程序、等待一定有逾時、真實掃描抓得到殘留。"""
+
+    ledger_script = str(SCRIPTS / "resource-ledger.py")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self.tmp.name)
+        created = (dt.datetime.now() - dt.timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M")
+        self.state = task_state(self.root, [("B-1", "在途")], created=created)
+        self.cleanup_pids = []
+
+    def tearDown(self):
+        for pid in self.cleanup_pids:
+            for kill in (lambda: os.killpg(pid, signal.SIGKILL), lambda: os.kill(pid, signal.SIGKILL)):
+                try:
+                    kill()
+                except (ProcessLookupError, PermissionError):
+                    pass
+        data = resource_ledger.load(self.state.parent / "resources.json")
+        for res in data["resources"]:
+            if res.get("pgid"):
+                try:
+                    os.killpg(res["pgid"], signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        self.tmp.cleanup()
+
+    def cli(self, *args, timeout=60):
+        return subprocess.run([sys.executable, self.ledger_script, *args], capture_output=True, text=True,
+                              cwd=self.root, timeout=timeout)
+
+    def ledger(self):
+        return resource_ledger.load(self.state.parent / "resources.json")["resources"]
+
+    @staticmethod
+    def group_alive(pgid):
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def wait_until(self, predicate, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.1)
+        return predicate()
+
+    def test_stop_terminates_the_whole_process_group_and_records_it(self):
+        # npm → node 這種會再生子程序的服務，只殺最上層會留下孫程序；stop 要收整組並核對真的停了。
+        spawn = "import subprocess, time; subprocess.Popen(['sleep', '61']); time.sleep(61)"
+        result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--", sys.executable, "-c", spawn)
+        self.assertEqual(0, result.returncode, result.stderr)
+        pgid = self.ledger()[0]["pgid"]
+        self.assertTrue(self.wait_until(lambda: len(resource_ledger.members(self.ledger()[0],
+                                                                            {"procs": resource_ledger.ps_table()})) >= 3, 5))
+        result = self.cli("stop", "--state", str(self.state), "--wp", "B-1")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertFalse(self.group_alive(pgid))
+        self.assertIsNotNone(self.ledger()[0]["stopped_at"])
+
+    def test_ttl_closes_the_resource_without_anyone_stopping_it(self):
+        # 使用者定案：忘了關的預覽最多活 3 天。這一條不能靠主線記得，所以由程序自己到期收掉並記帳。
+        result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--ttl", "1s", "--", "sleep", "62")
+        self.assertEqual(0, result.returncode, result.stderr)
+        pgid = self.ledger()[0]["pgid"]
+        self.assertTrue(self.wait_until(lambda: not self.group_alive(pgid), 8), "TTL 到期後程序仍在")
+        self.assertTrue(self.wait_until(lambda: "到期" in (self.ledger()[0].get("stop_note") or ""), 3), self.ledger())
+
+    def test_natural_child_exit_still_reaps_term_ignoring_descendant_before_stopped(self):
+        # 直接 child 結束不代表服務整組結束；忽略 TERM 的後代必須升級 KILL，帳本才能寫 stopped。
+        pid_file = Path(self.root) / "descendant.pid"
+        descendant = ("import os,pathlib,signal,time; "
+                      f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                      "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)")
+        child = ("import subprocess,sys,time; "
+                 f"subprocess.Popen([sys.executable, '-c', {descendant!r}]); time.sleep(0.5)")
+        result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--",
+                          sys.executable, "-c", child)
+        self.assertEqual(0, result.returncode, result.stderr)
+        pgid = self.ledger()[0]["pgid"]
+        self.assertTrue(self.wait_until(pid_file.exists, 3), "後代未啟動")
+        descendant_pid = int(pid_file.read_text())
+        self.assertTrue(self.wait_until(lambda: bool(self.ledger()[0].get("stopped_at")), 16),
+                        (self.ledger(), [p for p in resource_ledger.ps_table().values() if p["pgid"] == pgid]))
+        self.assertTrue(self.wait_until(lambda: descendant_pid not in resource_ledger.ps_table(), 3),
+                        "忽略 TERM 的後代沒有被 KILL")
+        self.assertTrue(self.wait_until(lambda: not self.group_alive(pgid), 3), "stopped 後 process group 仍存活")
+
+    def test_acceptance_preview_needs_a_reason_and_defaults_to_72_hours(self):
+        result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--close", "acceptance", "--", "sleep", "63")
+        self.assertEqual(2, result.returncode)
+        self.assertEqual([], self.ledger())
+        result = self.cli("start", "--state", str(self.state), "--wp", "B-1", "--close", "acceptance",
+                          "--reason", "最終候選版交使用者驗收", "--", "sleep", "63")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(72 * 3600, self.ledger()[0]["ttl"])
+        # 只指定工作包時不會順手關掉要給使用者驗收的預覽。
+        self.cli("stop", "--state", str(self.state), "--wp", "B-1")
+        self.assertTrue(self.group_alive(self.ledger()[0]["pgid"]))
+        self.assertEqual(0, self.cli("stop", "--state", str(self.state), "--id", "r1").returncode)
+        self.assertFalse(self.group_alive(self.ledger()[0]["pgid"]))
+
+    def test_stop_never_kills_a_process_that_reused_the_pid(self):
+        # 登記後原程序可能早已結束、PID 被別的程序拿走；stop 核對啟動時間，對不上就不動它。
+        victim = subprocess.Popen(["sleep", "64"], start_new_session=True)
+        self.cleanup_pids.append(victim.pid)
+        self.assertEqual(0, self.cli("register", "--state", str(self.state), "--wp", "B-1",
+                                     "--pid", str(victim.pid)).returncode)
+        path = self.state.parent / "resources.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["resources"][0]["start"] = "2000-01-01T00:00:00"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        self.cli("stop", "--state", str(self.state), "--all")
+        self.assertIsNone(victim.poll(), "PID 被重用時不得被關閉")
+
+    def test_wait_requires_a_timeout_and_reports_it(self):
+        # 今天 6 個手寫等待迴圈沒有逾時、空轉 12–23 小時；逾時是必填，逾時要以非 0 回報叫醒主線。
+        self.assertEqual(2, self.cli("wait", "--", "true").returncode)
+        begin = time.monotonic()
+        result = self.cli("wait", "--timeout", "1s", "--interval", "0.2s", "--", "false")
+        self.assertEqual(124, result.returncode)
+        self.assertIn("TIMEOUT", result.stdout)
+        self.assertLess(time.monotonic() - begin, 10)
+        result = self.cli("wait", "--timeout", "5s", "--", "test -d /")
+        self.assertEqual(0, result.returncode, result.stdout)
+        self.assertIn("READY", result.stdout)
+
+    def test_real_scan_reports_a_detached_process_left_in_the_workspace(self):
+        # 端到端：`cmd &` 讓程序脫離 session（父程序變 1），這正是 next dev、預覽 server 殘留的方式。
+        time.sleep(1.1)  # ps 的啟動時間只到秒；隔開一秒，程序才確定晚於狀態檔的寫入時間
+        subprocess.run(["sh", "-c", f"cd '{self.root}' && exec sleep 65 >/dev/null 2>&1 &"], check=True)
+        found = []
+        self.assertTrue(self.wait_until(lambda: found.extend(
+            p["pid"] for p in resource_ledger.ps_table().values() if p["command"] == "sleep 65" and p["ppid"] == 1) or found, 3))
+        self.cleanup_pids.extend(found)
+        # 狀態檔最後寫入之後才啟動的程序還不歸這個任務；主線照流程先更新狀態檔、再跑守門，就會被掃到。
+        self.assertEqual(0, self.cli("check", "--state", str(self.state)).returncode)
+        os.utime(self.state, None)
+        result = self.cli("check", "--state", str(self.state))
+        self.assertEqual(4, result.returncode, result.stdout + result.stderr)
+        self.assertIn(f"未登記 程序 pid {found[0]}", result.stdout)
+        # 補登記後就有主人，守門不再擋；關掉後帳本記下停止。
+        self.assertEqual(0, self.cli("register", "--state", str(self.state), "--wp", "B-1", "--pid", str(found[0])).returncode)
+        self.assertEqual(0, self.cli("check", "--state", str(self.state)).returncode)
+        self.assertEqual(0, self.cli("stop", "--state", str(self.state), "--all").returncode)
+        self.assertTrue(self.wait_until(lambda: not any(
+            p["pid"] == found[0] for p in resource_ledger.ps_table().values()), 5))
+
+
+class ResourceContractTests(unittest.TestCase):
+    """技能文字與範本必須把收尾寫進主線每天會走的路：派工前／判定後的守門、工作包提示、等待方式。"""
+
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_skill_states_when_to_close_and_what_the_guard_blocks(self):
+        body = section(self.skill, "執行期資源收尾")
+        for marker in ("resource-ledger.py", "--close wp", "--close final", "--close acceptance", "--close external",
+                       "72 小時", "exit 4", "不等使用者", "不自動關閉", "launchd", "lt.task", "nohup"):
+            self.assertIn(marker, body)
+        eager = section(self.skill, "積極派工")
+        self.assertIn("resource-ledger.py wait --timeout", eager)
+
+    def test_template_and_package_prompt_carry_the_ledger(self):
+        template = (SKILL / "templates" / "state.md").read_text(encoding="utf-8")
+        self.assertIn("resources.json", template)
+        execution = (SKILL / "references" / "execution.md").read_text(encoding="utf-8")
+        self.assertIn("[常駐資源]", execution)
+
+    def test_tech_workers_may_write_only_the_ledger_and_must_stop_their_servers(self):
+        # 技術子代理自測常要起 dev server；定義若只寫「不動狀態檔」，它不是拒絕登記就是用 & 丟背景——正是殘留來源。
+        for tier in ("medium", "high", "xhigh"):
+            body = (AGENTS / f"lt-tech-worker-{tier}.md").read_text(encoding="utf-8")
+            for marker in ("resource-ledger.py start", "stop --state", "`resources.json` 除外", "nohup"):
+                self.assertIn(marker, body, f"{tier}: {marker}")
+
+
 class SharedSpecTests(unittest.TestCase):
     @canonical_only
     def test_spec_copies_match_root_spec(self):
@@ -603,6 +1001,37 @@ class SharedSpecTests(unittest.TestCase):
                 self.assertEqual((expected, expected), (claude_code, codex_code), name)
 
     @canonical_only
+    def test_both_adapters_ship_the_same_resource_ledger_and_gate(self):
+        # 執行期資源收尾是共同語意：今天最大宗的 50 個容器是 Codex 長任務留下的，只修一邊等於沒修。
+        spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
+        self.assertIn("27. 執行期資源收尾", spec)
+        codex = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator"
+        self.assertEqual((SCRIPTS / "resource-ledger.py").read_bytes(),
+                         (codex / "scripts" / "resource-ledger.py").read_bytes(), "兩邊帳本工具必須是同一份")
+        for skill_dir in (SKILL, codex):
+            text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            for marker in ("## 執行期資源收尾", "resource-ledger.py", "--close acceptance", "exit 4" if skill_dir == SKILL else "回 4"):
+                self.assertIn(marker, text, f"{skill_dir.name}: {marker}")
+            self.assertIn("resources.json", (skill_dir / "templates" / "state.md").read_text(encoding="utf-8"))
+        spec_ = importlib.util.spec_from_file_location("codex_sidecar_guard_for_resources", codex / "scripts" / "sidecar-guard.py")
+        codex_guard = importlib.util.module_from_spec(spec_)
+        spec_.loader.exec_module(codex_guard)
+        with tempfile.TemporaryDirectory() as directory:
+            root = os.path.realpath(directory)
+            cases = [
+                ("已判定包的服務還在跑", [("B-1", "PASS")], "未完成", [resource("r1", "B-1", 101)], [proc(101, root)], 4),
+                ("在途包的服務", [("B-1", "在途")], "未完成", [resource("r1", "B-1", 101)], [proc(101, root)], 0),
+                ("宣稱完成但主線服務在跑", [("B-1", "PASS")], "PASS", [resource("r1", "主線", 101, close="final")], [proc(101, root)], 4),
+                ("未登記的脫離程序", [("B-1", "在途")], "未完成", [], [proc(102, root)], 4),
+                ("服務已自行結束", [("B-1", "PASS")], "PASS", [resource("r1", "B-1", 101)], [], 0),
+            ]
+            for index, (name, packages, verdict, resources, procs, expected) in enumerate(cases):
+                state = task_state(root, packages, verdict=verdict, resources=resources, task=f"case{index}")
+                live = snapshot(procs)
+                self.assertEqual((expected, expected), (sidecar_guard.main([str(state)], snapshot=live),
+                                                        codex_guard.main([str(state)], snapshot=live)), name)
+
+    @canonical_only
     def test_spec_and_both_adapters_carry_release_prerequisite_wait_and_question_rules(self):
         spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
         for marker in ("18. 驗收逐條與放行紀律", "19. 驗收條文只能依使用者明確授權變更", "20. 開工前置盤點", "21. 外部等待須有喚醒",
@@ -630,7 +1059,7 @@ class SharedSpecTests(unittest.TestCase):
 
     def test_skill_references_existing_scripts(self):
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-        for script in ("scope-overlap.py", "sidecar-guard.py"):
+        for script in ("scope-overlap.py", "sidecar-guard.py", "resource-ledger.py"):
             self.assertIn(f"scripts/{script}", skill)
             self.assertTrue((SCRIPTS / script).is_file(), script)
 
