@@ -108,7 +108,8 @@ async function watch(){
     const event=eventOf(final.texts.join('\n'),final.finalId);
     const writtenAt=Date.parse(final.finalAt)||Date.now();
     const recorded=state.handoffEvents?.[event.id];
-    if(recorded)need(recorded===digest(event),'Same event ID has different content');
+    // The persisted handoff is authoritative. Claude may summarize that event again in its visible
+    // final reply; the explicit ID identifies the summary as a mirror, not a second event body.
     if(state.seen.includes(event.id)||recorded){state.seen.includes(event.id)||(state.seen.push(event.id));checkpoint();return false;}
     if(event.kind==='waiting'){
       if(waitingHasBlocker(event.text))event.kind='blocked';

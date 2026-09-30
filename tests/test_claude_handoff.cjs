@@ -128,7 +128,7 @@ test('STOP during pending receipt wait never produces notification qualification
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('explicit transcript event is deduplicated after handoff and changed content with the same id is rejected',async()=>{
+test('persisted handoff stays authoritative when the visible final uses the same id with a shorter summary',async()=>{
   const f=fixture(),id=crypto.randomUUID(),event=eventFile(f,id,'Persisted final.');
   try{
     execFileSync(process.execPath,[path.join(scripts,'handoff.cjs'),'prepare',f.run,event.file],{env:f.env});
@@ -141,12 +141,24 @@ test('explicit transcript event is deduplicated after handoff and changed conten
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).phase==='watching');
     await new Promise(resolve=>setTimeout(resolve,250));assert.equal(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending,null);child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));
     state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));state.phase='idle';save(path.join(f.run,'daemon-state.json'),state);
-    const bad='Changed body.\nLONG_TASK_EVENT '+JSON.stringify({id,kind:'question'});
-    line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'bad',content:[{type:'text',text:bad}],stop_reason:'end_turn'}});
+    // Real desktop runs persist the complete event before native delivery, then may write a shorter
+    // user-facing final. Treating that summary as tampering stops supervision after a valid handoff.
+    const summary='Short visible summary.\nLONG_TASK_EVENT '+JSON.stringify({id,kind:'question'});
+    line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'summary',content:[{type:'text',text:summary}],stop_reason:'end_turn'}});
     line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'after',content:[{type:'text',text:'boundary'}],stop_reason:'tool_use'}});
     child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),f.run],{env:f.env,stdio:['ignore','pipe','pipe']});
-    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).phase==='error');
-    assert.match(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).error.message,/different content/);child.kill('SIGTERM');
+    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,250));
+    state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));
+    assert.equal(state.pending,null);assert.equal(state.error,undefined);assert.equal(state.seen.includes(id),true);
+    assert.match(fs.readFileSync(path.join(f.run,'handoff-'+id+'.json'),'utf8'),/Persisted final\./);
+    const next='Next real question.\nLONG_TASK_EVENT '+JSON.stringify({kind:'question'});
+    line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'next-real',content:[{type:'text',text:next}],stop_reason:'end_turn'}});
+    line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'next-boundary',content:[{type:'text',text:'boundary'}],stop_reason:'tool_use'}});
+    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.text.includes('Next real question.'));
+    state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));
+    assert.equal(state.pending.kind,'question');assert.equal(state.phase,'awaiting_decision');
+    if(child.exitCode===null){child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
