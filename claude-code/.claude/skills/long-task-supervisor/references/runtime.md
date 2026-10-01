@@ -30,6 +30,8 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 監督寫 `RUN/decision-<eventId>.json`。`eventId` 精確相同，`disposition` 為 `accept`、`reject`、`reply`、`observe` 或 `needs_user`。執行者問到待核准動作、但仍有其他工作可做時，使用 `reply` 指明已決定的可逆方案、暫停的具體動作與繼續項目，**不可用 `needs_user` 凍結整條主線**。純確認、已知阻塞且無需再發訊時使用 `observe`，即使當下只剩待核准事項，也須繼續接收新事件。`reject/reply` 有具體 `reply`；`accept` 有同一 `revision` 和每條 `PASS` 的 `method`、`expected`、`actual`、`evidence:[{path,sha256}]`。需向執行者續接、退件或代答時，訊息首行加入 `LONG_TASK_DELIVERY:<eventId>`，呼叫桌面原生送訊工具，保存它回報的 `delivered` 或 `queued` 及 `messageId` 到 `decision.delivery`；`decision` 還會檢查標記已進精確執行 transcript。結果只有「已排隊」時不可聲稱執行者已讀，重新掛監看等待該回合。送達不確定先對帳，不重送。`needs_user` 是保留當前 pending、暫停消費新事件的相容操作，只在確實需要整體暫停且已有使用者指示時使用；不是一般待核准事項的預設。
 
+`needs_user` 決策另填 `wholeRunPauseSource`，記下使用者要求整案暫停的原文訊息／文件位置；沒有此欄，程式拒絕決策。個別待核准操作使用 `reply` 或 `observe`。
+
 ## 原生事件交接
 
 綁定完成後，監督把精確 run 路徑及本節交給執行對話。執行者在需要代答、阻塞判斷或送驗時，先保存事件，再以桌面原生跨對話工具喚醒監督，補足背景通知可能無法啟動模型的情況。只有 `question`、`blocked`、`submission` 走這條路徑；純背景等待與一般進度維持原有監看，不傳保活訊息。
@@ -61,3 +63,19 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 ```
 
 只在 `current:true` 時送具體指示並照原協定保存 delivery、執行 decision。`current:false` 表示事件已過期，程式清除該 pending 並保留尚未處理的問題；不送訊、不為舊事件寫決策，重新掛 watcher。preflight 與桌面傳訊是兩個步驟，中間仍有狀態改變的時間窗，執行者收到後也須核對，不宣稱原子送達保證。監督只在需要處理事件時醒來，不以定時模型回合保活。
+
+## 主動進度查核
+
+Claude watcher 在最後一筆執行者 transcript 活動後滿 15 分鐘發出 `progress_review`，之後若仍無活動，每次決策送達後再過 15 分鐘重新查核。這是監督事件，不是執行者要貼的 `LONG_TASK_EVENT`。監督先查最新 transcript、派工快照、在途代理、背景工作的真實狀態與尚未達成的驗收條目，分辨正常長工作、進度延誤與證據不足；不可只根據靜默時間斷言異常。以 `LONG_TASK_DELIVERY:<eventId>` 向原執行對話發一則有事實根據的短訊，具體詢問「已完成什麼、現在哪個工作包或背景工作在跑、卡點及下一步」。有延誤或未回報成果時，同一則給可立即執行的收回、補派或排阻建議；正常長工作也給目前查得的狀態與下一個回報點，不發空泛保活。前次追問後仍沉默時，先查送達、執行回合、代理 handle 與背景輸出，再提出新的具體排阻動作，不照貼相同訊息。此事件只可用 `reply`，不能用 `observe` 消掉可見追蹤。決策必填 `progressCheck`，其 `evidence` 列出實際查過的 transcript、快照或工作 handle 與定位，`finding` 記進度判斷與不確定性，`guidance` 寫給執行者的具體下一步且須原文出現在 `reply`；空泛問候或沒有查核依據的決策會被拒絕。向執行對話送訊緊接之前執行：
+
+```text
+node "<skill>/scripts/supervise.cjs" progress-preflight "<RUN>" "<EVENT_ID>"
+```
+
+只在 `current:true` 時送出，保存原生送達結果與精確 transcript 標記，再執行 `decision` 並重掛唯一 watcher；`current:false` 不送舊追問，重新掛 watcher。App 暫停監督、背景工具通知沒有產生真實模型回合時，事件仍停在 pending，須如實揭露，不能宣稱已送出追問。
+
+`progress_review` 決策範例（路徑與事實須改用該 run 實際查得的資料）：
+
+```json
+{"eventId":"progress-review-事件識別值","disposition":"reply","progressCheck":{"evidence":["executor transcript: 最後執行活動及時間","dispatch.json: 工作包與在途代理狀態"],"finding":"尚無新成果回報；需先核對在途工作是否仍有輸出，不能單靠靜默認定卡死。","guidance":"請核對在途代理的最新輸出，收回已完成成果並回報卡點與下一步。"},"reply":"目前尚無新成果回報。請核對在途代理的最新輸出，收回已完成成果並回報卡點與下一步。","delivery":{"marker":"LONG_TASK_DELIVERY:progress-review-事件識別值","status":"delivered","messageId":"桌面訊息識別值"}}
+```

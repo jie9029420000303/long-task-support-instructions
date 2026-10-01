@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
-const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
+const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS } = require('./guard.cjs');
 const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
@@ -107,7 +107,8 @@ function init() {
     dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json'},
     createdAt:now()
   });
-  save(path.join(run, 'daemon-state.json'), {phase:'idle',executorOffset:markerOffset,turnText:[],seen:[],pending:null,reads:0});
+  save(path.join(run, 'daemon-state.json'), {phase:'idle',executorOffset:markerOffset,turnText:[],seen:[],pending:null,reads:0,
+    lastExecutorActivityAt:Date.now()});
   return {run,supervisorId:visible.id,toolSessionId:visible.toolSessionId,executorId,executorDesktopId:input.executorDesktopId,criteria:input.contract.criteria.length};
 }
 function status() {
@@ -131,6 +132,7 @@ function decision() {
   if (resolved) need(hash(inputArgument)===resolved.decisionSha256,'Processed decision changed');
   const value=validateDecision(binding,contract,event,input);
   if (resolved) return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true};
+  if (event.kind==='progress_review') need(state.progressReviewPreflight===event.id,'Progress review requires current preflight before delivery');
   if (value.disposition==='needs_user') return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:false};
   if (value.disposition==='observe' && fs.existsSync(path.join(run,'STOP'))) {
     state.phase='stopped';save(path.join(run,'daemon-state.json'),state);
@@ -141,9 +143,18 @@ function decision() {
     need(input.delivery?.marker===marker && ['delivered','queued'].includes(input.delivery.status) &&
       typeof input.delivery.messageId==='string' && input.delivery.messageId, 'Missing desktop message receipt');
     need(fs.readFileSync(binding.executorLog,'utf8').includes(marker), 'Desktop delivery not recorded in executor transcript');
+    if (event.kind==='progress_review') {
+      const delivered=fs.readFileSync(binding.executorLog,'utf8').split('\n').filter(Boolean).some(line=>{
+        try {const row=JSON.parse(line);return (row.message?.content||[]).some(block=>
+          block?.type==='text' && block.text.includes(marker) && block.text.includes(value.progressCheck.guidance));}
+        catch {return false;}
+      });
+      need(delivered,'Progress guidance not recorded in executor transcript');
+    }
   }
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
+  if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();}
   state.phase=value.disposition==='accept'?'accepted':'idle';
   if (state.phase==='accepted') state.acceptedAt=now();
   save(path.join(run,'daemon-state.json'),state);
@@ -152,12 +163,14 @@ function decision() {
 function stop() {load();fs.writeFileSync(path.join(run,'STOP'),now()+'\n');return {run,stopRequested:true};}
 function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
 function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
+function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS;if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
     const value=command==='init'?init():command==='status'?status()
       :command==='decision'?decision():command==='stop'?stop()
       :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
-      :(()=>{throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN; start the desktop watcher in App background Bash');})();
+      :command==='progress-preflight'?progressPreflight()
+      :(()=>{throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, stop RUN; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));
   } catch(error) {console.error(error.message);process.exitCode=1;}
 })();
