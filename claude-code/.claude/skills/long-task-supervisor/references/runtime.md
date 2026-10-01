@@ -66,10 +66,16 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 ## 主動進度查核
 
-Claude watcher 在最後一筆執行者 transcript 活動後滿 10 分鐘發出 `progress_review`，之後若仍無活動，每次決策送達後再過 10 分鐘重新查核。這是監督事件，不是執行者要貼的 `LONG_TASK_EVENT`。監督先查派工快照、在途代理、背景工作的真實狀態與尚未達成的驗收條目；以 `LONG_TASK_DELIVERY:<eventId>` 向原執行對話發一則有事實根據的短訊，具體詢問「已完成什麼、現在哪個工作包或背景工作在跑、卡點及下一步」。有延誤或未回報成果時，同一則給可立即執行的收回、補派或排阻建議；正常長工作也給目前查得的狀態與下一個回報點，不發空泛保活。前次追問後仍沉默時，先查送達、執行回合、代理 handle 與背景輸出，再提出新的具體排阻動作，不照貼相同訊息。此事件只可用 `reply`，不能用 `observe` 消掉可見追蹤。向執行對話送訊緊接之前執行：
+Claude watcher 在最後一筆執行者 transcript 活動後滿 15 分鐘發出 `progress_review`，之後若仍無活動，每次決策送達後再過 15 分鐘重新查核。這是監督事件，不是執行者要貼的 `LONG_TASK_EVENT`。監督先查最新 transcript、派工快照、在途代理、背景工作的真實狀態與尚未達成的驗收條目，分辨正常長工作、進度延誤與證據不足；不可只根據靜默時間斷言異常。以 `LONG_TASK_DELIVERY:<eventId>` 向原執行對話發一則有事實根據的短訊，具體詢問「已完成什麼、現在哪個工作包或背景工作在跑、卡點及下一步」。有延誤或未回報成果時，同一則給可立即執行的收回、補派或排阻建議；正常長工作也給目前查得的狀態與下一個回報點，不發空泛保活。前次追問後仍沉默時，先查送達、執行回合、代理 handle 與背景輸出，再提出新的具體排阻動作，不照貼相同訊息。此事件只可用 `reply`，不能用 `observe` 消掉可見追蹤。決策必填 `progressCheck`，其 `evidence` 列出實際查過的 transcript、快照或工作 handle 與定位，`finding` 記進度判斷與不確定性，`guidance` 寫給執行者的具體下一步且須原文出現在 `reply`；空泛問候或沒有查核依據的決策會被拒絕。向執行對話送訊緊接之前執行：
 
 ```text
 node "<skill>/scripts/supervise.cjs" progress-preflight "<RUN>" "<EVENT_ID>"
 ```
 
 只在 `current:true` 時送出，保存原生送達結果與精確 transcript 標記，再執行 `decision` 並重掛唯一 watcher；`current:false` 不送舊追問，重新掛 watcher。App 暫停監督、背景工具通知沒有產生真實模型回合時，事件仍停在 pending，須如實揭露，不能宣稱已送出追問。
+
+`progress_review` 決策範例（路徑與事實須改用該 run 實際查得的資料）：
+
+```json
+{"eventId":"progress-review-事件識別值","disposition":"reply","progressCheck":{"evidence":["executor transcript: 最後執行活動及時間","dispatch.json: 工作包與在途代理狀態"],"finding":"尚無新成果回報；需先核對在途工作是否仍有輸出，不能單靠靜默認定卡死。","guidance":"請核對在途代理的最新輸出，收回已完成成果並回報卡點與下一步。"},"reply":"目前尚無新成果回報。請核對在途代理的最新輸出，收回已完成成果並回報卡點與下一步。","delivery":{"marker":"LONG_TASK_DELIVERY:progress-review-事件識別值","status":"delivered","messageId":"桌面訊息識別值"}}
+```

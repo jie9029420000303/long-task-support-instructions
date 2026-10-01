@@ -143,6 +143,14 @@ function decision() {
     need(input.delivery?.marker===marker && ['delivered','queued'].includes(input.delivery.status) &&
       typeof input.delivery.messageId==='string' && input.delivery.messageId, 'Missing desktop message receipt');
     need(fs.readFileSync(binding.executorLog,'utf8').includes(marker), 'Desktop delivery not recorded in executor transcript');
+    if (event.kind==='progress_review') {
+      const delivered=fs.readFileSync(binding.executorLog,'utf8').split('\n').filter(Boolean).some(line=>{
+        try {const row=JSON.parse(line);return (row.message?.content||[]).some(block=>
+          block?.type==='text' && block.text.includes(marker) && block.text.includes(value.progressCheck.guidance));}
+        catch {return false;}
+      });
+      need(delivered,'Progress guidance not recorded in executor transcript');
+    }
   }
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;

@@ -11,7 +11,7 @@ const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
 const line=(file,value)=>fs.appendFileSync(file,JSON.stringify(value)+'\n');
 async function until(check,ms=6000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(resolve=>setTimeout(resolve,40));}throw Error('Timed out waiting for progress review');}
-function fixture(quietMinutes=11){
+function fixture(quietMinutes=16){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-progress-review-'));
   const project=path.join(root,'config','projects','qa');fs.mkdirSync(project,{recursive:true});
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Review criterion\n');
@@ -34,9 +34,9 @@ function fixture(quietMinutes=11){
 function command(f,name,...args){return JSON.parse(execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),name,f.run,...args],{env:f.env,encoding:'utf8',stdio:'pipe'}));}
 function start(f){return spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),f.run],{env:f.env,stdio:['ignore','pipe','pipe']});}
 
-test('nine quiet minutes stay below the ten-minute review threshold',async()=>{
-  assert.equal(PROGRESS_REVIEW_MS,10*60000);
-  const f=fixture(9),child=start(f);
+test('fourteen quiet minutes stay below the fifteen-minute review threshold',async()=>{
+  assert.equal(PROGRESS_REVIEW_MS,15*60000);
+  const f=fixture(14),child=start(f);
   try{
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
     await new Promise(resolve=>setTimeout(resolve,250));
@@ -51,23 +51,32 @@ test('quiet work produces a visible follow-up, then repeats after another interv
     await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
     const state=JSON.parse(fs.readFileSync(f.statePath)),event=state.pending;
     assert.throws(()=>validateDecision({}, {criteria:[]},event,{eventId:event.id,disposition:'observe',reason:'Quiet'}),/visible executor follow-up/);
+    assert.throws(()=>validateDecision({}, {criteria:[]},event,{eventId:event.id,disposition:'reply',reply:'Status?'}),/checked evidence/);
+    const progressCheck={evidence:['executor transcript: no activity for 16 minutes','dispatch.json: in-flight package still listed'],
+      finding:'No new result; in-flight status needs verification before calling this blocked.',
+      guidance:'Check the in-flight handle, collect any finished result, and report the blocker and next step.'};
+    assert.throws(()=>validateDecision({}, {criteria:[]},event,{eventId:event.id,disposition:'reply',reply:'Status?',progressCheck}),/guidance in the visible executor reply/);
     const premature=path.join(f.root,'premature.json');save(premature,{eventId:event.id,disposition:'reply',reply:'Status?'});
     assert.throws(()=>command(f,'decision',premature),/Command failed/);
     assert.equal(command(f,'progress-preflight',event.id).current,true);
     const marker='LONG_TASK_DELIVERY:'+event.id;
-    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:[{type:'text',text:marker+'\nPlease report current progress and blockers.'}]}});
+    const reply='No new result is visible. '+progressCheck.guidance;
+    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:[{type:'text',text:marker+'\nStatus?'}]}});
     const decision=path.join(f.root,'decision.json');
-    save(decision,{eventId:event.id,disposition:'reply',reply:'Please report current progress and blockers.',
+    save(decision,{eventId:event.id,disposition:'reply',reply,progressCheck,
       delivery:{marker,status:'delivered',messageId:'desktop-message-1'}});
+    assert.throws(()=>command(f,'decision',decision),/Command failed/);
+    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:[{type:'text',text:marker+'\n'+reply}]}});
     assert.equal(command(f,'decision',decision).processed,true);
     child=start(f);await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
     await new Promise(resolve=>setTimeout(resolve,250));
     const resumed=JSON.parse(fs.readFileSync(f.statePath));
     assert.equal(resumed.pending,null);
     assert.equal(resumed.resolved[event.id].decision.delivery.marker,marker);
+    assert.deepEqual(resumed.resolved[event.id].decision.progressCheck,progressCheck);
     assert.equal(resumed.lastProgressReviewAt>Date.now()-PROGRESS_REVIEW_MS,true);
     child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));
-    resumed.lastProgressReviewAt=Date.now()-11*60000;save(f.statePath,resumed);
+    resumed.lastProgressReviewAt=Date.now()-16*60000;save(f.statePath,resumed);
     child=start(f);
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
     const repeated=JSON.parse(fs.readFileSync(f.statePath)).pending;
