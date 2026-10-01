@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+const PROGRESS_REVIEW_MS = 60 * 60 * 1000;
 function need(ok, message) { if (!ok) throw Error(message); }
 function inside(file, root) {
   const relative = path.relative(root, file);
@@ -30,6 +31,7 @@ function validateContract(contract) {
 function validateDecision(config, contract, event, decision) {
   need(decision && decision.eventId === event.id, 'Decision belongs to another event');
   need(['accept', 'reject', 'reply', 'needs_user', 'observe'].includes(decision.disposition), 'Unknown disposition');
+  if (event.kind === 'progress_review') need(decision.disposition === 'reply', 'Progress review requires a visible executor follow-up');
   if (decision.disposition === 'accept') {
     need(event.kind === 'submission', 'Only a submitted candidate can be accepted');
     need(typeof event.revision === 'string' && /^sha256:[a-f0-9]{64}$/.test(event.revision) && decision.revision === event.revision, 'Decision version differs from submission');
@@ -72,7 +74,10 @@ function validateDecision(config, contract, event, decision) {
     if (Object.prototype.hasOwnProperty.call(decision, 'pendingApprovals')) {
       need(Array.isArray(decision.pendingApprovals) && decision.pendingApprovals.length > 0 && decision.pendingApprovals.every(item => typeof item === 'string' && item.trim()), 'Invalid pending approvals');
     }
+  } else if (decision.disposition === 'needs_user') {
+    need(typeof decision.wholeRunPauseSource === 'string' && decision.wholeRunPauseSource.trim(),
+      'Whole-run pause requires an explicit user instruction source; use reply or observe for one blocked action');
   }
   return decision;
 }
-module.exports = { hash, read, inside, need, validateContract, validateDecision };
+module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS };

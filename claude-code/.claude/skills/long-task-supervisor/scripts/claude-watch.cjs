@@ -2,7 +2,7 @@
 // Watch one desktop executor until its next completed turn; App background Bash wakes the supervisor.
 const fs=require('node:fs');
 const path=require('node:path');
-const {hash,read,need,validateContract}=require('./guard.cjs');
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS}=require('./guard.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
 const {digest,persist,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
@@ -101,6 +101,7 @@ async function watch(){
   state.pid=process.pid;state.phase='watching';checkpoint();
   save(readyPath,{pid:process.pid,executorId:binding.executorId,executorDesktopId:binding.executorDesktopId,readVerified:true,at:now()});
   let lastGrowthAt=Date.now();
+  state.lastExecutorActivityAt ||= Math.max(Date.parse(binding.createdAt)||0,fs.statSync(binding.executorLog).mtimeMs);
   function finishFinal(){
     const final=state.message;
     state.message=null;
@@ -142,6 +143,12 @@ async function watch(){
     if(rows.length)lastGrowthAt=Date.now();
     let finalized=false;
     for(const {row,end} of rows){
+      const toolResult=row?.type==='user'&&Array.isArray(row.message?.content)&&
+        row.message.content.some(block=>block?.type==='tool_result');
+      if((row?.type==='assistant'&&!row.isSidechain)||toolResult){
+        const recorded=Date.parse(row.timestamp);
+        state.lastExecutorActivityAt=Math.max(state.lastExecutorActivityAt,Number.isFinite(recorded)?Math.min(recorded,Date.now()):Date.now());
+      }
       const id=row?.type==='assistant'&&row.message&&!row.isSidechain?(row.message.id||row.uuid):null;
       if(state.message?.finalId && ((id&&id!==state.message.id)||row?.type==='user')){
         if(finishFinal())return;
@@ -171,6 +178,14 @@ async function watch(){
     if(state.progressWait&&Date.now()>=state.progressWait.deadline){
       const event={...state.progressWait.event,kind:'continue'};
       state.progressWait=null;state.pending=event;state.phase='awaiting_decision';checkpoint();
+      console.log('LONG_TASK_WAKE '+JSON.stringify(event));
+      return;
+    }
+    if(Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS){
+      state.progressReviewSequence=(state.progressReviewSequence||0)+1;
+      const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
+        kind:'progress_review',lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),at:now()};
+      state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;
     }
