@@ -6,12 +6,12 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const {spawn,execFileSync}=require('node:child_process');
 const scripts=process.env.CLAUDE_SUPERVISOR_SCRIPTS||path.resolve(__dirname,'../claude-code/.claude/skills/long-task-supervisor/scripts');
-const {validateDecision}=require(path.join(scripts,'guard.cjs'));
+const {validateDecision,PROGRESS_REVIEW_MS}=require(path.join(scripts,'guard.cjs'));
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
 const line=(file,value)=>fs.appendFileSync(file,JSON.stringify(value)+'\n');
 async function until(check,ms=6000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(resolve=>setTimeout(resolve,40));}throw Error('Timed out waiting for progress review');}
-function fixture(){
+function fixture(quietMinutes=11){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-progress-review-'));
   const project=path.join(root,'config','projects','qa');fs.mkdirSync(project,{recursive:true});
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Review criterion\n');
@@ -28,11 +28,21 @@ function fixture(){
   const env={...process.env,CLAUDE_CONFIG_DIR:path.join(root,'config'),CLAUDE_SESSION_ID:supervisorId,CLAUDE_WATCH_SETTLE_MS:'100'};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   const statePath=path.join(run,'daemon-state.json'),state=JSON.parse(fs.readFileSync(statePath));
-  state.lastExecutorActivityAt=Date.now()-61*60000;save(statePath,state);
+  state.lastExecutorActivityAt=Date.now()-quietMinutes*60000;save(statePath,state);
   return {root,run,env,executorLog,statePath};
 }
 function command(f,name,...args){return JSON.parse(execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),name,f.run,...args],{env:f.env,encoding:'utf8',stdio:'pipe'}));}
 function start(f){return spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),f.run],{env:f.env,stdio:['ignore','pipe','pipe']});}
+
+test('nine quiet minutes stay below the ten-minute review threshold',async()=>{
+  assert.equal(PROGRESS_REVIEW_MS,10*60000);
+  const f=fixture(9),child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,250));
+    assert.equal(JSON.parse(fs.readFileSync(f.statePath)).pending,null);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
 
 test('quiet work produces a visible follow-up, then repeats after another interval without new executor activity',async()=>{
   const f=fixture();let child=start(f);
@@ -55,9 +65,9 @@ test('quiet work produces a visible follow-up, then repeats after another interv
     const resumed=JSON.parse(fs.readFileSync(f.statePath));
     assert.equal(resumed.pending,null);
     assert.equal(resumed.resolved[event.id].decision.delivery.marker,marker);
-    assert.equal(resumed.lastProgressReviewAt>Date.now()-60000,true);
+    assert.equal(resumed.lastProgressReviewAt>Date.now()-PROGRESS_REVIEW_MS,true);
     child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));
-    resumed.lastProgressReviewAt=Date.now()-61*60000;save(f.statePath,resumed);
+    resumed.lastProgressReviewAt=Date.now()-11*60000;save(f.statePath,resumed);
     child=start(f);
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
     const repeated=JSON.parse(fs.readFileSync(f.statePath)).pending;

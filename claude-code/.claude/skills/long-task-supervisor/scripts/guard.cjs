@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
-const PROGRESS_REVIEW_MS = 60 * 60 * 1000;
+const PROGRESS_REVIEW_MS = 10 * 60 * 1000;
 function need(ok, message) { if (!ok) throw Error(message); }
 function inside(file, root) {
   const relative = path.relative(root, file);

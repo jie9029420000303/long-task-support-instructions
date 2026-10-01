@@ -66,7 +66,7 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 ## 主動進度查核
 
-Claude watcher 在最後一筆執行者 transcript 活動後滿 60 分鐘發出 `progress_review`，之後若仍無活動，每次決策送達後再過 60 分鐘重新查核。這是監督事件，不是執行者要貼的 `LONG_TASK_EVENT`。監督先查派工快照、在途代理、背景工作的真實狀態與尚未達成的驗收條目；以 `LONG_TASK_DELIVERY:<eventId>` 向原執行對話發一則有事實根據的短訊，具體詢問「已完成什麼、現在哪個工作包或背景工作在跑、卡點及下一步」。有延誤或未回報成果時，同一則給可立即執行的收回、補派或排阻建議；正常長工作也給目前查得的狀態與下一個回報點，不發空泛保活。前次追問後仍沉默時，先查送達、執行回合、代理 handle 與背景輸出，再提出新的具體排阻動作，不照貼相同訊息。此事件只可用 `reply`，不能用 `observe` 消掉可見追蹤。向執行對話送訊緊接之前執行：
+Claude watcher 在最後一筆執行者 transcript 活動後滿 10 分鐘發出 `progress_review`，之後若仍無活動，每次決策送達後再過 10 分鐘重新查核。這是監督事件，不是執行者要貼的 `LONG_TASK_EVENT`。監督先查派工快照、在途代理、背景工作的真實狀態與尚未達成的驗收條目；以 `LONG_TASK_DELIVERY:<eventId>` 向原執行對話發一則有事實根據的短訊，具體詢問「已完成什麼、現在哪個工作包或背景工作在跑、卡點及下一步」。有延誤或未回報成果時，同一則給可立即執行的收回、補派或排阻建議；正常長工作也給目前查得的狀態與下一個回報點，不發空泛保活。前次追問後仍沉默時，先查送達、執行回合、代理 handle 與背景輸出，再提出新的具體排阻動作，不照貼相同訊息。此事件只可用 `reply`，不能用 `observe` 消掉可見追蹤。向執行對話送訊緊接之前執行：
 
 ```text
 node "<skill>/scripts/supervise.cjs" progress-preflight "<RUN>" "<EVENT_ID>"
