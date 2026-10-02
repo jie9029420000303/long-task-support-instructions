@@ -71,3 +71,9 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 ## 派工檢查事件
 
 啟用、快照格式與判斷見[派工狀態協定](dispatch.md)。`dispatch_review` 是背景程式產生的監督事件，不是執行者要貼的最終回覆事件。監督核對快照和真實來源後，照原流程寫具體 reply 決策；不要自行傳訊。resident watcher 在真正送出前重查，目前已解決的事件會記為 obsolete，不送舊指示；同一事件中仍有未處理問題則重新形成事件。外部 `dispatch-preflight` 僅供唯讀查核，不改 daemon state。新 run 預設啟用；既有 run 使用 `attach-dispatch`，不改驗收契約，也不因掛載而清 STOP 或重新啟動。
+
+## 15 分鐘主動進度查核
+
+Codex resident watcher 讀到執行對話連續 15 分鐘無新活動時，產生 `progress_review` 事件並喚醒監督；監督每次須核對最新對話、派工快照、在途代理／背景輸出與尚未驗收的工作。長時間運算不自動等於異常；無法判定時明說證據不足並指定可查證的下一步。決策只能用 `reply`，附 `progressCheck.evidence`（至少一個有定位的實際查核來源）、`finding`（進度判斷）、`guidance`（具體下一步），且 `guidance` 原文要出現在送給執行對話的 `reply`。這樣每輪主動監督都在執行對話留下可見指引，而非只在監督對話內自述。
+
+執行端在決策期間恢復活動，或 run 已 STOP，舊指引會標為 obsolete 而不送；只有實際送達後才開始下一個 15 分鐘查核間隔。同一個未變的阻塞不得每輪照貼同一句催促，應重核外部結果、其他可行工作或精確說明仍缺的證據與行動。
