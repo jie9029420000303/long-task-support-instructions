@@ -6,7 +6,7 @@ const { execFileSync } = require('node:child_process');
 const { createClient } = require('./mcp-client.cjs');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
-const { activityMarker, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
+const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
 const binding = read(path.join(run, 'binding.json'));
 const statePath = path.join(run, 'daemon-state.json');
@@ -139,7 +139,7 @@ function reviewPrompt(event) {
     ? '\n這是派工快照檢查，只是要求人工判斷，不代表應增加代理。先重讀目前快照，並核對平台代理 handle/狀態、依賴與可行性、工作區/瀏覽器/帳號/資料庫/測試環境衝突、實際驗收進度。執行對話仍是唯一 dispatcher；若問題已消失，不得送出舊指示。'
     : '';
   const progress=event.kind==='progress_review'
-    ? '\n這是執行端連續 15 分鐘無活動的主動查核，不代表工作必然異常。先查最新執行對話、派工快照、在途代理與背景輸出、未達驗收及既有待核准事項；判斷正常長工作、延誤或證據不足。決策只能 reply，另填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促，只有新查得的可行工作才指引執行。'
+    ? '\n這是監督與執行兩個對話連續 15 分鐘沒有新訊息的主動查核，不代表工作必然異常。先查最新執行對話、派工快照、在途代理與背景輸出、未達驗收及既有待核准事項；判斷正常長工作、延誤或證據不足。若進度證據不足，向執行端提出可回答的具體進度／阻塞問題；若已有可行工作，直接指引它推進。決策只能 reply，另填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促。'
     : '';
   return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
     + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
@@ -246,8 +246,12 @@ async function watch() {
     }));
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
+    const supervisorDetail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+    need(supervisorDetail.thread?.id===binding.supervisorId,'Bound supervisor missing from read result');
+    const supervisorPoll=supervisorPollFromThread(supervisorDetail);
     state.reads++; state.lastReadAt = now();
     observeActivity(state,poll,binding);
+    observeActivity(state,supervisorPoll,binding,Date.now(),'supervisor');
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
     if (turn?.status === 'completed' && !state.seen.includes(turn.id)) {
