@@ -6,15 +6,21 @@ let waitCount=0,currentTurn=0;
 const reply=value=>({content:[{type:'text',text:JSON.stringify(value)}]});
 function call(name,args) {
   if (name==='wait_threads') {
+    if(args.targets.some(target=>target.threadId===data.supervisorId)) throw Error('wait_threads cannot wait on the calling thread.');
     const gateClosed=data.secondTurnGate && !fs.existsSync(data.secondTurnGate);
     const next=data.secondTurnGate ? (waitCount++ + 1) : waitCount++;
     currentTurn=gateClosed?0:Math.min(next,Math.max(0,(data.finals?.length||1)-1));
     const turnId='executor-turn-'+(currentTurn+1);
     const activity=data.activityGate && fs.existsSync(data.activityGate);
-    return reply({polls:[{thread:{id:data.executorId},cursor:'cursor-'+(currentTurn+1)+(activity?'-active':''),
+    const executor={thread:{id:data.executorId},cursor:'cursor-'+(currentTurn+1)+(activity?'-active':''),
     ...(activity?{latestAssistantMessageId:'executor-new-activity'}:{}),
     ...(data.noTurn?{}:{latestTurn:{id:turnId,status:'completed'},
-    latestAssistantMessage:{phase:'final_answer',turnId,text:'LONG_TASK_EVENT {"kind":"submission","revision":"sha256"}'}})}]});
+    latestAssistantMessage:{phase:'final_answer',turnId,text:'LONG_TASK_EVENT {"kind":"submission","revision":"sha256"}'}})};
+    const supervisorActivity=data.supervisorActivityGate && fs.existsSync(data.supervisorActivityGate);
+    const supervisor={thread:{id:data.supervisorId},cursor:supervisorActivity?'supervisor-active':'supervisor-idle',
+      latestAssistantMessageId:supervisorActivity?'supervisor-new-message':'supervisor-old-message',
+      latestTurn:{id:supervisorActivity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:0}};
+    return reply({polls:args.targets.map(target=>target.threadId===data.executorId?executor:supervisor)});
   }
   if (name==='read_thread') {
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
@@ -24,7 +30,10 @@ function call(name,args) {
       return reply({thread:{id:data.executorId},turns:[{id:turnId,status:'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]},...sends.map(text=>({type:'userMessage',text}))]}]});
     }
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
-    return reply({thread:{id:data.supervisorId},turns:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'agentMessage',phase:'commentary',text:prompt}]}))});
+    const activity=data.supervisorActivityGate && fs.existsSync(data.supervisorActivityGate);
+    const latest={id:activity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:0,
+      items:[{type:'agentMessage',id:activity?'supervisor-new-message':'supervisor-old-message',phase:'final_answer',text:'Supervisor status'}]};
+    return reply({thread:{id:data.supervisorId},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
   }
   if (name==='send_message_to_thread') {
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];

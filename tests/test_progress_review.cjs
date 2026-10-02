@@ -6,7 +6,7 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const {spawn}=require('node:child_process');
 const scripts=path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
-const {activityMarker,observeActivity,due,eventFor}=require(path.join(scripts,'progress-review.cjs'));
+const {activityMarker,supervisorPollFromThread,observeActivity,due,eventFor}=require(path.join(scripts,'progress-review.cjs'));
 const {validateDecision,PROGRESS_REVIEW_MS}=require(path.join(scripts,'guard.cjs'));
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
@@ -25,32 +25,60 @@ function fixture() {
   save(path.join(run,'binding.json'),binding);
   const state={phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0,lastExecutorActivityAt:Date.now()-PROGRESS_REVIEW_MS-60000};
   save(path.join(run,'daemon-state.json'),state);
-  const mock=path.join(root,'mock.json'),sent=path.join(root,'sent.json'),activityGate=path.join(root,'activity');
-  save(mock,{supervisorId:binding.supervisorId,executorId:binding.executorId,noTurn:true,activityGate});
+  const mock=path.join(root,'mock.json'),sent=path.join(root,'sent.json'),activityGate=path.join(root,'activity'),supervisorActivityGate=path.join(root,'supervisor-activity');
+  save(mock,{supervisorId:binding.supervisorId,executorId:binding.executorId,noTurn:true,activityGate,supervisorActivityGate});
   let child;
   function start() {
     child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mock,MOCK_CODEX_SENT:sent},stdio:['ignore','pipe','pipe']});
     return child;
   }
   async function stop() {if(child?.exitCode===null){child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}}
-  return {root,run,sent,activityGate,contract,binding,start,stop};
+  return {root,run,sent,activityGate,supervisorActivityGate,contract,binding,start,stop};
 }
 const reply=eventId=>({eventId,disposition:'reply',progressCheck:{evidence:['executor thread latest turn and dispatch snapshot'],finding:'No activity for 15 minutes; background job state is unknown',guidance:'Check the background job and continue an independent ready item.'},reply:'Progress check: Check the background job and continue an independent ready item.'});
 
-test('15-minute idle threshold uses executor activity and persists unique event IDs',()=>{
-  const now=Date.now(),poll={cursor:'v1',latestTurn:{id:'t1',status:'inProgress'}};
-  const state={lastExecutorActivityAt:now-14*60000,lastExecutorActivityMarker:activityMarker(poll)};
+test('15-minute idle threshold requires both chats to have no new messages',()=>{
+  const now=Date.now(),poll={cursor:'v1',latestTurn:{id:'t1',status:'inProgress'},latestAssistantMessageId:'a1'};
+  const supervisor={cursor:'s1',latestTurn:{id:'s1',status:'completed'},latestAssistantMessageId:'sa1'};
+  const state={lastExecutorActivityAt:now-16*60000,lastExecutorActivityMarker:activityMarker(poll),
+    lastSupervisorActivityAt:now-14*60000,lastSupervisorActivityMarker:activityMarker(supervisor)};
   assert.equal(due(state,now),false);
   assert.equal(due(state,now+60000),true);
   assert.equal(observeActivity(state,poll,{},now+60000),activityMarker(poll));
   assert.equal(due(state,now+60000),true);
-  observeActivity(state,{...poll,cursor:'v2'},{},now+60000);
+  observeActivity(state,{...supervisor,cursor:'s2',latestToolMarkerId:'tool-2'},{},now+60000,'supervisor');
+  assert.equal(due(state,now+60000),true);
+  observeActivity(state,{...supervisor,latestAssistantMessageId:'sa2'},{},now+60000,'supervisor');
   assert.equal(due(state,now+60000),false);
   const first=eventFor(state,now),second=eventFor(state,now);
   assert.notEqual(first.id,second.id);
+  assert.equal(first.supervisorActivityMarker,state.lastSupervisorActivityMarker);
   state.lastProgressReviewAt=now;
   assert.equal(due(state,now+14*60000),false);
   assert.equal(due(state,now+16*60000),true);
+});
+
+test('supervisor read ignores tool-only changes and tracks the last visible message',()=>{
+  const turn={id:'t1',items:[{type:'userMessage',id:'u1'},{type:'commandExecution',id:'tool2'},{type:'agentMessage',id:'a3'}]};
+  assert.equal(activityMarker(supervisorPollFromThread({turns:[turn]})),activityMarker({latestTurn:turn,latestAssistantMessageId:'a3'}));
+});
+
+test('supervisor message suppresses an idle prompt even while executor remains quiet',async()=>{
+  const f=fixture();let stderr='';
+  try {
+    const state=read(path.join(f.run,'daemon-state.json'));
+    state.lastSupervisorActivityAt=Date.now()-PROGRESS_REVIEW_MS-60000;
+    state.lastSupervisorActivityMarker=activityMarker({latestAssistantMessageId:'supervisor-old-message',latestTurn:{id:'supervisor-old-turn'}});
+    save(path.join(f.run,'daemon-state.json'),state);
+    fs.writeFileSync(f.supervisorActivityGate,'new visible supervisor message\n');
+    f.start().stderr.on('data',chunk=>stderr+=chunk);
+    await until(()=>read(path.join(f.run,'daemon-state.json')).reads>=1);
+    const observed=read(path.join(f.run,'daemon-state.json'));
+    assert.equal(observed.pending,null);
+    assert.equal(due(observed),false);
+    assert.equal(fs.existsSync(f.sent),false);
+  } finally {await f.stop();fs.rmSync(f.root,{recursive:true,force:true});}
+  assert.equal(stderr,'');
 });
 
 test('progress review requires checked evidence and visible guidance',()=>{
