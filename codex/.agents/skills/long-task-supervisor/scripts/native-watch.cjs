@@ -6,6 +6,7 @@ const { execFileSync } = require('node:child_process');
 const { createClient } = require('./mcp-client.cjs');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
+const { activityMarker, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
 const binding = read(path.join(run, 'binding.json'));
 const statePath = path.join(run, 'daemon-state.json');
@@ -137,12 +138,15 @@ function reviewPrompt(event) {
   const dispatch=event.kind==='dispatch_review'
     ? '\n這是派工快照檢查，只是要求人工判斷，不代表應增加代理。先重讀目前快照，並核對平台代理 handle/狀態、依賴與可行性、工作區/瀏覽器/帳號/資料庫/測試環境衝突、實際驗收進度。執行對話仍是唯一 dispatcher；若問題已消失，不得送出舊指示。'
     : '';
+  const progress=event.kind==='progress_review'
+    ? '\n這是執行端連續 15 分鐘無活動的主動查核，不代表工作必然異常。先查最新執行對話、派工快照、在途代理與背景輸出、未達驗收及既有待核准事項；判斷正常長工作、延誤或證據不足。決策只能 reply，另填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促，只有新查得的可行工作才指引執行。'
+    : '';
   return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
     + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
     + '\n請依原始條件自行核對候選版與真實證據，不採信執行者的 PASS 自述。'
     + '以 ' + path.join(run,'decision-' + event.id + '.json') + ' 寫入 eventId、disposition（accept/reject/reply/needs_user/observe）、revision（accept 時）、results（accept 時每條含 id,status,method,expected,actual,evidence[{path,sha256}]）、reply（reject/reply 時）、reason（observe 時非空，可另列 pendingApprovals 字串陣列；observe 不送訊也不代表核准）。'
     + '寫完執行 ' + [process.execPath,path.join(__dirname,'supervise.cjs'),'decision',run,path.join(run,'decision-' + event.id + '.json')].map(shellQuote).join(' ')
-    + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。'+dispatch;
+    + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。'+dispatch+progress;
 }
 async function changed(directory, alreadyChanged = () => false) {
   await new Promise(resolve => {
@@ -172,6 +176,16 @@ async function pendingDecision() {
     const preflight=stillCurrent(run,binding,state,event);checkpoint();
     if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
   }
+  if(event.kind==='progress_review'){
+    const fresh=unpack(await rpc('wait_threads',{targets:[{threadId:binding.executorId,...(state.cursor?{afterCursor:state.cursor}:{})}],timeoutMs:0}));
+    const poll=fresh.polls?.find(item=>item.thread?.id===binding.executorId);
+    need(poll,'Bound executor missing from progress preflight');
+    if(fs.existsSync(path.join(run,'STOP'))||activityMarker(poll)!==event.activityMarker){
+      observeActivity(state,poll,binding);
+      (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};
+      state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;
+    }
+  }
   if (decision.disposition === 'needs_user') {
     state.phase = 'needs_user'; checkpoint();
     const previousDecision = hash(file);
@@ -189,6 +203,7 @@ async function pendingDecision() {
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
   }
   await sendAndRead(binding.executorId,decision.reply,'answer-' + event.id);
+  if(event.kind==='progress_review')state.lastProgressReviewAt=Date.now();
   (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
   state.seen.push(event.id); state.pending = null;
   state.phase = 'watching'; checkpoint();
@@ -232,6 +247,7 @@ async function watch() {
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
     state.reads++; state.lastReadAt = now();
+    observeActivity(state,poll,binding);
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
     if (turn?.status === 'completed' && !state.seen.includes(turn.id)) {
@@ -253,6 +269,12 @@ async function watch() {
       await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
     } else {
       state.cursor=nextCursor;
+      if(progressDue(state)){
+        const event=progressEvent(state);
+        state.pending=event;state.phase='awaiting_decision';checkpoint();
+        await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
+        continue;
+      }
       checkpoint();
       if (Date.now() - started < 1000) await sleep(15000);
     }
