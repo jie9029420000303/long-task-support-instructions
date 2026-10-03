@@ -44,7 +44,7 @@ test('fourteen quiet minutes stay below the fifteen-minute review threshold',asy
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('quiet work produces a visible follow-up, then repeats after another interval without new executor activity',async()=>{
+for (const format of ['text blocks','plain string']) test('quiet work records '+format+' follow-up and resumes subsequent progress reviews',async()=>{
   const f=fixture();let child=start(f);
   try{
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
@@ -61,12 +61,13 @@ test('quiet work produces a visible follow-up, then repeats after another interv
     assert.equal(command(f,'progress-preflight',event.id).current,true);
     const marker='LONG_TASK_DELIVERY:'+event.id;
     const reply='No new result is visible. '+progressCheck.guidance;
-    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:[{type:'text',text:marker+'\nStatus?'}]}});
+    const content=text=>format==='plain string'?text:[{type:'text',text}];
+    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:content(marker+'\nStatus?')}});
     const decision=path.join(f.root,'decision.json');
     save(decision,{eventId:event.id,disposition:'reply',reply,progressCheck,
       delivery:{marker,status:'delivered',messageId:'desktop-message-1'}});
     assert.throws(()=>command(f,'decision',decision),/Command failed/);
-    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:[{type:'text',text:marker+'\n'+reply}]}});
+    line(f.executorLog,{type:'user',origin:{kind:'agent'},message:{content:content(marker+'\n'+reply)}});
     assert.equal(command(f,'decision',decision).processed,true);
     child=start(f);await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
     await new Promise(resolve=>setTimeout(resolve,250));

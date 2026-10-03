@@ -145,7 +145,9 @@ function decision() {
     need(fs.readFileSync(binding.executorLog,'utf8').includes(marker), 'Desktop delivery not recorded in executor transcript');
     if (event.kind==='progress_review') {
       const delivered=fs.readFileSync(binding.executorLog,'utf8').split('\n').filter(Boolean).some(line=>{
-        try {const row=JSON.parse(line);return (row.message?.content||[]).some(block=>
+        // Cross-session deliveries arrive as plain-string content, not text blocks.
+        try {const row=JSON.parse(line),content=row.message?.content;
+          return (typeof content==='string'?[{type:'text',text:content}]:(content||[])).some(block=>
           block?.type==='text' && block.text.includes(marker) && block.text.includes(value.progressCheck.guidance));}
         catch {return false;}
       });
