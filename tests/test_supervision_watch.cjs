@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const crypto=require('node:crypto');
 const {spawn}=require('node:child_process');
-const scripts=path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
+const scripts=process.env.CODEX_SUPERVISOR_SCRIPTS||path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
 async function until(check,ms=12000) {
@@ -118,6 +118,34 @@ test('Codex observe honors an existing STOP and does not restart watching',async
     assert.equal(state.phase,'stopped');assert.equal(state.pending.id,'executor-turn-1');
     assert.equal(state.resolved?.['executor-turn-1'],undefined);
     assert.equal(fs.existsSync(path.join(run,'STOP')),true);
-    assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
+    const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile)):[];
+    assert.ok(sends.length<=1,'STOP may arrive before the review was sent; it must never cause a second send');
+    assert.equal(sends.some(text=>text.includes('LONG_TASK_DELIVERY:answer-')),false);
   } finally {child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('App-owned parent recovers a late receipt from saved inflight without sending the message again',async()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'receipt-recovery-'));
+  const source=path.join(root,'source.txt');fs.writeFileSync(source,'Keep the delivery unique');
+  const run=path.join(root,'run');fs.mkdirSync(run);
+  save(path.join(run,'contract.json'),{goal:'Recover a delayed delivery',authorization:'Isolated fixture',criteria:[{id:'A1',requirement:'Send once',source:'source.txt',verify:'Read receipts'}],sources:[{path:source,sha256:sha(source)}]});
+  const supervisorId='supervisor-qa',executorId='executor-qa',fixture=path.join(root,'mock.json'),sent=path.join(root,'sent.json'),receiptGate=path.join(root,'receipt-ready');
+  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root],supervisorId,executorId,callerTurnId:'qa-turn',contractSha256:sha(path.join(run,'contract.json'))});
+  save(path.join(run,'daemon-state.json'),{phase:'starting',seen:[],messages:[],pending:null,inflight:null,reads:0});
+  save(fixture,{supervisorId,executorId,final:'Waiting for a known approval.\nLONG_TASK_EVENT {"kind":"blocked"}',receiptGate});
+  const child=spawn(process.execPath,[path.join(scripts,'run-watch.cjs'),run],{env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sent,CODEX_HOME:path.join(root,'isolated-codex')},stdio:['ignore','pipe','pipe']});
+  try{
+    await until(()=>fs.existsSync(sent));
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'runtime-state.json'))).launches.length>=2,25000);
+    assert.equal(JSON.parse(fs.readFileSync(sent)).length,1);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).inflight);
+    fs.writeFileSync(receiptGate,'late readback now visible');
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).inflight===null);
+    assert.equal(JSON.parse(fs.readFileSync(sent)).length,1);
+    const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));assert.equal(state.messages.length,1);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(run,'receipt-review-executor-turn-1.json'))).confirmed,true);
+    fs.writeFileSync(path.join(run,'STOP'),'user stop');
+    await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Parent did not honor STOP')),6000);child.once('exit',()=>{clearTimeout(timer);resolve();});});
+    assert.equal(JSON.parse(fs.readFileSync(path.join(run,'runtime-state.json'))).phase,'stopped');
+  }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });

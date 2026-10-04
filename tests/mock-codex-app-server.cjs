@@ -26,13 +26,13 @@ function call(name,args) {
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
     if (args.threadId===data.executorId) {
       const finals=data.finals||[data.final],turnId='executor-turn-'+(currentTurn+1);
-      const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
+      const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);
       return reply({thread:{id:data.executorId},turns:[{id:turnId,status:'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]},...sends.map(text=>({type:'userMessage',text}))]}]});
     }
-    const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
+    const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);
     const activity=data.supervisorActivityGate && fs.existsSync(data.supervisorActivityGate);
     const latest={id:activity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:0,
-      items:[{type:'agentMessage',id:activity?'supervisor-new-message':'supervisor-old-message',phase:'final_answer',text:'Supervisor status'}]};
+      items:[...(activity?[{type:'userMessage',id:'human-user-new',text:'Approval granted'}]:[]),{type:'agentMessage',id:activity?'supervisor-new-message':'supervisor-old-message',phase:'final_answer',text:'Supervisor status'}]};
     return reply({thread:{id:data.supervisorId},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
   }
   if (name==='send_message_to_thread') {

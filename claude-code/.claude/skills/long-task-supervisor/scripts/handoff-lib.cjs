@@ -30,6 +30,8 @@ function persist(run,state,event){
   if(state.seen?.includes(event.id)||state.resolved?.[event.id])return {alreadyProcessed:true,eventHash};
   need(!state.pending||state.pending.id===event.id,'Another event is already pending');
   if(state.pending){need(digest(state.pending)===eventHash,'Same pending ID has different content');return {existingPending:true,eventHash};}
+  const binding=read(path.join(run,'binding.json'));
+  if(binding.supervisorLog)state.pendingSupervisorOffset=fs.statSync(binding.supervisorLog).size;
   (state.handoffEvents||={})[event.id]=eventHash;state.pending=event;state.phase='awaiting_decision';
   save(path.join(run,'daemon-state.json'),state);
   return {existingPending:false,eventHash};

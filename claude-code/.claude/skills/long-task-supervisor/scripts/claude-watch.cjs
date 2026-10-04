@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Watch one desktop executor until its next completed turn; App background Bash wakes the supervisor.
 const fs=require('node:fs');
+const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
 const {hash,read,need,validateContract,PROGRESS_REVIEW_MS}=require('./guard.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
@@ -84,6 +85,7 @@ async function waitChange(){
   });
 }
 async function watch(){
+  need(!fs.existsSync(path.join(run,'contract-update.lock')),'Contract update is in progress');
   if(fs.existsSync(lockPath)){
     const old=read(lockPath);
     need(!ownerAlive(old.pid),'Another desktop watcher owns this run');
@@ -129,7 +131,7 @@ async function watch(){
         else{state.progressWait={event,deadline:writtenAt+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
       }
     }
-    state.pending=event;state.phase='awaiting_decision';checkpoint();
+    state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
     console.log('LONG_TASK_WAKE '+JSON.stringify(event));
     return true;
   }
@@ -137,7 +139,7 @@ async function watch(){
     if(handoffRequest()){console.log('LONG_TASK_WAKE '+JSON.stringify(state.pending));return;}
     if(!state.pending){const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);if(auditEvent){
       auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
-      markAnnounced(state,auditEvent);state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
+      markAnnounced(state,auditEvent);state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(auditEvent));return;
     }}
     const rows=readNew();
@@ -178,15 +180,17 @@ async function watch(){
     }
     if(state.progressWait&&Date.now()>=state.progressWait.deadline){
       const event={...state.progressWait.event,kind:'continue'};
-      state.progressWait=null;state.pending=event;state.phase='awaiting_decision';checkpoint();
+      state.progressWait=null;state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;
     }
-    if(Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS){
+    const hadCheckedWait=Boolean(state.checkedWait);
+    checkedWait.supervisorInput(state,binding);
+    if(!checkedWait.unchanged(state)&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS)){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
         kind:'progress_review',lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),at:now()};
-      state.pending=event;state.phase='awaiting_decision';checkpoint();
+      state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;
     }

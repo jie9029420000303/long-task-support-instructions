@@ -74,6 +74,26 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 ## 15 分鐘主動進度查核
 
-Codex resident watcher 以無模型程序讀取監督與執行兩個對話；只有兩邊都連續 15 分鐘沒有新對話訊息時，才產生 `progress_review` 事件並喚醒監督。游標或工具輸出變動不是新對話訊息，不重設計時。監督每次須核對最新對話、派工快照、在途代理／背景輸出與尚未驗收的工作。長時間運算不自動等於異常；進度證據不足時向執行端問可回答的具體進度／阻塞，有可行工作時直接指引。決策只能用 `reply`，附 `progressCheck.evidence`（至少一個有定位的實際查核來源）、`finding`（進度判斷）、`guidance`（具體下一步），且 `guidance` 原文要出現在送給執行對話的 `reply`。這樣每輪主動監督都在執行對話留下可見訊息，而非只在監督對話內自述。
+無模型 watcher 在監督與執行兩邊都靜默 15 分鐘後查核，工具輸出或游標變動不算新訊息。先核對最新對話、派工快照、在途工作與未達條目。仍有可行工作或證據不足時用 `reply`，填 `progressCheck.evidence`、`finding`、`guidance`，guidance 原文須在 reply；不要重問已有授權或已提出的核准題。
 
-執行端在決策期間恢復活動，或 run 已 STOP，舊指引會標為 obsolete 而不送；只有實際送達後才開始下一個 15 分鐘查核間隔。同一個未變的阻塞不得每輪照貼同一句催促，應重核外部結果、其他可行工作或精確說明仍缺的證據與行動。
+只剩已核對、未變的等待時用 `observe`，填非空 reason、`progressCheck.evidence`、`finding` 與下節 wait。背景保持接收新事件，不能因省 Token 停止 watcher。新執行訊息、新的使用者答覆、條件檔變動或既定期限到達會解除靜默等待並再查核；監督自己結束回合不解除等待。一般 observe 不會永久取消進度查核。
+
+### checked wait（已核對的等待）
+
+`wait:{kind:"user_approval",conditions:[]}` 用於已提出且沒有其他可行工作的使用者核准。外部結果用 `kind:"external_result"`，至少有可觀察條件檔 `conditions:[{path:"絕對路徑",sha256:"當下實際雜湊"}]` 或已有依據的 `resumeAt`。等待尚未出現的檔案時 sha256 填 null。只能列本 run 允許根目錄內的檔案；用具體結果或授權檔，勿列每次輪詢都改的 daemon-state。resumeAt 只承接原訂工作／業務期限，不自行設定新門檻。等待仍不是 PASS 或授權，STOP 優先。
+
+### 延遲收件恢復
+
+App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；該 delivery 不再送第二次。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
+
+## 原契約、使用者修訂與舊 run 接入
+
+先讀 [授權承接](authorization.md)，核對真實使用者原文。`supervise.cjs effective-contract RUN` 輸出原契約加已核准修訂的有效範圍、排除項、授權更新及 contractStateSha256。監督、執行、派工查核和最後接受都讀同一有效範圍。
+
+在原監督的安全停點（無 pending、無 inflight、舊 watcher 與 dispatch writer 已退出，STOP/accepted/stopped 不改）用 `supervise.cjs amend RUN INPUT.json` 登記修訂。INPUT 含 id、原 contractSha256、authority:{role:"user",quote:"逐字原話",locator:"原對話訊息／文件位置",at:"來源時間",source:{path:"允許根目錄內的原文快照",sha256:"實算雜湊"}}、changes:[{id:"原條文ID",action:"exclude/replace/restore"}]。replace 另填完整 requirement、verify；授權更新用 action:"authorization"、固定 id、scope、instruction。代理提案不能冒填 role:user，來源檔須含原話，語意與操作範圍由監督實際查原對話核實。工具只檢查來源完整性，不能證明任意檔案作者真是使用者。
+
+修訂另存不可改寫的 contract-amendments.jsonl，保留原 contract.json；遺失、變動、衝突皆先對帳，不清檔重置。接受決策必須帶當前 contractStateSha256，結果只對有效條文逐條 PASS；排除項明列 EXCLUDED 及核准來源，不能偽填 PASS。
+
+舊 run 的結果帳用 `supervise.cjs attach-acceptance RUN ACCEPTANCE.json` 接入。原執行者準備目前實際候選與逐條狀態，涵蓋有效條文及 EXCLUDED 項；未測 PENDING，已跑但不足判定 INCONCLUSIVE，缺口 FAIL／BLOCKED，不能憑執行次數補成 PASS。工具保存結果歷史、保留既有派工快照與條文，最後才標記 acceptance 已接入。若已有歷史不得清空或覆蓋舊實測。
+
+接入後原監督與執行者都讀回有效契約、摘要與新規則，再以原游標、pending、receipt 續接唯一 watcher；安裝檔案一致不代表現役已切換。不得由另一對話直接改 live run，也不自動清除 STOP。

@@ -8,10 +8,11 @@ function evidence(value,label){need(Array.isArray(value)&&value.length&&value.ev
 function validate(progress,contract){
   need(progress&&text(progress.revision),'acceptance.revision is required');
   need(Array.isArray(progress.items),'acceptance.items must be an array');
-  const expected=new Set(contract.criteria.map(item=>item.id)),seen=new Set();
+  const excluded=new Set((contract.excluded||[]).map(item=>item.id));
+  const expected=new Set([...contract.criteria.map(item=>item.id),...excluded]),seen=new Set();
   for(const item of progress.items){
     need(expected.has(item.id)&&!seen.has(item.id),'acceptance items must use unique contract criterion IDs');seen.add(item.id);
-    need(statuses.includes(item.status),item.id+' has invalid acceptance status');evidence(item.evidence,item.id);
+    need(excluded.has(item.id)?item.status==='EXCLUDED':statuses.includes(item.status),item.id+' has invalid acceptance status');evidence(item.evidence,item.id);
     if(item.lastAttempt){
       const a=item.lastAttempt;need(text(a.id)&&text(a.caseId)&&text(a.revision)&&text(a.reason),item.id+' attempt needs id, stable caseId, revision and reason');
       need(['PASS','FAIL','BLOCKED','INCONCLUSIVE'].includes(a.outcome),item.id+' has invalid attempt outcome');

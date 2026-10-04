@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
+const contractState = require('./contract-state.cjs');
+const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
 const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS } = require('./guard.cjs');
 const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
@@ -59,7 +61,7 @@ function load() {
   const binding = read(path.join(run, 'binding.json'));
   const contractFile = path.join(run, 'contract.json');
   need(hash(contractFile) === binding.contractSha256, 'Locked contract changed');
-  return {binding, contract:validateContract(read(contractFile))};
+  return {binding, contract:validateContract(contractState.effective(run,binding))};
 }
 function init() {
   need(run && inputArgument && path.isAbsolute(runArgument) && path.isAbsolute(inputArgument), 'Use absolute run and input paths');
@@ -154,6 +156,7 @@ function decision() {
       need(delivered,'Progress guidance not recorded in executor transcript');
     }
   }
+  checkedWait.remember(state,value,binding);
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
   if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();}
@@ -168,7 +171,10 @@ function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'da
 function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS;if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
-    const value=command==='init'?init():command==='status'?status()
+    const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))
+      :command==='amend'?contractState.append(run,load().binding,read(inputArgument))
+      :command==='effective-contract'?contractState.effective(run,load().binding)
+      :command==='init'?init():command==='status'?status()
       :command==='decision'?decision():command==='stop'?stop()
       :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()

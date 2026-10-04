@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // A resident, model-free bridge for one bound executor and one supervisor.
 const fs = require('node:fs');
+const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createClient } = require('./mcp-client.cjs');
@@ -41,9 +42,10 @@ function contains(value, needle) {
 }
 function checkSources() {
   need(hash(contractPath) === binding.contractSha256, 'Locked contract changed');
-  return validateContract(read(contractPath));
+  return validateContract(require('./contract-state.cjs').effective(run,binding));
 }
 function lock() {
+  need(!fs.existsSync(path.join(run,'contract-update.lock')),'Contract update is in progress');
   if (fs.existsSync(lockPath)) {
     const old = read(lockPath);
     let alive = false;
@@ -69,6 +71,7 @@ function localReceipt(target, key) {
 }
 async function reconcile(delivery) {
   for (let attempt = 0; attempt < 8; attempt++) {
+    need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
     const readback = await rpc('read_thread',{threadId:delivery.target,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000});
     const confirmed = contains(readback, deliveryMarker(delivery.key)) || localReceipt(delivery.target,delivery.key);
     save(path.join(run,'receipt-' + delivery.key + '.json'),{
@@ -81,6 +84,7 @@ async function reconcile(delivery) {
   throw Error('Delivery uncertain: ' + delivery.key);
 }
 async function sendAndRead(target, prompt, key) {
+  need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
   need([binding.executorId,binding.supervisorId].includes(target), 'Target is not bound');
   if (state.messages.some(item => item.key === key)) return;
   const receiptFile = path.join(run,'receipt-' + key + '.json');
@@ -139,11 +143,11 @@ function reviewPrompt(event) {
     ? '\n這是派工快照檢查，只是要求人工判斷，不代表應增加代理。先重讀目前快照，並核對平台代理 handle/狀態、依賴與可行性、工作區/瀏覽器/帳號/資料庫/測試環境衝突、實際驗收進度。執行對話仍是唯一 dispatcher；若問題已消失，不得送出舊指示。'
     : '';
   const progress=event.kind==='progress_review'
-    ? '\n這是監督與執行兩個對話連續 15 分鐘沒有新訊息的主動查核，不代表工作必然異常。先查最新執行對話、派工快照、在途代理與背景輸出、未達驗收及既有待核准事項；判斷正常長工作、延誤或證據不足。若進度證據不足，向執行端提出可回答的具體進度／阻塞問題；若已有可行工作，直接指引它推進。決策只能 reply，另填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促。'
+    ? '\n這是監督與執行兩個對話連續 15 分鐘沒有新訊息的主動查核，不代表工作必然異常。先查最新執行對話、派工快照、在途代理與背景輸出、未達驗收及既有待核准事項；判斷正常長工作、延誤或證據不足。若進度證據不足，向執行端提出可回答的具體進度／阻塞問題；若已有可行工作，直接指引它推進。有可行工作或證據不足時用 reply；已核對且只剩未變等待時可 observe，附 wait:{kind:user_approval/external_result,conditions:[{path,sha256}],resumeAt:僅有既定期限才填}，不要停止事件監看。另填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促。'
     : '';
   return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
     + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
-    + '\n請依原始條件自行核對候選版與真實證據，不採信執行者的 PASS 自述。'
+    + '\n先以 supervise.cjs effective-contract RUN 讀有效契約、使用者授權更新與排除項；有 contractStateSha256 時必須原樣填入接受決策。\n請依原始條件自行核對候選版與真實證據，不採信執行者的 PASS 自述。'
     + '以 ' + path.join(run,'decision-' + event.id + '.json') + ' 寫入 eventId、disposition（accept/reject/reply/needs_user/observe）、revision（accept 時）、results（accept 時每條含 id,status,method,expected,actual,evidence[{path,sha256}]）、reply（reject/reply 時）、reason（observe 時非空，可另列 pendingApprovals 字串陣列；observe 不送訊也不代表核准）。'
     + '寫完執行 ' + [process.execPath,path.join(__dirname,'supervise.cjs'),'decision',run,path.join(run,'decision-' + event.id + '.json')].map(shellQuote).join(' ')
     + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。'+dispatch+progress;
@@ -158,7 +162,7 @@ async function changed(directory, alreadyChanged = () => false) {
       watcher?.close(); resolve();
     };
     const timer = setTimeout(done,15000);
-    const poll = setInterval(()=>{if (alreadyChanged()) done();},1000);
+    const poll = setInterval(()=>{if (alreadyChanged()||fs.existsSync(path.join(run,'STOP'))) done();},1000);
     try {
       watcher = fs.watch(directory,done);
       watcher.on('error',()=>{watcher?.close();watcher=null;});
@@ -193,6 +197,13 @@ async function pendingDecision() {
     return;
   }
   if (decision.disposition === 'observe') {
+    if(decision.wait){
+      const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+      observeActivity(state,supervisorPollFromThread(detail),binding,Date.now(),'supervisor');
+      checkedWait.observeSupervisorInput(state,detail);
+      checkedWait.remember(state,decision,binding);
+    }
+    state.lastProgressReviewAt=Date.now();
     (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
     state.seen.push(event.id); state.pending = null;
     state.phase = 'watching'; checkpoint(); return;
@@ -210,6 +221,8 @@ async function pendingDecision() {
 }
 async function watch() {
   lock();
+  if(fs.existsSync(path.join(run,'STOP'))||['accepted','stopped'].includes(state.phase))return;
+  need(state.phase!=='needs_reconcile'||state.inflight,'Receipt recovery requires a saved inflight delivery');
   checkSources();
   state.pid = process.pid;
   checkpoint();
@@ -238,7 +251,7 @@ async function watch() {
       continue;
     }
     const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);checkpoint();
-    if(auditEvent){markAnnounced(state,auditEvent);state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
+    if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const started = Date.now();
     const response = unpack(await rpc('wait_threads',{
       targets:[{threadId:binding.executorId,...(state.cursor ? {afterCursor:state.cursor} : {})}],
@@ -249,6 +262,7 @@ async function watch() {
     const supervisorDetail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
     need(supervisorDetail.thread?.id===binding.supervisorId,'Bound supervisor missing from read result');
     const supervisorPoll=supervisorPollFromThread(supervisorDetail);
+    checkedWait.observeSupervisorInput(state,supervisorDetail);
     state.reads++; state.lastReadAt = now();
     observeActivity(state,poll,binding);
     observeActivity(state,supervisorPoll,binding,Date.now(),'supervisor');
@@ -268,6 +282,7 @@ async function watch() {
         }
         event.kind = 'stalled';
       }
+      state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
       state.pending = event;
       state.cursor=nextCursor;state.phase = 'awaiting_decision';checkpoint();
       await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
@@ -275,7 +290,7 @@ async function watch() {
       state.cursor=nextCursor;
       if(progressDue(state)){
         const event=progressEvent(state);
-        state.pending=event;state.phase='awaiting_decision';checkpoint();
+        state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
         continue;
       }
@@ -288,7 +303,7 @@ async function watch() {
 (async () => {
   try {await watch();}
   catch (error) {
-    state.phase = error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
+    state.phase = fs.existsSync(path.join(run,'STOP')) ? 'stopped' : error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
     state.error = {message:error.message,at:now()};
     checkpoint();
     console.error(error.stack || error);

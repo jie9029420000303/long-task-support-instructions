@@ -5,7 +5,7 @@ const os=require('node:os');
 const path=require('node:path');
 const crypto=require('node:crypto');
 const {spawn}=require('node:child_process');
-const scripts=path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
+const scripts=process.env.CODEX_SUPERVISOR_SCRIPTS||path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
 const {activityMarker,supervisorPollFromThread,observeActivity,due,eventFor}=require(path.join(scripts,'progress-review.cjs'));
 const {validateDecision,PROGRESS_REVIEW_MS}=require(path.join(scripts,'guard.cjs'));
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -84,7 +84,7 @@ test('supervisor message suppresses an idle prompt even while executor remains q
 test('progress review requires checked evidence and visible guidance',()=>{
   const event={id:'progress-review-1',kind:'progress_review'};
   const check=decision=>validateDecision({}, {}, event, decision);
-  assert.throws(()=>check({eventId:event.id,disposition:'observe',reason:'waiting'}),/visible executor follow-up/);
+  assert.throws(()=>check({eventId:event.id,disposition:'observe',reason:'waiting'}),/checked evidence/);
   assert.throws(()=>check({eventId:event.id,disposition:'reply',reply:'Please continue'}),/checked evidence/);
   assert.throws(()=>check({...reply(event.id),reply:'Different text'}),/guidance in the visible/);
   assert.equal(check(reply(event.id)).disposition,'reply');
@@ -95,6 +95,7 @@ test('resident watcher sends a checked progress intervention, then rechecks afte
   try {
     f.start().stderr.on('data',chunk=>stderr+=chunk);
     await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.id==='progress-review-1');
+    await until(()=>fs.existsSync(f.sent));
     assert.match(read(f.sent)[0],/LONG_TASK_DELIVERY:review-progress-review-1/);
     save(path.join(f.run,'decision-progress-review-1.json'),reply('progress-review-1'));
     await until(()=>read(path.join(f.run,'daemon-state.json')).resolved?.['progress-review-1']?.decision);
@@ -109,6 +110,7 @@ test('resident watcher sends a checked progress intervention, then rechecks afte
     f.start().stderr.on('data',chunk=>stderr+=chunk);
     await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.id==='progress-review-2');
     assert.equal(read(f.sent).filter(text=>text.includes('LONG_TASK_DELIVERY:review-progress-review-1')).length,1);
+    await until(()=>read(f.sent).length>=3);
     assert.match(read(f.sent)[2],/LONG_TASK_DELIVERY:review-progress-review-2/);
   } finally {await f.stop();fs.rmSync(f.root,{recursive:true,force:true});}
   assert.equal(stderr,'');
@@ -126,4 +128,52 @@ test('new executor activity makes an outstanding progress instruction obsolete',
     assert.equal(read(path.join(f.run,'daemon-state.json')).pending,null);
   } finally {await f.stop();fs.rmSync(f.root,{recursive:true,force:true});}
   assert.equal(stderr,'');
+});
+
+test('checked approval wait survives idle time and restart, but a new human message releases it',async()=>{
+  const f=fixture();let stderr='';
+  try{
+    f.start().stderr.on('data',chunk=>stderr+=chunk);
+    await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.kind==='progress_review');
+    save(path.join(f.run,'decision-progress-review-1.json'),{eventId:'progress-review-1',disposition:'observe',reason:'Only an already requested approval remains; no independent work is ready.',
+      progressCheck:{evidence:['executor final and authorization ledger'],finding:'The approval condition is unchanged.'},wait:{kind:'user_approval',conditions:[]}});
+    await until(()=>read(path.join(f.run,'daemon-state.json')).checkedWait);
+    await f.stop();
+    const state=read(path.join(f.run,'daemon-state.json'));
+    state.lastProgressReviewAt=state.lastExecutorActivityAt=state.lastSupervisorActivityAt=Date.now()-24*3600000;
+    state.checkedWait.executorAt=state.lastExecutorActivityAt;
+    save(path.join(f.run,'daemon-state.json'),state);
+    f.start().stderr.on('data',chunk=>stderr+=chunk);
+    await until(()=>read(path.join(f.run,'daemon-state.json')).reads>state.reads);
+    assert.equal(read(f.sent).length,1);assert.equal(read(path.join(f.run,'daemon-state.json')).pending,null);
+    fs.writeFileSync(f.supervisorActivityGate,'human approval');
+    await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.id==='progress-review-2',22000);
+    assert.equal(read(path.join(f.run,'daemon-state.json')).checkedWait,undefined);
+    assert.equal(read(f.sent).some(text=>text.includes('answer-progress-review-1')),false);
+  }finally{await f.stop();fs.rmSync(f.root,{recursive:true,force:true});}
+  assert.equal(stderr,'');
+});
+
+test('external result, existing deadline and executor messages release a checked wait immediately',()=>{
+  const {remember}=require(path.join(scripts,'checked-wait.cjs'));
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'checked-wait-result-'));
+  try{
+    const result=path.join(root,'result.json'),state={lastExecutorActivityAt:Date.now(),lastSupervisorActivityAt:Date.now(),lastExecutorActivityMarker:'e',lastSupervisorInputMarker:'u'};
+    const wait={kind:'external_result',conditions:[{path:result,sha256:null}]};
+    validateDecision({allowedRoots:[root]}, {}, {id:'x',kind:'blocked'},{eventId:'x',disposition:'observe',reason:'Background result is not available.',wait});
+    remember(state,{eventId:'x',wait},{});assert.equal(due(state),false);
+    fs.writeFileSync(result,'done');assert.equal(due(state),true);
+    remember(state,{eventId:'y',wait:{kind:'external_result',conditions:[],resumeAt:new Date(Date.now()+1000).toISOString()}},{});
+    assert.equal(due(state,Date.now()+2000),true);
+    remember(state,{eventId:'z',wait:{kind:'user_approval',conditions:[]}},{});
+    state.lastExecutorActivityMarker='new';assert.equal(due(state),true);
+    assert.throws(()=>validateDecision({allowedRoots:[root]}, {}, {id:'x',kind:'blocked'},{eventId:'x',disposition:'observe',reason:'Wait',wait:{kind:'external_result',conditions:[]}}),/observable result or deadline/);
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('Codex approval arriving during a pending wait review is preserved through checkpoint and decision',()=>{
+  const {remember,unchanged}=require(path.join(scripts,'checked-wait.cjs'));
+  const state=JSON.parse(JSON.stringify({pendingSupervisorInputMarker:null,lastExecutorActivityMarker:'old',lastExecutorActivityAt:Date.now(),lastSupervisorInputMarker:'new-approval'}));
+  remember(state,{eventId:'review',wait:{kind:'user_approval',conditions:[]}},{});
+  assert.equal(unchanged(state),false);assert.equal(state.checkedWait,undefined);
 });
