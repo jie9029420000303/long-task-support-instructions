@@ -128,7 +128,9 @@ def main(argv=None, snapshot=None):
     if not path.is_file():
         print(f"讀不到 sidecar：{path}")
         return 2
-    lines = path.read_text(encoding="utf-8").splitlines()
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    print(f"快照容量：{len(content)} 字元、{len(content.encode('utf-8'))} bytes；最長單行 {max(map(len, lines), default=0)} 字元。歷史另存，不壓成超長行；此量測不新增派工門檻。")
     line_count = len(lines)
     batches = sum(bool(BATCH_ROW.match(line)) for line in lines)
     closed_rows = sum(bool(CLOSED_WORK_ROW.match(line)) for line in lines)

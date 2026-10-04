@@ -48,7 +48,7 @@ function init() {
     platform: 'codex', projectRoot: input.projectRoot, allowedRoots: input.allowedRoots.concat(run),
     executorId: input.executorId, supervisorId: input.supervisorId,
     callerTurnId: currentTurn(input.supervisorId),
-    contractSha256: hash(path.join(run, 'contract.json')), dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json'}, createdAt: now()
+    contractSha256: hash(path.join(run, 'contract.json')), dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json',acceptance:true}, createdAt: now()
   };
   write(path.join(run, 'binding.json'), binding);
   write(path.join(run, 'daemon-state.json'), {
