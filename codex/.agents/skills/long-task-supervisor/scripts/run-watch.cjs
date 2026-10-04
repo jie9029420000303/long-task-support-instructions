@@ -22,7 +22,7 @@ function start() {
     launch.endedAt = new Date().toISOString(); launch.code = code; launch.signal = signal;
     let state = {};
     try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch {}
-    if (stopping || ['accepted', 'stopped', 'needs_reconcile'].includes(state.phase)) {
+    if (stopping || fs.existsSync(path.join(directory,'STOP')) || ['accepted', 'stopped'].includes(state.phase) || (state.phase==='needs_reconcile'&&!state.inflight)) {
       record.phase = stopping ? 'stopped' : state.phase; record.endedAt = new Date().toISOString(); save(); return;
     }
     if (Date.now() - began >= 30000) delay = 1000;

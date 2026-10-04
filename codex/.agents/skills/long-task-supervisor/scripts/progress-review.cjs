@@ -26,6 +26,9 @@ function observeActivity(state, poll, binding, nowMs = Date.now(), role = 'execu
   return marker;
 }
 function due(state, nowMs = Date.now()) {
+  const hadWait=Boolean(state.checkedWait);
+  if(require('./checked-wait.cjs').unchanged(state,nowMs))return false;
+  if(hadWait)return true;
   return nowMs - Math.max(state.lastExecutorActivityAt || 0, state.lastSupervisorActivityAt || 0,
     state.lastProgressReviewAt || 0) >= PROGRESS_REVIEW_MS;
 }

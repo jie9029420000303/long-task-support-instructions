@@ -66,16 +66,20 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 ## 主動進度查核
 
-Claude watcher 在最後一筆執行者 transcript 活動後滿 15 分鐘發出 `progress_review`，之後若仍無活動，每次決策送達後再過 15 分鐘重新查核。這是監督事件，不是執行者要貼的 `LONG_TASK_EVENT`。監督先查最新 transcript、派工快照、在途代理、背景工作的真實狀態與尚未達成的驗收條目，分辨正常長工作、進度延誤與證據不足；不可只根據靜默時間斷言異常。以 `LONG_TASK_DELIVERY:<eventId>` 向原執行對話發一則有事實根據的短訊，具體詢問「已完成什麼、現在哪個工作包或背景工作在跑、卡點及下一步」。有延誤或未回報成果時，同一則給可立即執行的收回、補派或排阻建議；正常長工作也給目前查得的狀態與下一個回報點，不發空泛保活。前次追問後仍沉默時，先查送達、執行回合、代理 handle 與背景輸出，再提出新的具體排阻動作，不照貼相同訊息。此事件只可用 `reply`，不能用 `observe` 消掉可見追蹤。決策必填 `progressCheck`，其 `evidence` 列出實際查過的 transcript、快照或工作 handle 與定位，`finding` 記進度判斷與不確定性，`guidance` 寫給執行者的具體下一步且須原文出現在 `reply`；空泛問候或沒有查核依據的決策會被拒絕。向執行對話送訊緊接之前執行：
+執行者 transcript 靜默 15 分鐘後輸出 progress_review。先核對實際工作，並在決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`；過期事件不送訊。可行工作或證據不足時用 reply，附 progressCheck.evidence、finding、guidance，實際原生訊息必須含 guidance。
 
-```text
-node "<skill>/scripts/supervise.cjs" progress-preflight "<RUN>" "<EVENT_ID>"
-```
+只剩已核對的等待時用 observe，填 reason、progressCheck.evidence、finding 及 `wait:{kind:"user_approval",conditions:[]}`；外部結果用 external_result，必須列允許根目錄內的條件檔 conditions:[{path,sha256}] 或有原訂期限來源的 resumeAt。尚未出現的結果檔 sha256 填 null，不自行新增期限。決策後重掛唯一背景 watcher；它繼續讀執行事件、使用者在監督對話的新答覆及條件檔，條件變動立即解除等待。監督自身的工具輸出或結束回合不解除等待，也不催促同一條未變核准。
 
-只在 `current:true` 時送出，保存原生送達結果與精確 transcript 標記，再執行 `decision` 並重掛唯一 watcher；`current:false` 不送舊追問，重新掛 watcher。App 暫停監督、背景工具通知沒有產生真實模型回合時，事件仍停在 pending，須如實揭露，不能宣稱已送出追問。
+背景接收須保持運作，不因減少模型回合停止監看；避免為 idle watcher 外包會定時殺掉接收器的 timeout 命令。使用當前 App 真正支援的長期背景工具及事件完成通知，核對 status.active。若平台強制終止背景工具，據實記錄失效與原生交接途徑，不能保證 App 內部的喚醒，不能另建定時模型 heartbeat 或改由 CLI 代替桌面主線。
 
-`progress_review` 決策範例（路徑與事實須改用該 run 實際查得的資料）：
+## 原契約、使用者修訂與舊 run 接入
 
-```json
-{"eventId":"progress-review-事件識別值","disposition":"reply","progressCheck":{"evidence":["executor transcript: 最後執行活動及時間","dispatch.json: 工作包與在途代理狀態"],"finding":"尚無新成果回報；需先核對在途工作是否仍有輸出，不能單靠靜默認定卡死。","guidance":"請核對在途代理的最新輸出，收回已完成成果並回報卡點與下一步。"},"reply":"目前尚無新成果回報。請核對在途代理的最新輸出，收回已完成成果並回報卡點與下一步。","delivery":{"marker":"LONG_TASK_DELIVERY:progress-review-事件識別值","status":"delivered","messageId":"桌面訊息識別值"}}
-```
+先讀 [授權承接](authorization.md)，核對真實使用者原文。`supervise.cjs effective-contract RUN` 輸出原契約加已核准修訂的有效範圍、排除項、授權更新及 contractStateSha256。監督、執行、派工查核和最後接受都讀同一有效範圍。
+
+在原監督的安全停點（無 pending、無 inflight、舊 watcher 與 dispatch writer 已退出，STOP/accepted/stopped 不改）用 `supervise.cjs amend RUN INPUT.json` 登記修訂。INPUT 含 id、原 contractSha256、authority:{role:"user",quote:"逐字原話",locator:"原對話訊息／文件位置",at:"來源時間",source:{path:"允許根目錄內的原文快照",sha256:"實算雜湊"}}、changes:[{id:"原條文ID",action:"exclude/replace/restore"}]。replace 另填完整 requirement、verify；授權更新用 action:"authorization"、固定 id、scope、instruction。代理提案不能冒填 role:user，來源檔須含原話，語意與操作範圍由監督實際查原對話核實。工具只檢查來源完整性，不能證明任意檔案作者真是使用者。
+
+修訂另存不可改寫的 contract-amendments.jsonl，保留原 contract.json；遺失、變動、衝突皆先對帳，不清檔重置。接受決策必須帶當前 contractStateSha256，結果只對有效條文逐條 PASS；排除項明列 EXCLUDED 及核准來源，不能偽填 PASS。
+
+舊 run 的結果帳用 `supervise.cjs attach-acceptance RUN ACCEPTANCE.json` 接入。原執行者準備目前實際候選與逐條狀態，涵蓋有效條文及 EXCLUDED 項；未測 PENDING，已跑但不足判定 INCONCLUSIVE，缺口 FAIL／BLOCKED，不能憑執行次數補成 PASS。工具保存結果歷史、保留既有派工快照與條文，最後才標記 acceptance 已接入。若已有歷史不得清空或覆蓋舊實測。
+
+接入後原監督與執行者都讀回有效契約、摘要與新規則，再以原游標、pending、receipt 續接唯一 watcher；安裝檔案一致不代表現役已切換。不得由另一對話直接改 live run，也不自動清除 STOP。

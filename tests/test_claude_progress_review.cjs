@@ -50,7 +50,7 @@ for (const format of ['text blocks','plain string']) test('quiet work records '+
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
     await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
     const state=JSON.parse(fs.readFileSync(f.statePath)),event=state.pending;
-    assert.throws(()=>validateDecision({}, {criteria:[]},event,{eventId:event.id,disposition:'observe',reason:'Quiet'}),/visible executor follow-up/);
+    assert.throws(()=>validateDecision({}, {criteria:[]},event,{eventId:event.id,disposition:'observe',reason:'Quiet'}),/checked evidence/);
     assert.throws(()=>validateDecision({}, {criteria:[]},event,{eventId:event.id,disposition:'reply',reply:'Status?'}),/checked evidence/);
     const progressCheck={evidence:['executor transcript: no activity for 16 minutes','dispatch.json: in-flight package still listed'],
       finding:'No new result; in-flight status needs verification before calling this blocked.',
@@ -123,4 +123,44 @@ test('one approval block cannot freeze the whole run without a user pause source
   assert.throws(()=>validateDecision(config,contract,event,{eventId:event.id,disposition:'needs_user'}),/Whole-run pause requires/);
   assert.equal(validateDecision(config,contract,event,{eventId:event.id,disposition:'needs_user',wholeRunPauseSource:'user message 123: pause this entire run'}).disposition,'needs_user');
   assert.equal(validateDecision(config,contract,event,{eventId:event.id,disposition:'observe',reason:'Only one operation awaits approval.',pendingApprovals:['Merge PR #26']}).disposition,'observe');
+});
+
+test('Claude checked wait keeps receiving events and wakes on a human approval without a timed prompt',async()=>{
+  const f=fixture();let child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
+    await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
+    const event=JSON.parse(fs.readFileSync(f.statePath)).pending;
+    assert.equal(command(f,'progress-preflight',event.id).current,true);
+    const decision=path.join(f.root,'observed-wait.json');save(decision,{eventId:event.id,disposition:'observe',reason:'Waiting for the already requested user approval.',
+      progressCheck:{evidence:['original approval source and current executor transcript'],finding:'No independent ready work remains.'},wait:{kind:'user_approval',conditions:[]}});
+    assert.equal(command(f,'decision',decision).processed,true);
+    const state=JSON.parse(fs.readFileSync(f.statePath));state.lastProgressReviewAt=Date.now()-24*3600000;save(f.statePath,state);
+    child=start(f);await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,250));assert.equal(JSON.parse(fs.readFileSync(f.statePath)).pending,null);
+    const binding=JSON.parse(fs.readFileSync(path.join(f.run,'binding.json')));
+    line(binding.supervisorLog,{type:'assistant',message:{content:[{type:'text',text:'The model completed its observe decision.'}]}});
+    await new Promise(resolve=>setTimeout(resolve,100));assert.equal(JSON.parse(fs.readFileSync(f.statePath)).pending,null);
+    line(binding.supervisorLog,{type:'user',uuid:crypto.randomUUID(),message:{content:'Approved. Continue.'}});
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
+    assert.notEqual(JSON.parse(fs.readFileSync(f.statePath)).pending.id,event.id);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('approval arriving while a wait decision is being prepared must not be absorbed as the wait baseline',async()=>{
+  const f=fixture();let child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
+    await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
+    const event=JSON.parse(fs.readFileSync(f.statePath)).pending;
+    assert.equal(command(f,'progress-preflight',event.id).current,true);
+    const binding=JSON.parse(fs.readFileSync(path.join(f.run,'binding.json')));
+    line(binding.supervisorLog,{type:'user',uuid:crypto.randomUUID(),message:{content:'The pending operation is approved; continue.'}});
+    const decision=path.join(f.root,'racing-approval.json');save(decision,{eventId:event.id,disposition:'observe',reason:'Previously the only remaining operation awaited approval.',
+      progressCheck:{evidence:['executor final and the original pending approval'],finding:'The earlier approval was pending.'},wait:{kind:'user_approval',conditions:[]}});
+    assert.equal(command(f,'decision',decision).processed,true);
+    child=start(f);
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review',3000);
+    assert.equal(JSON.parse(fs.readFileSync(f.statePath)).checkedWait,undefined);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
+const contractState = require('./contract-state.cjs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
@@ -16,7 +17,7 @@ function load() {
   const binding = read(path.join(run, 'binding.json'));
   const contractFile = path.join(run, 'contract.json');
   need(hash(contractFile) === binding.contractSha256, 'Locked contract changed');
-  return { binding, contract: validateContract(read(contractFile)) };
+  return { binding, contract: validateContract(contractState.effective(run,binding)) };
 }
 function currentTurn(threadId) {
   if (process.env.CODEX_TURN_ID) return process.env.CODEX_TURN_ID;
@@ -105,7 +106,10 @@ function dispatchPreflight() {
   return {eventId:other,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};
 }
 try {
-  const result = command === 'init' ? init()
+  const result = command === 'attach-acceptance' ? contractState.attachAcceptance(run,load().binding,read(other))
+    : command === 'amend' ? contractState.append(run,load().binding,read(other))
+    : command === 'effective-contract' ? contractState.effective(run,load().binding)
+    : command === 'init' ? init()
     : command === 'status' ? status()
     : command === 'decision' ? decision()
     : command === 'attach-dispatch' ? attachDispatch()

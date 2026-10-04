@@ -1,4 +1,5 @@
 const fs=require('node:fs');
+const contractState=require('./contract-state.cjs');
 const path=require('node:path');
 const crypto=require('node:crypto');
 const acceptance=require('./acceptance-audit.cjs');
@@ -55,7 +56,7 @@ function inspect(run,binding,state){
   if(!binding.dispatchAudit?.enabled&&!fs.existsSync(path.join(run,'DISPATCH_AUDIT')))return {enabled:false,issues:[],newIssues:[],resolved:[]};
   const file=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');let snapshot,issues;
   try{snapshot=parse(JSON.parse(fs.readFileSync(file,'utf8')),binding);
-    if(snapshot.acceptance)acceptance.validate(snapshot.acceptance,JSON.parse(fs.readFileSync(path.join(run,'contract.json'),'utf8')));
+    if(snapshot.acceptance)acceptance.validate(snapshot.acceptance,contractState.effective(run,binding));
     else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
     issues=derive(snapshot);
     for(const item of acceptance.issues(run,snapshot.acceptance)){const value=issue(item.kind,item.affected,item.detail);value.key=digest({kind:item.kind,affected:item.affected,cases:item.cases,episode:item.episode});issues.push(value);}}catch(error){

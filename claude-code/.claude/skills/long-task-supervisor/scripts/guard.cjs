@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { validateWait } = require('./checked-wait.cjs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -32,16 +33,20 @@ function validateDecision(config, contract, event, decision) {
   need(decision && decision.eventId === event.id, 'Decision belongs to another event');
   need(['accept', 'reject', 'reply', 'needs_user', 'observe'].includes(decision.disposition), 'Unknown disposition');
   if (event.kind === 'progress_review') {
-    need(decision.disposition === 'reply', 'Progress review requires a visible executor follow-up');
+    need(['reply','observe'].includes(decision.disposition), 'Progress review requires reply or checked observe');
     const check = decision.progressCheck;
     need(check && Array.isArray(check.evidence) && check.evidence.length > 0 &&
       check.evidence.every(item => typeof item === 'string' && item.trim()), 'Progress review requires checked evidence');
     need(typeof check.finding === 'string' && check.finding.trim(), 'Progress review requires a progress finding');
+    if(decision.disposition==='reply') {
     need(typeof check.guidance === 'string' && check.guidance.trim() &&
       typeof decision.reply === 'string' && decision.reply.includes(check.guidance),
       'Progress review requires guidance in the visible executor reply');
+    } else need(decision.wait, 'Progress observe requires a checked wait');
   }
+  if(decision.wait){need(decision.disposition==='observe','Only observe can establish a checked wait');validateWait(config,decision.wait);}
   if (decision.disposition === 'accept') {
+    if(contract.contractStateSha256)need(decision.contractStateSha256===contract.contractStateSha256,'Acceptance must bind the current effective contract');
     need(event.kind === 'submission', 'Only a submitted candidate can be accepted');
     need(typeof event.revision === 'string' && /^sha256:[a-f0-9]{64}$/.test(event.revision) && decision.revision === event.revision, 'Decision version differs from submission');
     need(typeof event.manifest === 'string' && path.isAbsolute(event.manifest) && config.allowedRoots.some(root => inside(event.manifest, root)), 'Candidate manifest outside allowed roots');
