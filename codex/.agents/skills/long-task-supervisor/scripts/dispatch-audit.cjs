@@ -1,8 +1,9 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const crypto=require('node:crypto');
+const acceptance=require('./acceptance-audit.cjs');
 
-const kinds=['ready_capacity','returned_unintegrated','resource_conflict','recurring_rework','snapshot_missing','snapshot_invalid'];
+const kinds=['ready_capacity','returned_unintegrated','resource_conflict','recurring_rework','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn'];
 const nonEmpty=value=>typeof value==='string'&&value.trim();
 function digest(value){return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');}
 function need(value,message){if(!value)throw Error(message);}
@@ -53,7 +54,11 @@ function derive(snapshot){
 function inspect(run,binding,state){
   if(!binding.dispatchAudit?.enabled&&!fs.existsSync(path.join(run,'DISPATCH_AUDIT')))return {enabled:false,issues:[],newIssues:[],resolved:[]};
   const file=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');let snapshot,issues;
-  try{snapshot=parse(JSON.parse(fs.readFileSync(file,'utf8')),binding);issues=derive(snapshot);}catch(error){
+  try{snapshot=parse(JSON.parse(fs.readFileSync(file,'utf8')),binding);
+    if(snapshot.acceptance)acceptance.validate(snapshot.acceptance,JSON.parse(fs.readFileSync(path.join(run,'contract.json'),'utf8')));
+    else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
+    issues=derive(snapshot);
+    for(const item of acceptance.issues(run,snapshot.acceptance)){const value=issue(item.kind,item.affected,item.detail);value.key=digest({kind:item.kind,affected:item.affected,cases:item.cases,episode:item.episode});issues.push(value);}}catch(error){
     const kind=error.code==='ENOENT'?'snapshot_missing':'snapshot_invalid';
     issues=[issue(kind,[],{message:error.message})];
   }

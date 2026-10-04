@@ -104,7 +104,7 @@ function init() {
     executorId, executorDesktopId:input.executorDesktopId,
     executorMarker:input.executorMarker, executorLog:existingLog, supervisorLog,
     contractSha256:hash(path.join(run,'contract.json')), promptSha256:hash(path.join(run,'executor-prompt.txt')),
-    dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json'},
+    dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json',acceptance:true},
     createdAt:now()
   });
   save(path.join(run, 'daemon-state.json'), {phase:'idle',executorOffset:markerOffset,turnText:[],seen:[],pending:null,reads:0,
