@@ -152,19 +152,19 @@ class CodexDispatchContractTests(unittest.TestCase):
     # installed/copy layout used by Codex workspaces.
     SKILL = ROOT.parent
 
-    def test_new_goal_updates_main_model_without_replacing_accepted_workers(self):
-        # Terra research and coding packages passed prior acceptance; without a matched
-        # speed/cost comparison, a new main model must not force worker migration.
+    def test_model_template_requires_observed_identity_and_preserves_baseline_effort(self):
+        # A prefilled preferred model becomes false evidence when the session or dispatch
+        # tool uses a different model. Only effort is known before resolving each role.
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
-        self.assertIn("主線：GPT-6 Sol；High", skill)
-        self.assertIn("B 技術實作、C 研究子代理：GPT-5.6 Terra；Medium", skill)
+        self.assertIn("優先沿用可實際派發的 GPT-5.6 Terra；Medium", skill)
         self.assertIn("介面子代理：具備所需瀏覽器", skill)
         self.assertIn("Goal 續跑／恢復沿用已鎖定模型", skill)
         for row in (
-            "| 主線 | GPT-6 Sol | High |",
-            "| B 技術實作 | GPT-5.6 Terra | Medium |",
-            "| C 研究 | GPT-5.6 Terra | Medium |",
+            "| 主線 | | High |",
+            "| A 視覺查核 | | Medium |",
+            "| B 技術實作 | | Medium |",
+            "| C 研究 | | Medium |",
             "| 介面操作 | | Low |",
         ):
             self.assertIn(row, template)
