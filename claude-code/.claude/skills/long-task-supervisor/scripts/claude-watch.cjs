@@ -3,7 +3,7 @@
 const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
-const {hash,read,need,validateContract,PROGRESS_REVIEW_MS}=require('./guard.cjs');
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,deliveredText,subagentActivityAt}=require('./guard.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
 const {digest,persist,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
@@ -137,11 +137,6 @@ async function watch(){
   }
   while(!stopped()){
     if(handoffRequest()){console.log('LONG_TASK_WAKE '+JSON.stringify(state.pending));return;}
-    if(!state.pending){const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);if(auditEvent){
-      auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
-      markAnnounced(state,auditEvent);state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
-      console.log('LONG_TASK_WAKE '+JSON.stringify(auditEvent));return;
-    }}
     const rows=readNew();
     if(rows.length)lastGrowthAt=Date.now();
     let finalized=false;
@@ -160,6 +155,13 @@ async function watch(){
       }
       state.executorOffset=end;
       if(!row)continue;
+      const text=deliveredText(row);
+      for(const [id,item] of Object.entries(state.unconfirmedDeliveries||{})){
+        if(text&&item.requires.every(value=>text.includes(value))){
+          (state.confirmedDeliveries||={})[id]={messageId:item.messageId,queuedAt:item.queuedAt,confirmedAt:now(),row:row.uuid||row.type};
+          delete state.unconfirmedDeliveries[id];
+        }
+      }
       if(row.type==='user'){state.message=null;continue;}
       if(!id||!row.uuid)continue;
       if(state.message?.id!==id){state.message={id,texts:[],finalId:null,finalEnd:null};
@@ -178,6 +180,12 @@ async function watch(){
       if(finishFinal())return;
       continue;
     }
+    // Executor replies come first: audit only once no completed reply is still settling.
+    if(!state.pending&&!state.message?.finalId){const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);if(auditEvent){
+      auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
+      markAnnounced(state,auditEvent);state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
+      console.log('LONG_TASK_WAKE '+JSON.stringify(auditEvent));return;
+    }}
     if(state.progressWait&&Date.now()>=state.progressWait.deadline){
       const event={...state.progressWait.event,kind:'continue'};
       state.progressWait=null;state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
@@ -186,10 +194,13 @@ async function watch(){
     }
     const hadCheckedWait=Boolean(state.checkedWait);
     checkedWait.supervisorInput(state,binding);
-    if(!checkedWait.unchanged(state)&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS)){
+    state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,subagentActivityAt(binding));
+    if(!checkedWait.unchanged(state)&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS)){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
-        kind:'progress_review',lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),at:now()};
+        kind:'progress_review',lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
+        lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
+        unconfirmedDeliveries:state.unconfirmedDeliveries||{},at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;

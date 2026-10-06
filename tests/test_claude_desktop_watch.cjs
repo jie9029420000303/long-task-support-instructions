@@ -284,3 +284,64 @@ test('Claude observe honors an existing STOP without consuming the pending event
     assert.deepEqual(state.seen,before.seen);assert.equal(state.resolved?.[eventId],undefined);
   } finally {child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });
+
+function boundRun(prefix,{dispatchAudit=false}={}){
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),prefix));
+  const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});
+  const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
+  const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
+  const executorLog=path.join(project,executorId+'.jsonl');
+  line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
+  line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
+  const run=path.join(root,'run'),input=path.join(root,'input.json');
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Root-cause regression',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Watch events',source:'source.md:1',verify:'Replay transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
+  const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'120',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
+  execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
+  const state=()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
+  const watch=()=>spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
+  const supervise=(...args)=>execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),...args],{env,encoding:'utf8',stdio:'pipe'});
+  return {root,run,env,executorLog,state,watch,supervise};
+}
+
+test('a queued reply to a busy executor does not freeze the run and is confirmed when the held message lands',async()=>{
+  // The desktop host holds a message for a busy executor until its turn ends (desktop docs). Requiring the
+  // transcript row at decision time left the pending event stuck and blocked every later executor event.
+  const f=boundRun('claude-queued-delivery-');
+  const first=crypto.randomUUID();
+  line(f.executorLog,{type:'assistant',uuid:first,timestamp:new Date().toISOString(),message:{id:'msg-q1',stop_reason:'end_turn',content:[{type:'text',text:'Which value should I write?\nLONG_TASK_EVENT {"kind":"question"}'}]}});
+  let child=f.watch();
+  try{
+    await until(()=>f.state().pending?.id===first);
+    await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
+    const marker='LONG_TASK_DELIVERY:'+first;
+    const claimed=path.join(f.root,'delivered.json');
+    fs.writeFileSync(claimed,JSON.stringify({eventId:first,disposition:'reply',reply:'Use BLUE.',delivery:{marker,status:'delivered',messageId:'msg-delivered'}}));
+    assert.throws(()=>f.supervise('decision',f.run,claimed),/Command failed/,'a delivered claim still needs the transcript row');
+    const queued=path.join(f.root,'queued.json');
+    fs.writeFileSync(queued,JSON.stringify({eventId:first,disposition:'reply',reply:'Use BLUE.',delivery:{marker,status:'queued',messageId:'msg-queued'}}));
+    assert.equal(JSON.parse(f.supervise('decision',f.run,queued)).processed,true);
+    assert.equal(f.state().pending,null);
+    assert.deepEqual(JSON.parse(f.supervise('status',f.run)).unconfirmedDeliveries,[first],'queued is not yet read');
+    child=f.watch();
+    await until(()=>f.state().phase==='watching');
+    line(f.executorLog,{type:'attachment',uuid:crypto.randomUUID(),attachment:{type:'queued_command',prompt:'<cross-session-message from="local_x">\n'+marker+'\nUse BLUE.\n</cross-session-message>'}});
+    await until(()=>f.state().confirmedDeliveries?.[first]);
+    assert.deepEqual(JSON.parse(f.supervise('status',f.run)).unconfirmedDeliveries,[]);
+    const second=crypto.randomUUID();
+    line(f.executorLog,{type:'assistant',uuid:second,timestamp:new Date().toISOString(),message:{id:'msg-s1',stop_reason:'end_turn',content:[{type:'text',text:'A later question.\nLONG_TASK_EVENT {"kind":"question"}'}]}});
+    await until(()=>f.state().pending?.id===second);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('an executor reply already in the transcript reaches the supervisor before a missing-snapshot audit',async()=>{
+  // Auditing first made every new run wake on snapshot_missing while a real blocked reply waited a full cycle.
+  const f=boundRun('claude-reply-first-',{dispatchAudit:true});
+  const blocked=crypto.randomUUID();
+  line(f.executorLog,{type:'assistant',uuid:blocked,timestamp:new Date().toISOString(),message:{id:'msg-b1',stop_reason:'end_turn',content:[{type:'text',text:'I need authorization first.\nLONG_TASK_EVENT {"kind":"blocked"}'}]}});
+  const child=f.watch();
+  try{
+    await until(()=>f.state().pending);
+    assert.equal(f.state().pending.id,blocked);
+    assert.equal(f.state().pending.kind,'blocked');
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
