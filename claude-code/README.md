@@ -42,8 +42,8 @@
 |---|---|---|---|
 | 長任務機制 | Goal（可由技能建立、設 token 預算） | `/goal`（使用者指令；技能不能代下，也沒有 token 預算） | 技能只能建議使用者下 `/goal` |
 | 狀態保存 | Goal 物件 | `.claude/long-task/<slug>/state.md` | 需靠檔案，對話壓縮後以檔案為準 |
-| 主線模型 | GPT-6 Sol @ High | 本 session 模型（建議 Opus 5／`best`，effort high） | 技能不能切換主模型，只揭露並請使用者 `/model`、`/effort` |
-| 一般子代理 | GPT-5.6 Terra @ Medium | `sonnet` @ medium | 別名依供應商解析，鎖定時記實際模型 |
+| 主線模型 | 目前合格的通用／代理旗艦級模型 @ High（GPT-6.1 Sol 可直接沿用） | 本 session 模型（建議 Opus 5／`best`，effort high） | 技能不能切換主模型；Codex 不以舊型號字串阻塞相容主線 |
+| 一般子代理 | 優先可派發的 GPT-5.6 Terra @ Medium；工具未提供時解析合格替代 | `sonnet` @ medium | 以當回合派工工具核對可用性，鎖定時記實際模型與替代原因 |
 | C 研究子代理 | 一般子代理 @ Medium，指令約束「不決策、不改正式文件」 | `lt-researcher-{medium,high,xhigh}`：`tools` 無 Edit／Write／Agent，Bash 只能把來源快照寫進 evidence/；互斥議題以 `[共用資源] 議題:<slug>` 交給 `scope-overlap.py` 擋同議題並行 | 正式文件的 Write／Edit 只有主線做得到；子代理靠 WebFetch 讀來源，JS 渲染頁才用 Browser pane（受序列化限制） |
 | 介面子代理 | 具瀏覽器／視覺能力中總成本最低者 @ Low | `sonnet` @ low | 未選 Haiku 4.5（不支援 effort 層級，會讓升檔失效） |
 | 升一檔 | 同模型改推理值 | 改派下一檔的 Agent 定義（effort 只能寫在定義檔） | 需 12 個定義檔；缺檔屬執行阻塞 |
