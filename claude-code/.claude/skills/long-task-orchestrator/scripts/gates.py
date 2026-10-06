@@ -40,7 +40,15 @@ def user_texts(data):
             row = json.loads(line)
         except ValueError:
             continue
-        if row.get("type") != "user" or row.get("isSidechain"):
+        if row.get("isSidechain"):
+            continue
+        # A message that arrives mid-turn is stored as a queued_command attachment, not a user row.
+        attachment = row.get("attachment") or {}
+        if row.get("type") == "attachment" and attachment.get("type") == "queued_command":
+            prompt = attachment.get("prompt")
+            texts.extend([prompt] if isinstance(prompt, str) else [b.get("text", "") for b in prompt or [] if isinstance(b, dict) and b.get("type") == "text"])
+            continue
+        if row.get("type") != "user":
             continue
         content = (row.get("message") or {}).get("content")
         blocks = [content] if isinstance(content, str) else [b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]

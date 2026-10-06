@@ -101,6 +101,16 @@ class QuestionGateTests(unittest.TestCase):
         self.assertIn("監督", result.stderr)
         self.assertIn("question", result.stderr)
 
+    def test_binding_that_arrived_mid_turn_still_routes_to_the_supervisor(self):
+        # 2026-10-06 Gateway 實測：回合中途送到的訊息存成 queued_command 附件；只認 user 列會把受監督的執行端
+        # 當成未受監督，提示它自己採預設，而不是交監督代答。
+        bind = {"type": "attachment", "attachment": {"type": "queued_command",
+                                                       "prompt": "<cross-session-message>LONG_TASK_BIND:abc 啟動</cross-session-message>"}}
+        result = self.ask([user(SKILL_ROW), bind], state())
+        self.assertEqual(2, result.returncode)
+        self.assertIn("監督", result.stderr)
+        self.assertIn("question", result.stderr)
+
     def test_user_requested_itemized_confirmation_is_allowed(self):
         self.assertEqual(0, self.ask([user(SKILL_ROW)], state(itemized="使用者：「逐項跟我確認」2026-10-06 10:00")).returncode)
 
