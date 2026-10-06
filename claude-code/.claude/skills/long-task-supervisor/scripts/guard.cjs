@@ -94,4 +94,28 @@ function validateDecision(config, contract, event, decision) {
   }
   return decision;
 }
-module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS };
+// A cross-session message lands as a user turn, or as a queued_command attachment or queue row when it
+// arrives mid-turn. The model's own replies are never delivery evidence.
+function deliveredText(row) {
+  if (!row || row.type === 'assistant') return '';
+  const content = row.message?.content, parts = [];
+  if (typeof content === 'string') parts.push(content);
+  else if (Array.isArray(content)) for (const block of content) if (block?.type === 'text') parts.push(block.text);
+  if (typeof row.attachment?.prompt === 'string') parts.push(row.attachment.prompt);
+  if (typeof row.content === 'string') parts.push(row.content);
+  return parts.join('\n');
+}
+function deliveryRecorded(file, requires) {
+  return fs.readFileSync(file, 'utf8').split('\n').some(line => {
+    try { const text = deliveredText(JSON.parse(line)); return requires.every(item => text.includes(item)); } catch { return false; }
+  });
+}
+// Background subagents write their own transcripts beside the executor's; their growth is executor work.
+function subagentActivityAt(binding) {
+  const dir = path.join(path.dirname(binding.executorLog), binding.executorId, 'subagents');
+  let latest = 0;
+  try { for (const name of fs.readdirSync(dir)) if (name.endsWith('.jsonl')) latest = Math.max(latest, fs.statSync(path.join(dir, name)).mtimeMs); } catch {}
+  return Math.min(latest, Date.now());
+}
+module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
+  deliveredText, deliveryRecorded, subagentActivityAt };

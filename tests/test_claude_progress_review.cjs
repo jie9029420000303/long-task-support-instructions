@@ -164,3 +164,30 @@ test('approval arriving while a wait decision is being prepared must not be abso
     assert.equal(JSON.parse(fs.readFileSync(f.statePath)).checkedWait,undefined);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+test('a background subagent still writing its transcript is executor work, not silence',async()=>{
+  // While the main thread waits on background subagents its own transcript is quiet; counting only that file
+  // woke the supervisor with a false "silent for 15 minutes" review during every long subagent run.
+  const f=fixture(16),executorId=path.basename(f.executorLog,'.jsonl');
+  const subagents=path.join(path.dirname(f.executorLog),executorId,'subagents');fs.mkdirSync(subagents,{recursive:true});
+  fs.writeFileSync(path.join(subagents,'agent-a1.jsonl'),'{}\n');
+  const child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(JSON.parse(fs.readFileSync(f.statePath)).pending,null);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('subagent work that resumes before the supervisor sends makes the progress review obsolete',async()=>{
+  const f=fixture(16),executorId=path.basename(f.executorLog,'.jsonl');
+  const child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
+    await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
+    const event=JSON.parse(fs.readFileSync(f.statePath)).pending;
+    const subagents=path.join(path.dirname(f.executorLog),executorId,'subagents');fs.mkdirSync(subagents,{recursive:true});
+    fs.writeFileSync(path.join(subagents,'agent-b2.jsonl'),'{}\n');
+    assert.equal(command(f,'progress-preflight',event.id).current,false);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});

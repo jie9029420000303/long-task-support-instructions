@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const contractState = require('./contract-state.cjs');
 const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
-const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS } = require('./guard.cjs');
+const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS, deliveryRecorded, subagentActivityAt } = require('./guard.cjs');
 const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
@@ -122,7 +122,8 @@ function status() {
   if (ready && ready.pid === state.pid) {try {process.kill(ready.pid,0);alive=true;} catch {}}
   return {run,supervisorId:binding.supervisorId,executorId:binding.executorId,
     phase:state.phase,active:alive && ready?.readVerified === true && state.phase==='watching',
-    readVerified:ready?.readVerified === true,reads:state.reads,acceptedAt:state.acceptedAt || null,error:state.error || null};
+    readVerified:ready?.readVerified === true,reads:state.reads,acceptedAt:state.acceptedAt || null,error:state.error || null,
+    unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{})};
 }
 function decision() {
   need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute decision path');
@@ -144,16 +145,12 @@ function decision() {
     const marker='LONG_TASK_DELIVERY:'+event.id;
     need(input.delivery?.marker===marker && ['delivered','queued'].includes(input.delivery.status) &&
       typeof input.delivery.messageId==='string' && input.delivery.messageId, 'Missing desktop message receipt');
-    need(fs.readFileSync(binding.executorLog,'utf8').includes(marker), 'Desktop delivery not recorded in executor transcript');
-    if (event.kind==='progress_review') {
-      const delivered=fs.readFileSync(binding.executorLog,'utf8').split('\n').filter(Boolean).some(line=>{
-        // Cross-session deliveries arrive as plain-string content, not text blocks.
-        try {const row=JSON.parse(line),content=row.message?.content;
-          return (typeof content==='string'?[{type:'text',text:content}]:(content||[])).some(block=>
-          block?.type==='text' && block.text.includes(marker) && block.text.includes(value.progressCheck.guidance));}
-        catch {return false;}
-      });
-      need(delivered,'Progress guidance not recorded in executor transcript');
+    const requires=event.kind==='progress_review'?[marker,value.progressCheck.guidance]:[marker];
+    // The desktop host holds a message for a busy executor until its turn ends, so a queued receipt cannot
+    // be in the transcript yet. Record it as unconfirmed; the watcher confirms it when the row lands.
+    if (!deliveryRecorded(binding.executorLog,requires)) {
+      need(input.delivery.status==='queued',event.kind==='progress_review'?'Progress guidance not recorded in executor transcript':'Desktop delivery not recorded in executor transcript');
+      (state.unconfirmedDeliveries ||= {})[event.id]={requires,messageId:input.delivery.messageId,queuedAt:now()};
     }
   }
   checkedWait.remember(state,value,binding);
@@ -168,7 +165,7 @@ function decision() {
 function stop() {load();fs.writeFileSync(path.join(run,'STOP'),now()+'\n');return {run,stopRequested:true};}
 function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
 function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
-function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS;if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
+function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS;if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
     const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))
