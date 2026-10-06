@@ -6,6 +6,7 @@
 - /goal 條件：<使用者設定的條件，或「未設」>
 - 並行上限：<20（Claude Code 預設）／N（CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS）／N（使用者指定）>　背景派工：<可用／停用（CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1，已揭露差距）>
 - 執行期資源：同目錄 `resources.json`（`scripts/resource-ledger.py` 登記與收尾；`sidecar-guard.py` 每次核對，未收尾 exit 4）
+- 逐項確認模式：關閉（使用者明說要逐項確認時，改記使用者原話＋時間；`scripts/gates.py` 才放行 AskUserQuestion）
 
 ## 原始目標
 <使用者原句>
