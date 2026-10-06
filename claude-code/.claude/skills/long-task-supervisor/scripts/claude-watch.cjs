@@ -195,7 +195,9 @@ async function watch(){
     const hadCheckedWait=Boolean(state.checkedWait);
     checkedWait.supervisorInput(state,binding);
     state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,subagentActivityAt(binding));
-    if(!checkedWait.unchanged(state)&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS)){
+    // An executor's declared wait stays quiet until its own deadline, which wakes the supervisor as `continue`.
+    const declaredWait=Boolean(state.progressWait)&&Date.now()<state.progressWait.deadline;
+    if(!checkedWait.unchanged(state)&&(hadCheckedWait||(!declaredWait&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS))){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
         kind:'progress_review',lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),

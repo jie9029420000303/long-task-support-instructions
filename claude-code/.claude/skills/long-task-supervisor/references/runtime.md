@@ -66,7 +66,7 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 ## 主動進度查核
 
-執行者 transcript 與其背景子代理 transcript 都靜默 15 分鐘後輸出 progress_review，事件附最後子代理活動時間與尚未確認的送達。先核對實際工作，並在決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`；過期事件不送訊。可行工作或證據不足時用 reply，附 progressCheck.evidence、finding、guidance，實際原生訊息必須含 guidance。
+執行者 transcript 與其背景子代理 transcript 都靜默 15 分鐘後輸出 progress_review，事件附最後子代理活動時間與尚未確認的送達。執行者宣告的等待（`waiting`，或 `progress` 加 `waitMinutes`）期間不做這項查核，到期由 `continue` 事件喚醒監督。先核對實際工作，並在決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`；過期事件不送訊。可行工作或證據不足時用 reply，附 progressCheck.evidence、finding、guidance，實際原生訊息必須含 guidance。
 
 只剩已核對的等待時用 observe，填 reason、progressCheck.evidence、finding 及 `wait:{kind:"user_approval",conditions:[]}`；外部結果用 external_result，必須列允許根目錄內的條件檔 conditions:[{path,sha256}] 或有原訂期限來源的 resumeAt。尚未出現的結果檔 sha256 填 null，不自行新增期限。決策後重掛唯一背景 watcher；它繼續讀執行事件、使用者在監督對話的新答覆及條件檔，條件變動立即解除等待。監督自身的工具輸出或結束回合不解除等待，也不催促同一條未變核准。
 

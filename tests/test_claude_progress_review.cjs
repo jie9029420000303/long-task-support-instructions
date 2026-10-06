@@ -191,3 +191,17 @@ test('subagent work that resumes before the supervisor sends makes the progress 
     assert.equal(command(f,'progress-preflight',event.id).current,false);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+test('a declared background wait stays quiet past fifteen minutes until its own deadline',async()=>{
+  // The executor said "waiting on background work for 60 minutes"; waking the supervisor every 15 minutes
+  // during that wait spent model turns on a run that had already told us when to look again.
+  const f=fixture(16),state=JSON.parse(fs.readFileSync(f.statePath));
+  state.progressWait={event:{id:'wait-1',kind:'waiting',nextAction:'Wait for the build',waitMinutes:60},deadline:Date.now()+44*60000};
+  save(f.statePath,state);
+  const child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(JSON.parse(fs.readFileSync(f.statePath)).pending,null);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});

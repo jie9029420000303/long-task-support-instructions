@@ -83,6 +83,23 @@
 - Cloud／web session：只看得到 repo 內的 `.claude/skills/` 與 `.claude/agents/`，看不到 `~/.claude/`。要在 cloud 用本技能，必須把這兩個目錄提交進 repo。`/goal` 可在 `claude -p`、desktop、Remote Control 使用。
 - 並行技術包的 worktree 由主線依「B 技術包 worktree 隔離」預先建立並寫進 `[工作區]`；不用 Agent 工具的 `isolation: "worktree"`（路徑派工前不存在、無法先過閘，且未修改時會被自動清掉）。同一檔案／元件仍依序交接，不得同時寫。
 
+## hooks 閘
+
+`scripts/gates.py` 把三條自律規則改成事件當下的檢查，只會放行（可附一行備註）或 exit 2 把原因交回模型，不跳確認框：
+
+- **G4 壓縮後重載**（SessionStart，`compact`）：本對話載入過本技能時，壓縮後補一段「先 `Skill(long-task-orchestrator, "續接")`，再讀狀態檔」。
+- **G3 不用提問框卡主線**（PreToolUse，`AskUserQuestion`）：本對話載入過本技能且任務未完成時擋下；受監督（有 `LONG_TASK_BIND` 綁定訊息）提示改交監督代答，未受監督提示採推薦並記已採預設。狀態檔「逐項確認模式」記有使用者原話、或最終判定為 PASS 時放行。
+- **G1＋G2 派工前檢查**（PreToolUse，`Agent`）：只看 `lt-*`。工作包缺 `[工作區]`／`[可修改範圍]`／`[共用資源]` 擋；錯誤次數（狀態檔工作包表優先，其次派工表頭「目前錯誤次數」）已滿 3 擋；派的檔次高於錯誤次數允許的檔次擋；查不到錯誤次數放行加備註。
+
+安裝（使用者層，所有專案生效；`<skill>` 換成本技能的絕對路徑）：
+
+```json
+{"hooks": {
+  "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "python3 <skill>/scripts/gates.py"}]}],
+  "PreToolUse": [{"matcher": "AskUserQuestion|Agent|Task", "hooks": [{"type": "command", "command": "python3 <skill>/scripts/gates.py"}]}]
+}}
+```
+
 ## 並行與完成
 
 依依賴並行，並依 SKILL「積極派工」每輪把就緒包派到席位用滿、任一完成即補派；共享檔案、瀏覽器、帳號、資料庫或測試資料無法隔離時排程。查核期間候選版被修改，受影響證據失效。
