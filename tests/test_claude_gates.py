@@ -160,5 +160,85 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(0, self.dispatch("general-purpose", "no work package here").returncode)
 
 
+OLD_STATE = ("# 長任務狀態：gw\n\n## 工作包\n"
+             "| id | 類型 | 負責者 | 依賴 | 候選版 | 狀態 | 品質錯誤 | 推理 | 證據／下一步 |\n|---|---|---|---|---|---|---|---|---|\n"
+             "| B245 | B 技術 | lt-tech-worker-medium（sonnet） | | **73eaf69** | 在途 | {errors} | medium | |\n\n## 最終判定\n{final}\n")
+WP_FILE = "# B245 修 404\n\n[工作區]\npath:/w/v20\nworktree:v20\nbase:4f950d9\n\n[可修改範圍]\n- src/a.py\n\n[共用資源]\n- worktree:v20\n"
+
+
+def tool_use(name, **tool_input):
+    return {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": tool_input}]}}
+
+
+class StateLocationTests(unittest.TestCase):
+    """2026-10-06 Gateway 實測：主線在 git worktree 裡工作，狀態檔在專案根的舊版 .codex/long-task，工作包寫在
+    wp 檔、派工訊息只引用它，表頭寫「目前錯誤次數 0」。閘只看目前工作目錄與訊息本身，結果正常派工被誤擋，
+    錯誤次數與提問檢查則從沒對到狀態檔——擋錯的同時該擋的也沒擋。"""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        root = Path(self.dir.name) / "雲端 (同步Nas)"
+        self.task = root / "proj" / ".codex" / "long-task" / "gw"
+        (self.task / "wp").mkdir(parents=True)
+        self.worktree = root / "proj.worktrees" / "v20"
+        self.worktree.mkdir(parents=True)
+        self.transcript = Path(self.dir.name) / "t.jsonl"
+        self.state = self.task / "state.md"
+        self.wp = self.task / "wp" / "B245.md"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def write(self, errors=0, final="未完成", wp=WP_FILE, rows=(user(SKILL_ROW),)):
+        self.state.write_text(OLD_STATE.format(errors=errors, final=final), encoding="utf-8")
+        self.wp.write_text(wp, encoding="utf-8")
+        self.transcript.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+
+    def run_gate(self, **event):
+        payload = {"cwd": str(self.worktree), "transcript_path": str(self.transcript), **event}
+        return subprocess.run([sys.executable, str(GATES)], input=json.dumps(payload, ensure_ascii=False),
+                              capture_output=True, text=True)
+
+    def dispatch(self, agent):
+        prompt = f"你是長任務 B 技術子代理，執行工作包 B245（目前錯誤次數 0）。完整工作包在這個檔案，請先完整讀它：\n\n{self.wp}\n\n重點提醒：只在工作區內改檔。"
+        return self.run_gate(hook_event_name="PreToolUse", tool_name="Agent",
+                             tool_input={"subagent_type": agent, "prompt": prompt, "description": "B245"})
+
+    def test_sections_written_in_the_referenced_work_package_file_count(self):
+        self.write()
+        result = self.dispatch("lt-tech-worker-medium")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stdout)
+
+    def test_missing_section_in_both_prompt_and_file_is_still_rejected(self):
+        self.write(wp=WP_FILE.replace("[共用資源]\n- worktree:v20\n", ""))
+        result = self.dispatch("lt-tech-worker-medium")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("[共用資源]", result.stderr)
+
+    def test_error_count_comes_from_the_task_that_owns_the_work_package_file(self):
+        # 表頭說 0、狀態檔說 1：以 wp 檔所屬任務的狀態檔為準——升到 high 合規，跳到 xhigh 是越級。
+        self.write(errors=1)
+        self.assertEqual(0, self.dispatch("lt-tech-worker-high").returncode)
+        result = self.dispatch("lt-tech-worker-xhigh")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("應派 lt-tech-worker-high", result.stderr)
+        self.write(errors=3)
+        self.assertIn("主線接手", self.dispatch("lt-tech-worker-xhigh").stderr)
+
+    def test_question_gate_reads_the_state_file_this_session_works_on(self):
+        # 任務已 PASS 的對話要能正常問使用者；找不到狀態檔就會把它當進行中而擋下。
+        touched = (user(SKILL_ROW), tool_use("Read", file_path=str(self.state)))
+        self.write(final="PASS（候選版 73eaf69）", rows=touched)
+        self.assertEqual(0, self.run_gate(hook_event_name="PreToolUse", tool_name="AskUserQuestion", tool_input={}).returncode)
+        self.write(rows=touched)
+        self.assertEqual(2, self.run_gate(hook_event_name="PreToolUse", tool_name="AskUserQuestion", tool_input={}).returncode)
+
+    def test_compact_reminder_points_at_the_state_file_this_session_works_on(self):
+        self.write(rows=(user(SKILL_ROW), tool_use("Bash", command=f'python3 sidecar-guard.py "{self.state}"')))
+        result = self.run_gate(hook_event_name="SessionStart", source="compact")
+        self.assertIn(str(self.state), result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
