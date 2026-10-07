@@ -287,6 +287,33 @@ test('a machine sleep is reported once and its minutes do not count against a pa
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
+// The kernel's last sleep covers a sleep while no watcher ran, but a fresh run must not inherit last night's
+// closed lid: only the part after the run was bound is this run's downtime. A fake sysctl stands in for the kernel.
+function fakeKernelSleep(f,fromMinutesAgo,toMinutesAgo){
+  const bin=path.join(f.root,'bin');fs.mkdirSync(bin,{recursive:true});
+  const sec=minutes=>Math.floor((Date.now()-minutes*60000)/1000);
+  fs.writeFileSync(path.join(bin,'sysctl'),'#!/bin/sh\necho "{ sec = '+sec(fromMinutesAgo)+', usec = 0 } slept"\necho "{ sec = '+sec(toMinutesAgo)+', usec = 0 } woke"\n',{mode:0o755});
+  f.env.PATH=bin+':'+process.env.PATH;
+}
+test('a sleep before the run was bound is not reported; one after it is',async()=>{
+  const before=fixture();fakeKernelSleep(before,90,80);
+  let child=start(before);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(before.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(before),null);
+    assert.deepEqual(JSON.parse(fs.readFileSync(before.statePath)).sleeps||[],[]);
+  }finally{child.kill('SIGTERM');fs.rmSync(before.root,{recursive:true,force:true});}
+  const after=fixture(),binding=JSON.parse(fs.readFileSync(path.join(after.run,'binding.json')));
+  binding.createdAt=minutesAgo(60);save(path.join(after.run,'binding.json'),binding);fakeKernelSleep(after,30,20);
+  child=start(after);
+  try{
+    await until(()=>pending(after)?.kind==='progress_review');
+    assert.deepEqual(pending(after).reasons,['machine_slept']);
+    assert.equal(pending(after).machineSlept.length,1);
+  }finally{child.kill('SIGTERM');fs.rmSync(after.root,{recursive:true,force:true});}
+});
+
 test('a test process that is alive is activity, not a stall, even while its log is quiet',async()=>{
   const f=fixture({quietMinutes:16,lastReviewMinutesAgo:16}),stateDir=path.join(f.root,'task'),logs=path.join(stateDir,'resources');
   fs.mkdirSync(logs,{recursive:true});const log=path.join(logs,'r9.log');fs.writeFileSync(log,'drill waiting on lease\n');

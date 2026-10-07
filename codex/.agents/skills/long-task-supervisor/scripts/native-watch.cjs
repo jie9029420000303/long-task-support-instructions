@@ -5,7 +5,8 @@ const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { createClient } = require('./mcp-client.cjs');
-const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
+const { hash, read, need, validateContract, validateDecision, quietReview, PROGRESS_REVIEW_MS } = require('./guard.cjs');
+const clock = require('./supervisor-clock.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
@@ -13,7 +14,7 @@ const binding = read(path.join(run, 'binding.json'));
 const statePath = path.join(run, 'daemon-state.json');
 const contractPath = path.join(run, 'contract.json');
 const lockPath = path.join(run, 'watcher.lock');
-let state = read(statePath), ownsLock = false;
+let state = read(statePath), ownsLock = false, lastMentionCheck = 0;
 const client = createClient({nodePath:process.execPath});
 const meta = {'x-codex-turn-metadata':{thread_id:binding.supervisorId,turn_id:binding.callerTurnId}};
 const now = () => new Date().toISOString();
@@ -143,7 +144,11 @@ function reviewPrompt(event) {
     ? '\n這是派工快照檢查，只是要求人工判斷，不代表應增加代理。先重讀目前快照，並核對平台代理 handle/狀態、依賴與可行性、工作區/瀏覽器/帳號/資料庫/測試環境衝突、實際驗收進度。執行對話仍是唯一 dispatcher；若問題已消失，不得送出舊指示。'
     : '';
   const progress=event.kind==='progress_review'
-    ? '\n這是監督與執行兩個對話連續 15 分鐘沒有新訊息的主動查核，不代表工作必然異常。先查最新執行對話、派工快照、在途代理與背景輸出、未達驗收及既有待核准事項；判斷正常長工作、延誤或證據不足。若進度證據不足，向執行端提出可回答的具體進度／阻塞問題；若已有可行工作，直接指引它推進。有可行工作或證據不足時用 reply；已核對且只剩未變等待時可 observe，附 wait:{kind:user_approval/external_result,conditions:[{path,sha256}],resumeAt:僅有既定期限才填}，不要停止事件監看。另填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促。'
+    ? '\n這是監督自己的進度時鐘發出的查核，reasons 列原因，不代表工作必然異常。先執行 '+[process.execPath,path.join(__dirname,'supervise.cjs'),'brief',run].map(shellQuote).join(' ')+' 一次取得在途包速度、執行端最後幾段話、派工現況與最近決策，不逐檔探查；需要時再讀相關原始證據。'
+      +'overdue＝在途包扣掉電腦睡眠後達 AI 時程基準 1.5 倍；baseline_missing＝在途包沒有基準；process_stalled＝測試程序 15 分鐘沒產出且查不到還活著；repeat＝同一指令連續失敗 3 次；resource_underused＝派工快照宣告的真實資源有空位，卻有工作在等同一資源。這幾類若確有落後或重複，用 reply 給已授權範圍內的具體加速建議（拆包並行、只跑受影響測試、停止重試改換做法、先收回整合已完成成果、補基準或更新快照）；pace 裡執行端與監督算的基準差超過一半（mismatch）先請執行端說明依據；核對後進度正常就 observe，不傳訊、不打斷執行端。'
+      +'executor_blocked＝執行端指令 5 分鐘沒有結果、也沒有程序在跑，多半停在權限確認；machine_slept＝電腦睡眠 5 分鐘以上，整場停住。這兩類只有使用者能處理：用 observe，不傳訊給執行端，在本回合直接請使用者到執行對話處理，或接電源、不闔蓋，並把停擺時長記入決策帳。'
+      +'silence＝兩個對話、執行端子代理與在跑的測試程序全部靜止 15 分鐘；wait_changed＝已核對的等待條件變了。這兩類若進度證據不足，向執行端提出可回答的具體進度／阻塞問題；已有可行工作就直接指引推進，用 reply；只剩已核對且未變的等待才可 observe，附 wait:{kind:user_approval/external_result,conditions:[{path,sha256}],resumeAt:僅有既定期限才填}。'
+      +'每次都填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；reply 時 guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促，不要停止事件監看。'
     : '';
   return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
     + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
@@ -184,7 +189,8 @@ async function pendingDecision() {
     const fresh=unpack(await rpc('wait_threads',{targets:[{threadId:binding.executorId,...(state.cursor?{afterCursor:state.cursor}:{})}],timeoutMs:0}));
     const poll=fresh.polls?.find(item=>item.thread?.id===binding.executorId);
     need(poll,'Bound executor missing from progress preflight');
-    if(fs.existsSync(path.join(run,'STOP'))||activityMarker(poll)!==event.activityMarker){
+    // Silence ends with new activity; overdue, blocked and the other clock reasons are meant for a busy executor.
+    if(fs.existsSync(path.join(run,'STOP'))||quietReview(event)&&activityMarker(poll)!==event.activityMarker){
       observeActivity(state,poll,binding);
       (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};
       state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;
@@ -204,6 +210,7 @@ async function pendingDecision() {
       checkedWait.remember(state,decision,binding);
     }
     state.lastProgressReviewAt=Date.now();
+    if(event.kind==='progress_review')state.failedCommands={};
     (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
     state.seen.push(event.id); state.pending = null;
     state.phase = 'watching'; checkpoint(); return;
@@ -214,7 +221,7 @@ async function pendingDecision() {
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
   }
   await sendAndRead(binding.executorId,decision.reply,'answer-' + event.id);
-  if(event.kind==='progress_review')state.lastProgressReviewAt=Date.now();
+  if(event.kind==='progress_review'){state.lastProgressReviewAt=Date.now();state.failedCommands={};}
   (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
   state.seen.push(event.id); state.pending = null;
   state.phase = 'watching'; checkpoint();
@@ -224,6 +231,7 @@ async function watch() {
   if(fs.existsSync(path.join(run,'STOP'))||['accepted','stopped'].includes(state.phase))return;
   need(state.phase!=='needs_reconcile'||state.inflight,'Receipt recovery requires a saved inflight delivery');
   checkSources();
+  clock.kernelSleep(state,binding);
   state.pid = process.pid;
   checkpoint();
   const initialized = await client.request('initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'long-task-supervisor',version:'1.0'}});
@@ -250,7 +258,14 @@ async function watch() {
       if (state.phase === 'accepted') break;
       continue;
     }
-    const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);checkpoint();
+    clock.tickSleep(state);
+    const audit=inspectDispatch(run,binding,state);
+    // The executor learns the run from the binding message; until then, or 15 minutes, a missing snapshot is expected.
+    if(!state.executorKnowsRun&&audit.newIssues.some(item=>item.kind==='snapshot_missing')&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS){
+      if(Date.now()-lastMentionCheck>=60000){lastMentionCheck=Date.now();state.executorKnowsRun=contains(await rpc('read_thread',{threadId:binding.executorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}),run);}
+      if(!state.executorKnowsRun)audit.newIssues=audit.newIssues.filter(item=>item.kind!=='snapshot_missing');
+    }
+    const auditEvent=dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const started = Date.now();
     const response = unpack(await rpc('wait_threads',{
@@ -274,7 +289,7 @@ async function watch() {
         const repeated = state.lastProgressAction === event.nextAction ? (state.repeatedProgress || 0) + 1 : 1;
         state.lastProgressAction = event.nextAction;
         state.repeatedProgress = repeated;
-        if (repeated < 3) {
+        if (repeated < 2) {
           await sendAndRead(binding.executorId,
             `長任務續接 ${event.id}：執行你剛才明列的下一步「${event.nextAction}」。沿用原契約及已完成工作；只在下一個真實事件送驗或回報，不重述整份 prompt。`,
             'continue-' + event.id);
@@ -288,8 +303,14 @@ async function watch() {
       await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
     } else {
       state.cursor=nextCursor;
-      if(progressDue(state)){
-        const event=progressEvent(state);
+      // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
+      // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.
+      const hadCheckedWait=Boolean(state.checkedWait),found=clock.check(run,binding,state),silent=progressDue(state);
+      if(silent||found){
+        const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(found?.reasons||[])];
+        const event=progressEvent(state,Date.now(),{reasons,pace:found?.pace||clock.paceNow(run,binding,state),overdue:found?.overdue||[],
+          baselineMissing:found?.baselineMissing||[],processStalled:found?.processStalled||[],executorBlocked:found?.executorBlocked||[],
+          machineSlept:found?.machineSlept||[],resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[]});
         state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
         continue;
