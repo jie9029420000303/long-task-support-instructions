@@ -246,20 +246,24 @@ function toolRow(f,id,command,minutesAgoValue){
 }
 
 test('a command with no result and no process for 5 minutes is reported as needing the user',async()=>{
-  const f=fixture();toolRow(f,'toolu_stuck','bash archive_case_client_never_started_4711.sh uat3',6);
+  // A fresh marker per run: a fixed string can sit in another process's command line (an editor or shell that
+  // happens to contain this file's text) and make the stuck command look like it is running.
+  const stuck='bash archive_case_'+crypto.randomUUID().replace(/-/g,'')+'.sh uat3';
+  const f=fixture();toolRow(f,'toolu_stuck',stuck,6);
   const child=start(f);
   try{
     await until(()=>pending(f)?.kind==='progress_review',15000);
     const event=pending(f);
     assert.deepEqual(event.reasons,['executor_blocked']);
-    assert.equal(event.executorBlocked[0].command,'bash archive_case_client_never_started_4711.sh uat3');
+    assert.equal(event.executorBlocked[0].command,stuck);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
 test('a long command that is really running is not reported as blocked',async()=>{
   const f=fixture();
-  const runner=spawn('/bin/sh',['-c','sleep 30; echo still_running_marker_8842_long_suite'],{stdio:'ignore'});
-  toolRow(f,'toolu_run',"/bin/sh -c sleep 30; echo still_running_marker_8842_long_suite",6);
+  const marker='running_suite_'+crypto.randomUUID().replace(/-/g,'');
+  const runner=spawn('/bin/sh',['-c','sleep 30; echo '+marker],{stdio:'ignore'});
+  toolRow(f,'toolu_run','/bin/sh -c sleep 30; echo '+marker,6);
   const child=start(f);
   try{
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
