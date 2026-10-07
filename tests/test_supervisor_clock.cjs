@@ -1,8 +1,9 @@
 // The supervisor's own clock and AI-speed baselines (Jay 2026-10-07). In the GDB engine-direct run the supervisor
 // checked progress 0 times in 6.4 hours: every executor event declared a human-style wait, any new executor step
 // cleared the wait's deadline, and the silence check never fired while subagents were busy. A 72-minute package
-// against a 13-minute median went unasked. These tests hold the replacement: the supervisor checks on its own
-// schedule, a package past 1.5x its token-speed baseline is checked at once, and repeated failures are surfaced.
+// against a 13-minute median went unasked. These tests hold the replacement, in tiers: code confirms the work moves
+// and stays within its token-speed baseline; only a real problem (overdue, no baseline, stalled process, repeated
+// failure, total silence) wakes the model, because each model check re-reads about 3M cached tokens.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -62,21 +63,86 @@ test('the baseline comes from this run\'s measured tokens per second, with defau
   assert.match(fallback.basis,/default/);
 });
 
-test('the review interval fires while the executor is busy and stays deliverable through new activity',async()=>{
-  const f=fixture({lastReviewMinutesAgo:31,quietMinutes:0});let child=start(f);
+test('a 30-minute check with nothing wrong is recorded by code and does not wake the model',async()=>{
+  // Jay 2026-10-07: first confirm in code that work is moving and within baseline; only a problem wakes the model.
+  // Waking the model for every interval cost about 3M cached tokens per check in the GDB run.
+  const f=fixture({lastReviewMinutesAgo:31,quietMinutes:0});
+  agent(f.subagents,'onpace',{minutes:5,tokens:20000,done:false});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-OK',handle:'agent:onpace',evidence:['wp/WP-OK.md'],
+    baseline:{minutes:12,startedAt:minutesAgo(5),basis:'47118 tokens / 66.9 tok/s'}}]}});
+  const child=start(f);
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(pending(f),null);
+    const record=JSON.parse(fs.readFileSync(path.join(f.run,'clock.jsonl'),'utf8').trim().split('\n').pop());
+    assert.deepEqual(record.problems,[]);assert.equal(record.packages[0].id,'WP-OK');
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a running test process counts as activity, so a quiet chat is not silence',async()=>{
+  // 13:10 in the GDB run: the executor waited while two product test lines ran, and the old check called it silent.
+  const f=fixture({quietMinutes:16,lastReviewMinutesAgo:16}),log=path.join(f.root,'r20.log');fs.writeFileSync(log,'question 9 round 4\n');
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'A2-line',handle:'resource:r20',evidence:[log],
+    baseline:{minutes:185,startedAt:minutesAgo(60),basis:'10 questions x measured median'}}]}});
+  const child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(f),null);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a test process silent for 15 minutes wakes the supervisor',async()=>{
+  const f=fixture(),log=path.join(f.root,'r21.log');fs.writeFileSync(log,'last line\n');
+  const old=new Date(Date.now()-16*60000);fs.utimesSync(log,old,old);
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'A2-line3',handle:'resource:r21',evidence:[log],
+    baseline:{minutes:190,startedAt:minutesAgo(60),basis:'measured'}}]}});
+  const child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    assert.deepEqual(pending(f).reasons,['process_stalled']);assert.deepEqual(pending(f).processStalled,['A2-line3']);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('an in-flight package without a baseline wakes the supervisor once',async()=>{
+  const f=fixture(),log=path.join(f.root,'r30.log');fs.writeFileSync(log,'running\n');
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'NO-BASE',handle:'resource:r30',evidence:[log]}]}});
+  let child=start(f);
   try{
     await until(()=>pending(f)?.kind==='progress_review');
     const event=pending(f);
-    assert.deepEqual(event.reasons,['interval']);
-    line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),timestamp:new Date().toISOString(),message:{id:'busy',stop_reason:'tool_use',content:[{type:'text',text:'still integrating'}]}});
+    assert.deepEqual(event.reasons,['baseline_missing']);assert.deepEqual(event.baselineMissing,['NO-BASE']);
     await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
-    assert.equal(command(f,'progress-preflight',event.id).current,true,'a busy executor is exactly when the clock must still check');
-    const progressCheck={evidence:['dispatch.json and subagent transcripts'],finding:'Every package is inside its baseline.'};
-    assert.equal(validateDecision({},{criteria:[]},event,{eventId:event.id,disposition:'observe',reason:'On pace',progressCheck}).disposition,'observe',
-      'a normal-pace finding is recorded without messaging the executor');
-    const decision=path.join(f.root,'interval.json');save(decision,{eventId:event.id,disposition:'observe',reason:'On pace',progressCheck});
+    const decision=path.join(f.root,'nobase.json');
+    save(decision,{eventId:event.id,disposition:'observe',reason:'Asked the executor to add a measured baseline.',progressCheck:{evidence:['dispatch.json'],finding:'No baseline.'}});
+    assert.equal(command(f,'progress-preflight',event.id).current,true,'a clock problem stays current while work goes on');
     assert.equal(command(f,'decision',decision).processed,true);
-    assert.equal(JSON.parse(fs.readFileSync(f.statePath)).lastProgressReviewAt>Date.now()-60000,true);
+    child=start(f);await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,400));
+    assert.equal(pending(f),null,'the same missing baseline is not raised again');
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('one brief call gathers the event, pace, executor words and dispatch picture; status can wait for the watcher',async()=>{
+  const f=fixture(),log=path.join(f.root,'r40.log');fs.writeFileSync(log,'running\n');
+  line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),timestamp:new Date().toISOString(),message:{id:'t1',stop_reason:'tool_use',content:[{type:'text',text:'Integrating B6 now.'}]}});
+  save(path.join(f.run,'dispatch.json'),{activity:'working',packages:{ready:[],inFlight:[{id:'NB',handle:'resource:r40',evidence:[log]}],blocked:[{id:'C12',kind:'dependency'}]}});
+  let child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
+    const brief=command(f,'brief');
+    assert.equal(brief.pending.kind,'progress_review');assert.deepEqual(brief.pending.reasons,['baseline_missing']);
+    assert.equal(brief.pace.packages[0].id,'NB');assert.equal(brief.executor.tail.at(-1).text,'Integrating B6 now.');
+    assert.deepEqual(brief.dispatch.blocked,[{id:'C12',kind:'dependency'}]);
+    const decision=path.join(f.root,'brief.json');
+    save(decision,{eventId:brief.pending.id,disposition:'observe',reason:'Baseline requested.',progressCheck:{evidence:['brief'],finding:'No baseline.'}});
+    assert.equal(command(f,'progress-preflight',brief.pending.id).current,true);
+    assert.equal(command(f,'decision',decision).processed,true);
+    child=start(f);
+    const value=JSON.parse(execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'status',f.run,'--wait-active','5'],{env:f.env,encoding:'utf8'}));
+    assert.equal(value.active,true);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 

@@ -66,18 +66,21 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 ## 主動進度查核
 
-監督有自己的進度時鐘，不以執行者宣告的等待為準：`waiting` 或 `progress` 加 `waitMinutes` 只是參考，到期仍另以 `continue` 喚醒。背景程式在以下任一情況輸出 `progress_review`，`reasons` 標明原因：
+監督有自己的進度時鐘，不以執行者宣告的等待為準：`waiting` 或 `progress` 加 `waitMinutes` 只是參考，到期仍另以 `continue` 喚醒。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題）；只有發現問題才輸出 `progress_review` 喚醒模型，`reasons` 標明原因：
 
-- `silence`：執行者與其背景子代理 transcript 都靜默 15 分鐘。
-- `interval`：距上次進度查核決策滿 30 分鐘，執行者再忙也查；只有監督自己核實並保存的等待（下段的 checked wait）會暫停它。
-- `overdue`：派工快照中在途工作包的經過時間達 AI 時程基準 1.5 倍；同一包只通知一次，之後由 interval 追蹤。
+- `silence`：執行者、背景子代理與在跑的測試程序（派工快照中非代理的在途包，以其 evidence 檔、例如紀錄檔的更新時間為準）全部靜止 15 分鐘。
+- `overdue`：在途工作包經過時間達 AI 時程基準 1.5 倍；同一包只通知一次。
+- `baseline_missing`：在途工作包沒有基準時長；同一包只通知一次，請執行端補上。
+- `process_stalled`：在跑的測試程序 15 分鐘沒有產出。
 - `repeat`：同一條指令連續失敗 3 次。同一個 `nextAction` 連報兩次則直接成為 `stalled` 事件。
 
-事件附 `pace`（每個在途包的開始時間、經過分鐘、基準分鐘、比值、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token 與最後活動時間、本場各模型實測每秒輸出 token）、`overdue`、`failedCommands`、`declaredWaitMinutes`、最後子代理活動時間與尚未確認的送達。
+事件附 `pace`（每個在途包的開始時間、經過分鐘、基準分鐘、比值、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`overdue`、`baselineMissing`、`processStalled`、`failedCommands`、`declaredWaitMinutes`、各類最後活動時間與尚未確認的送達。
+
+每次喚醒的模型回合都會重讀整段監督對話的快取（GDB 實測每次呼叫約 47.5 萬 token），所以處理步驟要少：① `supervise.cjs brief RUN` 一次取得事件、監看狀態、各包速度、執行端最後幾段話、派工現況與最近決策，不逐檔探查；② 同一個 Bash 先跑 `progress-preflight`（progress_review 事件）再寫決策並執行 `decision`；需回訊時在 preflight 後、decision 前送原生訊息；③ 同一則回覆並行送出背景 `claude-watch.cjs RUN` 與 `supervise.cjs status RUN --wait-active 10`；④ 回報。
 
 AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token，加上已量測的工具時間（完整測試、部署等）。`scripts/pace.cjs status RUN` 列出在途包與基準；`pace.cjs estimate RUN --model <模型> [--tokens N] [--tool-minutes M]` 產生快照用的基準。本場同模型已完成的子代理少於 3 個時，用技能內建的實測預設值。不用人類開發經驗估時；執行端寫進派工快照的基準，監督以同一公式重算覆核，差超過一半先請執行端說明依據。
 
-先核對實際工作：子代理是否仍在輸出、輸出速度、測試與程序紀錄。決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`：`silence` 類事件遇到新活動即過期；`interval`、`overdue`、`repeat` 本來就是為忙碌中的執行者設計，不因新活動過期。落後、重複或證據不足時用 reply，附 progressCheck.evidence、finding、guidance；guidance 是已授權範圍內的具體加速建議，例如拆包並行、只跑受影響測試、停止重試改換做法、先收回整合已完成成果，實際原生訊息必須含 guidance。進度正常時用 observe，附 reason、progressCheck.evidence、finding，不傳訊、不打斷執行者；`silence` 類事件的 observe 仍須依下段保存 wait。
+先核對實際工作：子代理是否仍在輸出、輸出速度、測試與程序紀錄。決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`：`silence` 類事件遇到新活動即過期；`overdue`、`baseline_missing`、`process_stalled`、`repeat` 本來就是為忙碌中的執行者設計，不因新活動過期。落後、重複或證據不足時用 reply，附 progressCheck.evidence、finding、guidance；guidance 是已授權範圍內的具體加速建議，例如拆包並行、只跑受影響測試、停止重試改換做法、先收回整合已完成成果，實際原生訊息必須含 guidance。進度正常時用 observe，附 reason、progressCheck.evidence、finding，不傳訊、不打斷執行者；`silence` 類事件的 observe 仍須依下段保存 wait。
 
 只剩已核對的等待時用 observe，填 reason、progressCheck.evidence、finding 及 `wait:{kind:"user_approval",conditions:[]}`；外部結果用 external_result，必須列允許根目錄內的條件檔 conditions:[{path,sha256}] 或有原訂期限來源的 resumeAt。尚未出現的結果檔 sha256 填 null，不自行新增期限。決策後重掛唯一背景 watcher；它繼續讀執行事件、使用者在監督對話的新答覆及條件檔，條件變動立即解除等待。監督自身的工具輸出或結束回合不解除等待，也不催促同一條未變核准。
 

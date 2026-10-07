@@ -53,23 +53,30 @@ function baseline({model,estimatedOutputTokens,toolMinutes=0},measured){
   return {model:model||null,estimatedOutputTokens:tokens,tokensPerSecond:known.tokensPerSecond,toolMinutes:Number(toolMinutes)||0,minutes,
     basis:`${tokens} output tokens ÷ ${known.tokensPerSecond} tokens/s (${known.source}, ${known.samples} samples)`+(toolMinutes?` + ${toolMinutes} min measured tool time`:'')};
 }
+// A process package (tests, product runs) shows activity through its evidence files, such as its log.
+function evidenceActivity(item){
+  let latest=0;
+  for(const file of item.evidence||[])try{if(path.isAbsolute(file))latest=Math.max(latest,fs.statSync(file).mtimeMs);}catch{}
+  return latest||null;
+}
 // In-flight packages against their baselines. An agent package is recomputed from its own transcript; a
-// process package (tests, product runs) can only carry the executor's measured baseline.
+// process package can only carry the executor's measured baseline.
 function inFlight(binding,snapshot,now=Date.now()){
   const runs=agentRuns(binding),measured=speed(runs),byId=new Map(runs.map(run=>[run.id,run]));
   const packages=(snapshot?.packages?.inFlight||[]).map(item=>{
     const agentId=/^agent:(.+)$/.exec(item.handle||'')?.[1],run=agentId?byId.get(agentId):null,declared=item.baseline||null;
     const startedAt=Date.parse(declared?.startedAt)||run?.startedAt||null;
     const own=run?baseline({model:run.model||declared?.model,estimatedOutputTokens:declared?.estimatedOutputTokens,toolMinutes:declared?.toolMinutes},measured):null;
-    const minutes=declared?.minutes||own?.minutes||null;
+    const minutes=declared?.minutes||own?.minutes||null,process=!agentId,activity=process?evidenceActivity(item):run?.lastAt;
     const elapsed=startedAt?round((now-startedAt)/60000):null;
     const mismatch=Boolean(declared?.minutes&&own?.minutes&&Math.abs(declared.minutes-own.minutes)/own.minutes>0.5);
     return {id:item.id,handle:item.handle,startedAt:startedAt?new Date(startedAt).toISOString():null,elapsedMinutes:elapsed,
       baselineMinutes:minutes,ratio:minutes&&elapsed!==null?round(elapsed/minutes):null,executorBaselineMinutes:declared?.minutes??null,
       supervisorBaselineMinutes:own?.minutes??null,mismatch,outputTokens:run?.outputTokens??null,
-      lastActivityAt:run?.lastAt?new Date(run.lastAt).toISOString():null,baselineMissing:!minutes};
+      lastActivityAt:activity?new Date(activity).toISOString():null,process,baselineMissing:!minutes};
   });
-  return {speed:measured,packages};
+  const processActivityAt=Math.max(0,...packages.filter(item=>item.process&&item.lastActivityAt).map(item=>Date.parse(item.lastActivityAt)))||null;
+  return {speed:measured,packages,processActivityAt};
 }
 module.exports={DEFAULTS,agentRuns,speed,rate,baseline,inFlight};
 if(require.main===module){

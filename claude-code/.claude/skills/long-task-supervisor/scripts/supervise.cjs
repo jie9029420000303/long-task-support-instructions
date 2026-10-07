@@ -5,6 +5,7 @@ const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
 const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS, quietReview, deliveryRecorded, subagentActivityAt } = require('./guard.cjs');
 const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
+const pace = require('./pace.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
 const now = () => new Date().toISOString();
@@ -125,6 +126,41 @@ function status() {
     readVerified:ready?.readVerified === true,reads:state.reads,acceptedAt:state.acceptedAt || null,error:state.error || null,
     unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{})};
 }
+function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
+// The last assistant texts of the executor, read from the transcript's tail only.
+function executorTail(file, count = 3) {
+  const size = fs.statSync(file).size, length = Math.min(size, 262144), buffer = Buffer.alloc(length), fd = fs.openSync(file, 'r');
+  try {fs.readSync(fd, buffer, 0, length, size - length);} finally {fs.closeSync(fd);}
+  const texts = [];
+  for (const line of buffer.toString('utf8').split('\n')) {
+    try {const row = JSON.parse(line); if (row.type !== 'assistant' || row.isSidechain) continue;
+      const text = (row.message?.content || []).filter(block => block.type === 'text').map(block => block.text).join('\n').trim();
+      if (text) texts.push({at: row.timestamp, text: text.slice(-600)});} catch {}
+  }
+  return texts.slice(-count);
+}
+// Everything one wake needs, in one call: the event, whether the watcher runs, pace against baselines, the
+// executor's latest words and the dispatch picture. A wake that reads this instead of probing file by file
+// re-reads its long conversation context fewer times (Jay 2026-10-07: about 3M cached tokens per check).
+function brief() {
+  const {binding} = load(), state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
+  const iso = value => value ? new Date(value).toISOString() : null;
+  const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
+    disposition:item.obsolete ? 'obsolete' : item.decision?.disposition, at:item.event?.at}));
+  return {status:status(), pending:state.pending || null, pace:pace.inFlight(binding, snapshot),
+    executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, subagentActivityAt(binding))),
+      lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(binding.executorLog)},
+    dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
+      inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
+    recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};
+}
+// After starting the watcher in the background, wait briefly until it reports a verified read.
+function waitActive(seconds) {
+  const end = Date.now() + seconds * 1000;
+  let value = status();
+  while (!value.active && Date.now() < end) {Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250); value = status();}
+  return value;
+}
 function decision() {
   need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute decision path');
   const {binding,contract} = load();
@@ -165,17 +201,18 @@ function decision() {
 function stop() {load();fs.writeFileSync(path.join(run,'STOP'),now()+'\n');return {run,stopRequested:true};}
 function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
 function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
-function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
+function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const processAt=pace.inFlight(binding,snapshotOf(binding)).processActivityAt||0;const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
     const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))
       :command==='amend'?contractState.append(run,load().binding,read(inputArgument))
       :command==='effective-contract'?contractState.effective(run,load().binding)
-      :command==='init'?init():command==='status'?status()
+      :command==='init'?init():command==='status'?(inputArgument==='--wait-active'?waitActive(Number(process.argv[5])||10):status())
+      :command==='brief'?brief()
       :command==='decision'?decision():command==='stop'?stop()
       :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()
-      :(()=>{throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, stop RUN; start the desktop watcher in App background Bash');})();
+      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, stop RUN; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));
   } catch(error) {console.error(error.message);process.exitCode=1;}
 })();
