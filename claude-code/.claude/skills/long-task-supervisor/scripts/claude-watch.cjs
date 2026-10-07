@@ -3,7 +3,8 @@
 const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
-const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const pace=require('./pace.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
 const {digest,persist,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
@@ -76,6 +77,34 @@ function waitingHasBlocker(text){
   const body=text.split('\n').filter(line=>!line.trim().startsWith('LONG_TASK_EVENT ')).join('\n');
   return /(?:權限.{0,16}(?:審查|拒絕|阻擋)|(?:審查|核准).{0,16}(?:拒絕|阻擋)|(?:merge|push|合併|發版).{0,40}(?:被擋|遭擋|阻塞|拒絕)|(?:需要|等待|等).{0,20}(?:Jay|使用者).{0,20}(?:決定|核准|授權)|(?:待決|需要授權|授權或處置))/i.test(body);
 }
+// Count failing commands the executor repeats; three identical failures mean it is retrying instead of changing approach.
+function trackTools(row){
+  if(row.isSidechain||!Array.isArray(row.message?.content))return;
+  for(const block of row.message.content){
+    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]=block.input.command.replace(/\s+/g,' ').trim().slice(0,300);
+    if(row.type==='user'&&block?.type==='tool_result'&&state.openTools?.[block.tool_use_id]!==undefined){
+      const command=state.openTools[block.tool_use_id];delete state.openTools[block.tool_use_id];
+      if(block.is_error||/Exit code [1-9]/.test(JSON.stringify(block.content||'').slice(0,80))){const item=((state.failedCommands||={})[command]||={count:0});item.count++;item.lastAt=row.timestamp||now();}
+    }
+  }
+}
+function paceNow(){let snapshot=null;try{snapshot=read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{}return pace.inFlight(binding,snapshot);}
+// The supervisor's own clock: it does not wait for the executor's declared waits to expire. Only a wait the
+// supervisor itself verified (checked wait on a user approval or external result) pauses the interval check.
+let lastClockAt=0;
+function supervisorClock(waitHeld){
+  if(Date.now()-lastClockAt<60000)return null;
+  lastClockAt=Date.now();
+  const reasons=[],since=state.lastProgressReviewAt||Date.parse(binding.createdAt)||Date.now();
+  if(!waitHeld&&Date.now()-since>=REVIEW_INTERVAL_MS)reasons.push('interval');
+  const paced=paceNow(),announced=state.overdueAnnounced||={};
+  const overdue=paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO&&!announced[item.id+'@'+item.startedAt]);
+  if(overdue.length){reasons.push('overdue');for(const item of overdue)announced[item.id+'@'+item.startedAt]=now();}
+  const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
+  if(repeated.length){reasons.push('repeat');for(const [,item] of repeated)item.announced=now();}
+  if(!reasons.length)return null;
+  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt}))};
+}
 async function waitChange(){
   await new Promise(resolve=>{
     let watcher;
@@ -125,7 +154,7 @@ async function watch(){
     if(event.kind==='progress'){
       state.repeatedProgress=state.lastProgressAction===event.nextAction?(state.repeatedProgress||0)+1:1;
       state.lastProgressAction=event.nextAction;
-      if(state.repeatedProgress>=3)event.kind='stalled';
+      if(state.repeatedProgress>=2)event.kind='stalled';
       else if(event.waitMinutes!==null){
         if(!(event.waitMinutes>0&&event.waitMinutes<=120)){event.kind='protocol_error';}
         else{state.progressWait={event,deadline:writtenAt+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
@@ -162,6 +191,7 @@ async function watch(){
           delete state.unconfirmedDeliveries[id];
         }
       }
+      trackTools(row);
       if(row.type==='user'){state.message=null;continue;}
       if(!id||!row.uuid)continue;
       if(state.message?.id!==id){state.message={id,texts:[],finalId:null,finalEnd:null};
@@ -195,14 +225,19 @@ async function watch(){
     const hadCheckedWait=Boolean(state.checkedWait);
     checkedWait.supervisorInput(state,binding);
     state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,subagentActivityAt(binding));
-    // An executor's declared wait stays quiet until its own deadline, which wakes the supervisor as `continue`.
-    const declaredWait=Boolean(state.progressWait)&&Date.now()<state.progressWait.deadline;
-    if(!checkedWait.unchanged(state)&&(hadCheckedWait||(!declaredWait&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS))){
+    // An executor's declared wait no longer silences the supervisor (Jay 2026-10-07): silence, the review
+    // interval, an overdue package and repeated failures each start a check while the executor keeps working.
+    const held=checkedWait.unchanged(state);
+    const silent=!held&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);
+    const clock=supervisorClock(held);
+    if(silent||clock){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
+      const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[])];
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
-        kind:'progress_review',lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
+        kind:'progress_review',reasons,lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
         lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
-        unconfirmedDeliveries:state.unconfirmedDeliveries||{},at:now()};
+        unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],
+        failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;

@@ -23,7 +23,8 @@ function parse(snapshot,binding){
   for(const name of ['ready','inFlight','returned','blocked','completed','recurringRework'])records(p[name],name);
   for(const item of [...p.ready,...p.inFlight,...p.blocked])resources(item.exclusiveResources,item.id);
   for(const item of p.ready){need(typeof item.independent==='boolean'&&typeof item.safe==='boolean',item.id+' needs independent and safe');need(Array.isArray(item.dependencies),item.id+' dependencies must be an array');evidence(item.evidence,item.id);}
-  for(const item of p.inFlight){need(nonEmpty(item.handle),item.id+' needs a platform handle');evidence(item.evidence,item.id);}
+  for(const item of p.inFlight){need(nonEmpty(item.handle),item.id+' needs a platform handle');evidence(item.evidence,item.id);
+    if(item.baseline!==undefined){const b=item.baseline;need(b&&Number.isFinite(b.minutes)&&b.minutes>0,item.id+' baseline.minutes must be positive');need(Number.isFinite(Date.parse(b.startedAt)),item.id+' baseline.startedAt must be a time');need(nonEmpty(b.basis),item.id+' baseline.basis is required');}}
   for(const item of p.returned){need(typeof item.integrated==='boolean',item.id+' needs integrated');evidence(item.resultEvidence,item.id);}
   for(const item of p.blocked){need(nonEmpty(item.kind),item.id+' needs kind');evidence(item.evidence,item.id);}
   for(const item of p.completed){need(Array.isArray(item.acceptanceIds),item.id+' acceptanceIds must be an array');evidence(item.evidence,item.id);}
