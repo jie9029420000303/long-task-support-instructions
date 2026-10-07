@@ -89,21 +89,32 @@ function trackTools(row){
   }
 }
 function paceNow(){let snapshot=null;try{snapshot=read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{}return pace.inFlight(binding,snapshot);}
-// The supervisor's own clock: it does not wait for the executor's declared waits to expire. Only a wait the
-// supervisor itself verified (checked wait on a user approval or external result) pauses the interval check.
+// The supervisor's own clock, in tiers (Jay 2026-10-07): code first confirms the work is moving and within its
+// AI-speed baselines; only a problem wakes the model to analyse and push. Every 30 minutes the check is
+// recorded in clock.jsonl even when nothing is wrong, so the clock can be audited without a model turn.
 let lastClockAt=0;
-function supervisorClock(waitHeld){
+function supervisorClock(){
   if(Date.now()-lastClockAt<60000)return null;
   lastClockAt=Date.now();
-  const reasons=[],since=state.lastProgressReviewAt||Date.parse(binding.createdAt)||Date.now();
-  if(!waitHeld&&Date.now()-since>=REVIEW_INTERVAL_MS)reasons.push('interval');
-  const paced=paceNow(),announced=state.overdueAnnounced||={};
-  const overdue=paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO&&!announced[item.id+'@'+item.startedAt]);
-  if(overdue.length){reasons.push('overdue');for(const item of overdue)announced[item.id+'@'+item.startedAt]=now();}
+  const paced=paceNow(),announced=state.clockAnnounced||={};
+  if(paced.processActivityAt)state.lastProcessActivityAt=Math.max(state.lastProcessActivityAt||0,paced.processActivityAt);
+  const once=key=>announced[key]?false:(announced[key]=now(),true);
+  const overdue=paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO&&once('overdue:'+item.id+'@'+item.startedAt));
+  const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
+  const processStalled=paced.packages.filter(item=>item.process&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS&&once('process:'+item.id+'@'+item.lastActivityAt));
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
-  if(repeated.length){reasons.push('repeat');for(const [,item] of repeated)item.announced=now();}
+  for(const [,item] of repeated)item.announced=now();
+  const reasons=[...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[])];
+  if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
+    state.lastHealthAt=Date.now();
+    const iso=value=>value?new Date(value).toISOString():null;
+    fs.appendFileSync(path.join(run,'clock.jsonl'),JSON.stringify({at:now(),executorAt:iso(state.lastExecutorActivityAt),subagentAt:iso(state.lastSubagentActivityAt),
+      processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt})),
+      problems:reasons})+'\n');
+  }
   if(!reasons.length)return null;
-  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt}))};
+  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
+    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt}))};
 }
 async function waitChange(){
   await new Promise(resolve=>{
@@ -225,18 +236,21 @@ async function watch(){
     const hadCheckedWait=Boolean(state.checkedWait);
     checkedWait.supervisorInput(state,binding);
     state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,subagentActivityAt(binding));
-    // An executor's declared wait no longer silences the supervisor (Jay 2026-10-07): silence, the review
-    // interval, an overdue package and repeated failures each start a check while the executor keeps working.
+    // An executor's declared wait no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
+    // unbaselined package, a stalled test process and repeated failures each start a check while work goes on.
     const held=checkedWait.unchanged(state);
-    const silent=!held&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);
-    const clock=supervisorClock(held);
+    const clock=supervisorClock();
+    // Quiet means nothing moves at all: the executor, its subagents and the test processes it runs.
+    const silent=!held&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);
     if(silent||clock){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
       const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[])];
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
         kind:'progress_review',reasons,lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
         lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
+        lastProcessActivityAt:state.lastProcessActivityAt?new Date(state.lastProcessActivityAt).toISOString():null,
         unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],
+        baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));

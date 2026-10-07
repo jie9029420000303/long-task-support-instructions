@@ -37,7 +37,7 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 | `completed` | `acceptanceIds`、`evidence` | 已核對工作與所支援的驗收條目；不是監督已接受 |
 | `recurringRework` | `count`、`evidence` | 同一項已重做至少兩次，交監督判斷是否有效重驗 |
 
-`inFlight` 每筆附 AI 時程基準 `baseline`：`minutes`（基準分鐘）、`startedAt`、`basis`（算法與來源）；代理工作另附 `model`、`estimatedOutputTokens`、`tokensPerSecond`、`toolMinutes`，用 `node "<skill>/scripts/pace.cjs" estimate "<RUN>" --model <模型> [--tokens <預估輸出 token>] [--tool-minutes <已量測工具分鐘>]` 產生。測試、主機程序等非代理工作以本場實測時長填 `minutes`，`basis` 寫明量測來源。不用人類開發經驗估時；沒有基準的包只由監督的 30 分鐘時鐘追蹤。
+`inFlight` 每筆附 AI 時程基準 `baseline`：`minutes`（基準分鐘）、`startedAt`、`basis`（算法與來源）；代理工作另附 `model`、`estimatedOutputTokens`、`tokensPerSecond`、`toolMinutes`，用 `node "<skill>/scripts/pace.cjs" estimate "<RUN>" --model <模型> [--tokens <預估輸出 token>] [--tool-minutes <已量測工具分鐘>]` 產生。測試、主機程序等非代理工作以本場實測時長填 `minutes`，`basis` 寫明量測來源。不用人類開發經驗估時；沒有基準的在途包會叫醒監督一次，請執行端補上。
 
 各 evidence 欄位至少一筆非空引用，指向可重查的檔案、行號或平台事件位置。`updatedAt` 可記更新時間。`exclusiveResources` 只列**不可並行共享的實際占用**，每筆 `{key,kind}`；kind 為 `worktree`、`browser`、`account`、`database`、`test_environment` 或 `other`。key 使用跨工作包一致的實際識別（例如 `database:localhost:55431/qa`）。一般共享文件的唯讀查閱不列成排他資源；同一工作目錄的修改／整體測試、同一瀏覽器工具與測試帳號等仍依原隔離規則。
 
