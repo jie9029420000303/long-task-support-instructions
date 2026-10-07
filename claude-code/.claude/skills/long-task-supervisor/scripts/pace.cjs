@@ -59,26 +59,64 @@ function evidenceActivity(item){
   for(const file of item.evidence||[])try{if(path.isAbsolute(file))latest=Math.max(latest,fs.statSync(file).mtimeMs);}catch{}
   return latest||null;
 }
+// A process package started through the task's resource ledger (resources/<id>.log beside resources.json) can
+// be checked for life: a drill waiting on a lease writes nothing for half an hour but is not stalled.
+function processAlive(item){
+  const id=/^resource:(.+)$/.exec(item.handle||'')?.[1];
+  if(!id)return null;
+  for(const file of item.evidence||[]){
+    if(!path.isAbsolute(file)||path.basename(path.dirname(file))!=='resources')continue;
+    try{
+      const entry=(JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(file)),'resources.json'),'utf8')).resources||[]).find(value=>value.id===id);
+      if(!entry?.pgid)continue;
+      try{process.kill(-entry.pgid,0);return true;}catch(error){return error.code==='EPERM';}
+    }catch{}
+  }
+  return null;
+}
+// Minutes the machine slept inside a window: a closed lid stops every package, so it is not lateness.
+function sleptWithin(sleeps,from,to){
+  let total=0;
+  for(const item of sleeps||[]){const start=Math.max(from,Date.parse(item.from)),end=Math.min(to,Date.parse(item.to));if(end>start)total+=end-start;}
+  return total;
+}
 // In-flight packages against their baselines. An agent package is recomputed from its own transcript; a
-// process package can only carry the executor's measured baseline.
-function inFlight(binding,snapshot,now=Date.now()){
+// process package can only carry the executor's measured baseline. Elapsed time excludes machine sleep, and an
+// agent whose transcript already ended is finished (the snapshot is stale), not overdue.
+function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
   const runs=agentRuns(binding),measured=speed(runs),byId=new Map(runs.map(run=>[run.id,run]));
   const packages=(snapshot?.packages?.inFlight||[]).map(item=>{
     const agentId=/^agent:(.+)$/.exec(item.handle||'')?.[1],run=agentId?byId.get(agentId):null,declared=item.baseline||null;
     const startedAt=Date.parse(declared?.startedAt)||run?.startedAt||null;
     const own=run?baseline({model:run.model||declared?.model,estimatedOutputTokens:declared?.estimatedOutputTokens,toolMinutes:declared?.toolMinutes},measured):null;
     const minutes=declared?.minutes||own?.minutes||null,process=!agentId,activity=process?evidenceActivity(item):run?.lastAt;
-    const elapsed=startedAt?round((now-startedAt)/60000):null;
+    const finished=Boolean(run?.done),alive=process?processAlive(item):null;
+    const slept=startedAt?sleptWithin(sleeps,startedAt,now):0;
+    const elapsed=startedAt?round((now-startedAt-slept)/60000):null;
     const mismatch=Boolean(declared?.minutes&&own?.minutes&&Math.abs(declared.minutes-own.minutes)/own.minutes>0.5);
     return {id:item.id,handle:item.handle,startedAt:startedAt?new Date(startedAt).toISOString():null,elapsedMinutes:elapsed,
-      baselineMinutes:minutes,ratio:minutes&&elapsed!==null?round(elapsed/minutes):null,executorBaselineMinutes:declared?.minutes??null,
+      baselineMinutes:minutes,ratio:minutes&&elapsed!==null&&!finished?round(elapsed/minutes):null,executorBaselineMinutes:declared?.minutes??null,
       supervisorBaselineMinutes:own?.minutes??null,mismatch,outputTokens:run?.outputTokens??null,
-      lastActivityAt:activity?new Date(activity).toISOString():null,process,baselineMissing:!minutes};
+      lastActivityAt:activity?new Date(activity).toISOString():null,process,alive,finished,sleptMinutes:round(slept/60000),baselineMissing:!minutes&&!finished};
   });
-  const processActivityAt=Math.max(0,...packages.filter(item=>item.process&&item.lastActivityAt).map(item=>Date.parse(item.lastActivityAt)))||null;
+  // A live process counts as activity even while it writes nothing.
+  const processActivityAt=Math.max(0,...packages.filter(item=>item.process&&(item.lastActivityAt||item.alive)).map(item=>item.alive?now:Date.parse(item.lastActivityAt)))||null;
   return {speed:measured,packages,processActivityAt};
 }
-module.exports={DEFAULTS,agentRuns,speed,rate,baseline,inFlight};
+// Real test resources (a host's diagnosis slots, test identities) the snapshot declares: capacity.resources
+// [{key,slots}] and per-package uses [{key,units}]. Free slots while ready or blocked work needs the same resource
+// mean the run could go faster (2026-10-07: the GDB host ran 2 of its 4 diagnosis slots while tests waited).
+function resourceUse(snapshot){
+  const declared=snapshot?.capacity?.resources;
+  if(!Array.isArray(declared))return [];
+  const packages=snapshot.packages||{},uses=(item,key)=>(item.uses||[]).filter(use=>use&&use.key===key);
+  return declared.filter(item=>item&&item.key&&Number(item.slots)>0).map(({key,slots})=>{
+    const used=(packages.inFlight||[]).reduce((sum,item)=>sum+uses(item,key).reduce((total,use)=>total+(Number(use.units)||1),0),0);
+    const waiting=[...(packages.ready||[]),...(packages.blocked||[])].filter(item=>uses(item,key).length).map(item=>item.id);
+    return {key,slots:Number(slots),used,free:Number(slots)-used,waiting};
+  });
+}
+module.exports={DEFAULTS,agentRuns,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
 if(require.main===module){
   const [command,runArg,...rest]=process.argv.slice(2);
   try{

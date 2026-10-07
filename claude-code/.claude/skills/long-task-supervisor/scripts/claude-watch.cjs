@@ -3,7 +3,8 @@
 const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
-const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
 const {digest,persist,ownerAlive}=require('./handoff-lib.cjs');
@@ -29,6 +30,14 @@ function handoffRequest(){
   save(path.join(run,'handoff-ack-'+event.id+'.json'),{pending:true,...result,at:now()});
   fs.unlinkSync(path.join(run,names[0]));
   return true;
+}
+function logMentions(file,text){
+  const needle=Buffer.from(text),chunk=Buffer.alloc(1<<20),fd=fs.openSync(file,'r');
+  let carry=Buffer.alloc(0),position=0;
+  try{for(;;){const count=fs.readSync(fd,chunk,0,chunk.length,position);if(!count)return false;
+    const joined=Buffer.concat([carry,chunk.subarray(0,count)]);if(joined.indexOf(needle)!==-1)return true;
+    carry=joined.subarray(Math.max(0,joined.length-needle.length));position+=count;}}
+  finally{fs.closeSync(fd);}
 }
 function readNew(){
   const file=binding.executorLog;
@@ -81,14 +90,47 @@ function waitingHasBlocker(text){
 function trackTools(row){
   if(row.isSidechain||!Array.isArray(row.message?.content))return;
   for(const block of row.message.content){
-    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]=block.input.command.replace(/\s+/g,' ').trim().slice(0,300);
+    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]={command:block.input.command.replace(/\s+/g,' ').trim().slice(0,300),at:row.timestamp||now(),background:Boolean(block.input.run_in_background)};
     if(row.type==='user'&&block?.type==='tool_result'&&state.openTools?.[block.tool_use_id]!==undefined){
-      const command=state.openTools[block.tool_use_id];delete state.openTools[block.tool_use_id];
+      const open=state.openTools[block.tool_use_id],command=typeof open==='string'?open:open.command;delete state.openTools[block.tool_use_id];
       if(block.is_error||/Exit code [1-9]/.test(JSON.stringify(block.content||'').slice(0,80))){const item=((state.failedCommands||={})[command]||={count:0});item.count++;item.lastAt=row.timestamp||now();}
     }
   }
 }
-function paceNow(){let snapshot=null;try{snapshot=read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{}return pace.inFlight(binding,snapshot);}
+function snapshotNow(){try{return read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{return null;}}
+function paceNow(snapshot=snapshotNow()){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps);}
+// A foreground command that has no result after 5 minutes and no process running it never started: on the GDB
+// run it sat behind a permission prompt for 93 minutes. Only the user can clear that, so it is told at once.
+function blockedTools(){
+  const old=Object.entries(state.openTools||{}).filter(([,item])=>typeof item==='object'&&!item.background&&Date.now()-Date.parse(item.at)>=BLOCKED_MS);
+  if(!old.length)return [];
+  let processes='';try{processes=execFileSync('ps',['-axo','command'],{encoding:'utf8',maxBuffer:32*1024*1024});}catch{return [];}
+  return old.filter(([,item])=>{
+    const piece=item.command.split(/[^\x20-\x7e]|['"\\]/).map(value=>value.trim()).sort((a,b)=>b.length-a.length)[0]||'';
+    return piece.length>=12&&!processes.includes(piece);
+  }).map(([id,item])=>({id,command:item.command,since:item.at}));
+}
+// The machine's monotonic clock stops while it sleeps; the wall clock does not. A gap between them is sleep.
+let lastTick=null;
+function noteSleep(from,to){
+  if(to-from<60000)return;
+  const sleeps=state.sleeps||=[];
+  if(sleeps.some(item=>Date.parse(item.from)<=from+1000&&Date.parse(item.to)>=to-1000))return;
+  sleeps.push({from:new Date(from).toISOString(),to:new Date(to).toISOString()});
+  if(sleeps.length>50)sleeps.splice(0,sleeps.length-50);
+}
+function tickSleep(){
+  const wall=Date.now(),mono=Number(process.hrtime.bigint()/1000000n);
+  if(lastTick){const gap=(wall-lastTick.wall)-(mono-lastTick.mono);if(gap>=60000)noteSleep(wall-gap,wall);}
+  lastTick={wall,mono};
+}
+// The kernel remembers the last sleep, which covers a sleep while no watcher was running.
+function kernelSleep(){
+  try{
+    const [slept,woke]=[...execFileSync('sysctl',['-n','kern.sleeptime','kern.waketime'],{encoding:'utf8'}).matchAll(/sec = (\d+)/g)].map(match=>Number(match[1])*1000);
+    if(slept&&woke&&woke>slept)noteSleep(slept,woke);
+  }catch{}
+}
 // The supervisor's own clock, in tiers (Jay 2026-10-07): code first confirms the work is moving and within its
 // AI-speed baselines; only a problem wakes the model to analyse and push. Every 30 minutes the check is
 // recorded in clock.jsonl even when nothing is wrong, so the clock can be audited without a model turn.
@@ -96,25 +138,32 @@ let lastClockAt=0;
 function supervisorClock(){
   if(Date.now()-lastClockAt<60000)return null;
   lastClockAt=Date.now();
-  const paced=paceNow(),announced=state.clockAnnounced||={};
+  const snapshot=snapshotNow(),paced=paceNow(snapshot),announced=state.clockAnnounced||={};
   if(paced.processActivityAt)state.lastProcessActivityAt=Math.max(state.lastProcessActivityAt||0,paced.processActivityAt);
   const once=key=>announced[key]?false:(announced[key]=now(),true);
   const overdue=paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO&&once('overdue:'+item.id+'@'+item.startedAt));
   const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
-  const processStalled=paced.packages.filter(item=>item.process&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS&&once('process:'+item.id+'@'+item.lastActivityAt));
+  const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
+  const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
+  const blocked=blockedTools().filter(item=>once('blocked:'+item.id));
+  const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
+  const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+'@'+item.used+':'+item.waiting.join(',')));
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
   for(const [,item] of repeated)item.announced=now();
-  const reasons=[...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[])];
+  const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
+    ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
     fs.appendFileSync(path.join(run,'clock.jsonl'),JSON.stringify({at:now(),executorAt:iso(state.lastExecutorActivityAt),subagentAt:iso(state.lastSubagentActivityAt),
-      processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt})),
-      problems:reasons})+'\n');
+      processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
+      problems:reasons,open:[...paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
+        ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
+        ...blockedTools().map(item=>'executor_blocked:'+item.command.slice(0,60))]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
-    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt}))};
+    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources};
 }
 async function waitChange(){
   await new Promise(resolve=>{
@@ -144,6 +193,9 @@ async function watch(){
   save(readyPath,{pid:process.pid,executorId:binding.executorId,executorDesktopId:binding.executorDesktopId,readVerified:true,at:now()});
   let lastGrowthAt=Date.now();
   state.lastExecutorActivityAt ||= Math.max(Date.parse(binding.createdAt)||0,fs.statSync(binding.executorLog).mtimeMs);
+  kernelSleep();
+  // Whether the executor has been told this run: its transcript names the run path (the binding message).
+  if(state.executorKnowsRun===undefined&&logMentions(binding.executorLog,run))state.executorKnowsRun=true;
   function finishFinal(){
     const final=state.message;
     state.message=null;
@@ -176,6 +228,7 @@ async function watch(){
     return true;
   }
   while(!stopped()){
+    tickSleep();
     if(handoffRequest()){console.log('LONG_TASK_WAKE '+JSON.stringify(state.pending));return;}
     const rows=readNew();
     if(rows.length)lastGrowthAt=Date.now();
@@ -196,6 +249,7 @@ async function watch(){
       state.executorOffset=end;
       if(!row)continue;
       const text=deliveredText(row);
+      if(text&&text.includes(run))state.executorKnowsRun=true;
       for(const [id,item] of Object.entries(state.unconfirmedDeliveries||{})){
         if(text&&item.requires.every(value=>text.includes(value))){
           (state.confirmedDeliveries||={})[id]={messageId:item.messageId,queuedAt:item.queuedAt,confirmedAt:now(),row:row.uuid||row.type};
@@ -222,13 +276,17 @@ async function watch(){
       continue;
     }
     // Executor replies come first: audit only once no completed reply is still settling.
-    if(!state.pending&&!state.message?.finalId){const audit=inspectDispatch(run,binding,state),auditEvent=dispatchEvent(audit);if(auditEvent){
+    // Asking for the first snapshot before the binding message reached the executor only wakes the supervisor
+    // for nothing (2026-10-07: the first event of the GDB run); the snapshot is due once the executor knows the run.
+    if(!state.pending&&!state.message?.finalId){const audit=inspectDispatch(run,binding,state);
+      if(!state.executorKnowsRun&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS)audit.newIssues=audit.newIssues.filter(item=>item.kind!=='snapshot_missing');
+      const auditEvent=dispatchEvent(audit);if(auditEvent){
       auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
       markAnnounced(state,auditEvent);state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(auditEvent));return;
     }}
     if(state.progressWait&&Date.now()>=state.progressWait.deadline){
-      const event={...state.progressWait.event,kind:'continue'};
+      const event={...state.progressWait.event,kind:'continue',declaredAt:state.progressWait.event.at,dueAt:new Date(state.progressWait.deadline).toISOString(),at:now()};
       state.progressWait=null;state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));
       return;
@@ -250,7 +308,8 @@ async function watch(){
         lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
         lastProcessActivityAt:state.lastProcessActivityAt?new Date(state.lastProcessActivityAt).toISOString():null,
         unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],
-        baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],
+        baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
+        machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));

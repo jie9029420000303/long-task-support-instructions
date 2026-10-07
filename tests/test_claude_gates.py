@@ -242,3 +242,39 @@ class StateLocationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunFindingsTests(unittest.TestCase):
+    """2026-10-07 GDB 長任務：壓縮三次有一次過了約 20 分鐘才讀回狀態檔（技能內容會被附回，狀態檔不會）；
+    主線只改工作包檔表頭就派高一檔，被擋時看不出是哪一邊記的次數。"""
+
+    STATE = ("# 長任務狀態：gw\n\n## 驗收標準\n| id | 條文 | 狀態 | 證據 |\n|---|---|---|---|\n"
+             "| A1 | 原案重跑找出停機 | PASS | evidence/A1 |\n| A2 | 20 題通過 80% | 未達 | |\n\n"
+             "## 工作包\n| id | 類型 | 負責定義 | 依賴 | 候選版 | 工作區 | 狀態 | 錯誤次數 | 目前檔 | 成果 |\n|---|---|---|---|---|---|---|---|---|---|\n"
+             "| WP-1 | B 技術 | lt-tech-worker-high | | | /w | 在途 | 1 | high | |\n| WP-0 | B 技術 | lt-tech-worker-medium | | | /w | PASS | 0 | medium | |\n\n"
+             "## 待決清單\n| id | 事項 |\n|---|---|\n| Q1 | 演練時段 |\n\n## 最終判定\n未完成\n")
+
+    def gate(self, rows):
+        gate = Gate(rows, self.STATE)
+        self.addCleanup(gate.close)
+        return gate
+
+    def test_compaction_prints_the_open_state_instead_of_asking_to_read_it(self):
+        result = self.gate([user(SKILL_ROW)]).run(hook_event_name="SessionStart", source="compact")
+        self.assertIn("state.md", result.stdout)
+        self.assertIn("| A2 | 20 題通過 80% | 未達 |", result.stdout)
+        self.assertNotIn("| A1 |", result.stdout)
+        self.assertIn("| WP-1 |", result.stdout)
+        self.assertNotIn("| WP-0 |", result.stdout)
+        self.assertIn("| Q1 | 演練時段 |", result.stdout)
+        self.assertIn('Skill(long-task-orchestrator, "續接")', result.stdout)
+
+    def test_a_tier_block_names_both_counts_when_header_and_state_disagree(self):
+        prompt = WP.format(errors=0)
+        result = self.gate([user(SKILL_ROW)]).run(hook_event_name="PreToolUse", tool_name="Agent",
+                                                  tool_input={"subagent_type": "lt-tech-worker-xhigh", "prompt": prompt, "description": "wp"})
+        self.assertEqual(2, result.returncode)
+        self.assertIn("狀態檔工作包表", result.stderr)
+        self.assertIn("記錯誤 1 次", result.stderr)
+        self.assertIn("表頭寫 0 次", result.stderr)
+        self.assertIn("應派 lt-tech-worker-high", result.stderr)

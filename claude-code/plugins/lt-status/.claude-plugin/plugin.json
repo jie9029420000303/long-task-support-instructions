@@ -1,0 +1,1 @@
+{ "name": "lt-status", "version": "0.2.0", "description": "Status band and pane for a long-task supervision run, with a backstop wake when the supervisor misses an event", "types": "./types/index.d.ts" }

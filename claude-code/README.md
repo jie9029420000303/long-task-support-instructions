@@ -29,6 +29,7 @@
 - 全域（所有專案）：把 `.claude/skills/long-task-supervisor/` 和 `.claude/skills/long-task-orchestrator/` 複製到 `~/.claude/skills/`，`.claude/agents/lt-*.md` 複製到 `~/.claude/agents/`。
 - 單一專案／cloud session：把上述兩個目錄提交進該 repo 的 `.claude/`（cloud session 看不到 `~/.claude/`）。
 - 後續新 session 會載入已安裝的技能與子代理；既有 session 更新技能後需重新呼叫 Skill，新增子代理定義須開新 session。
+- 狀態面板與喚醒備援（建議）：把 `plugins/lt-status/` 複製到 `~/.claude/plugins-local/lt-status/`，在 `~/.claude/settings.json` 的 `env` 加 `"CLAUDE_CODE_PLUGIN_DIRS": "<家目錄>/.claude/plugins-local/lt-status"`。設定只在對話啟動時讀取，之後新開的對話才有面板。監督對話中的事件久候 3 分鐘、沒有模型回合時，面板會送一句短續接喚醒監督。
 
 ## 使用
 

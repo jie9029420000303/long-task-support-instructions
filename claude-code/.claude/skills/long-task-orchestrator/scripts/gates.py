@@ -154,13 +154,35 @@ def block(text):
     return 2
 
 
+def open_rows(text, title, limit):
+    """狀態檔某節表格裡還沒結的列（不含表頭、分隔線與 PASS／核准不做的列）。"""
+    rows = [line.strip() for line in section(text, title) if line.strip().startswith("|")]
+    rows = [row for row in rows[2:] if not re.search(r"\|\s*(PASS|核准不做)\b", row)]
+    return [row[:200] for row in rows[:limit]], max(0, len(rows) - limit)
+
+
 def compact(data):
+    """壓縮後直接把狀態重點印進對話：2026-10-07 GDB 實測三次壓縮有一次過了約 20 分鐘才讀回狀態檔，
+    只提醒「去讀」靠不住；技能內容 Claude Code 會附回，狀態檔不會。"""
     if not long_task(user_texts(data)):
         return 0
     found = next(states(data), None)
-    where = f"：{found}" if found else "（在專案 .claude/long-task/ 下）"
-    print("長任務壓縮後續接：先執行 Skill(long-task-orchestrator, \"續接\") 重新載入規則，再讀狀態檔"
-          f"{where}，以狀態檔的驗收逐條表、工作包錯誤次數與待決清單為準；壓縮摘要不是規則或狀態的來源。")
+    if not found:
+        print("長任務壓縮後續接：先讀狀態檔（在專案 .claude/long-task/ 下），以驗收逐條表、工作包錯誤次數與待決清單為準；"
+              "壓縮摘要不是規則或狀態的來源。若對話裡沒有附回本技能內容，先執行 Skill(long-task-orchestrator, \"續接\")。")
+        return 0
+    text = found.read_text(encoding="utf-8", errors="replace")
+    lines = [f"長任務壓縮後續接：以下是狀態檔 {found} 的重點，以狀態檔為準，壓縮摘要不是規則或狀態的來源。"]
+    for title, label, limit in (("驗收標準", "還沒通過的驗收條", 15), ("工作包", "還沒結的工作包", 12)):
+        rows, more = open_rows(text, title, limit)
+        lines.append(f"【{label}】" + ("無" if not rows else ""))
+        lines += rows + ([f"（另有 {more} 列，見狀態檔）"] if more else [])
+    body = [line.strip() for line in section(text, "待決") if line.strip()]
+    pending = open_rows(text, "待決", 10)[0] if body and body[0].startswith("|") else [line[:200] for line in body[:10]]
+    lines.append("【待決清單】" + ("無" if not pending else ""))
+    lines += pending
+    lines.append("派工或判定前讀完整狀態檔；若對話裡沒有附回本技能內容，先執行 Skill(long-task-orchestrator, \"續接\")。")
+    print("\n".join(lines))
     return 0
 
 
@@ -194,21 +216,28 @@ def dispatch(data):
         return block(f"派 lt-* 前工作包缺 {'、'.join(missing)}（派工提示與它引用的 wp 檔都沒有）：補齊後重派（並行閘靠這三段判斷隔離，不能猜）。")
     match = PACKAGE.search(work)
     package = match.group(1) if match else (wps[0].stem if wps else None)
-    errors = None
+    errors = source = None
     if package:
         for state in states(data, wps):
             errors = table_errors(state.read_text(encoding="utf-8", errors="replace"), package)
             if errors is not None:
+                source = state
                 break
-    if errors is None and PROMPT_ERRORS.search(work):
-        errors = int(PROMPT_ERRORS.search(work).group(1))
+    header = PROMPT_ERRORS.search(work)
+    header_errors = int(header.group(1)) if header else None
+    if errors is None:
+        errors = header_errors
     if errors is None:
         return note("PreToolUse", "派工閘：查不到這個工作包的錯誤次數（狀態檔工作包表或派工表頭的「目前錯誤次數」），未檢查起跳檔。")
     if errors >= 3:
         return block(f"工作包{' ' + package if package else ''}已錯 {errors} 次：停止子代理鏈，由主線接手未完成部分並復用正確成果。")
     ladder = TIERS[role]
     if tier not in ladder or ladder.index(tier) > errors:
-        return block(f"lt-{role} 這包錯誤次數是 {errors}，應派 lt-{role}-{ladder[min(errors, 2)]}：新包從基準檔起跳，升一檔＝錯一次。")
+        # 2026-10-07 GDB：主線只改了工作包檔表頭就派高一檔，被擋時看不出是哪邊記的次數；直接講清楚兩邊各記幾次。
+        where = f"狀態檔工作包表（{source}）記錯誤 {errors} 次" if source else f"派工表頭記錯誤 {errors} 次"
+        conflict = (f"；派工提示／工作包檔表頭寫 {header_errors} 次，兩邊不一致：先把狀態檔工作包表改成實際次數再派"
+                    if source and header_errors is not None and header_errors != errors else "")
+        return block(f"lt-{role} 這包{where}，應派 lt-{role}-{ladder[min(errors, 2)]}{conflict}：新包從基準檔起跳，升一檔＝錯一次。")
     return 0
 
 
