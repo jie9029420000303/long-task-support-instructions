@@ -29,15 +29,18 @@ function due(state, nowMs = Date.now()) {
   const hadWait=Boolean(state.checkedWait);
   if(require('./checked-wait.cjs').unchanged(state,nowMs))return false;
   if(hadWait)return true;
+  // Quiet means nothing moves at all: both chats, the executor's subagents and the test processes it runs.
   return nowMs - Math.max(state.lastExecutorActivityAt || 0, state.lastSupervisorActivityAt || 0,
-    state.lastProgressReviewAt || 0) >= PROGRESS_REVIEW_MS;
+    state.lastSubagentActivityAt || 0, state.lastProcessActivityAt || 0, state.lastProgressReviewAt || 0) >= PROGRESS_REVIEW_MS;
 }
-function eventFor(state, nowMs = Date.now()) {
+function eventFor(state, nowMs = Date.now(), details = {}) {
   state.progressReviewSequence = (state.progressReviewSequence || 0) + 1;
-  return { id: 'progress-review-' + state.progressReviewSequence, kind: 'progress_review',
-    activityMarker: state.lastExecutorActivityMarker, lastExecutorActivityAt: new Date(state.lastExecutorActivityAt).toISOString(),
+  const iso = value => value ? new Date(value).toISOString() : null;
+  return { id: 'progress-review-' + state.progressReviewSequence, kind: 'progress_review', reasons: details.reasons || ['silence'],
+    activityMarker: state.lastExecutorActivityMarker, lastExecutorActivityAt: iso(state.lastExecutorActivityAt),
     supervisorActivityMarker: state.lastSupervisorActivityMarker,
-    lastSupervisorActivityAt: new Date(state.lastSupervisorActivityAt).toISOString(),
-    at: new Date(nowMs).toISOString() };
+    lastSupervisorActivityAt: iso(state.lastSupervisorActivityAt),
+    lastSubagentActivityAt: iso(state.lastSubagentActivityAt), lastProcessActivityAt: iso(state.lastProcessActivityAt),
+    ...details, at: new Date(nowMs).toISOString() };
 }
 module.exports = { activityMarker, supervisorPollFromThread, observeActivity, due, eventFor };

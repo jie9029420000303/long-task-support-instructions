@@ -124,11 +124,13 @@ function tickSleep(){
   if(lastTick){const gap=(wall-lastTick.wall)-(mono-lastTick.mono);if(gap>=60000)noteSleep(wall-gap,wall);}
   lastTick={wall,mono};
 }
-// The kernel remembers the last sleep, which covers a sleep while no watcher was running.
+// The kernel remembers the last sleep, which covers a sleep while no watcher was running. Only the part after the
+// run was bound is this run's downtime: last night's closed lid must not wake the supervisor of a fresh run.
 function kernelSleep(){
   try{
-    const [slept,woke]=[...execFileSync('sysctl',['-n','kern.sleeptime','kern.waketime'],{encoding:'utf8'}).matchAll(/sec = (\d+)/g)].map(match=>Number(match[1])*1000);
-    if(slept&&woke&&woke>slept)noteSleep(slept,woke);
+    const [slept,woke]=[...execFileSync('sysctl',['-n','kern.sleeptime','kern.waketime'],{encoding:'utf8'}).matchAll(/\bsec = (\d+)/g)].map(match=>Number(match[1])*1000);
+    const bound=Date.parse(binding.createdAt)||0;
+    if(slept&&woke&&woke>slept&&woke>bound)noteSleep(Math.max(slept,bound),woke);
   }catch{}
 }
 // The supervisor's own clock, in tiers (Jay 2026-10-07): code first confirms the work is moving and within its

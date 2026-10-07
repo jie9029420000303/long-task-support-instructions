@@ -9,7 +9,7 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 
 **監督中的執行對話**：若啟動訊息由 `long-task-supervisor` 指定精確監督對話、驗收契約及來源，照本技能原有的派工、隔離、品質錯誤與同版自查流程執行；這種交辦本身不等於要求建立原生 Goal。驗收條文只讀監督鎖定的契約，不自行縮窄。每次最終回覆末尾依監督技能的 [事件協定](../long-task-supervisor/references/runtime.md#執行對話的事件) 放一行 `LONG_TASK_EVENT`：有未完工作用含具體 `nextAction` 的 `progress`，需代答用 `question`，只剩未授權動作用 `blocked`，本地自查通過後用監督技能 `scripts/candidate.cjs` 產生候選清單與完整 `submission` 事件行，原樣貼上，不手寫雜湊。未收到監督逐條接受前，自己的 PASS 只表示「已送驗」，不得向使用者宣稱整體完成；退件沿原候選版修正再重交。
 
-監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，用監督技能 `dispatch.cjs write` 原子更新指定 run 的 `dispatch.json`。只記實際工作包、代理 handle、已核實容量與排他資源；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。未綁定監督的單對話任務不需此快照。
+監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，用監督技能 `dispatch.cjs write` 原子更新指定 run 的 `dispatch.json`。只記實際工作包、代理 handle、已核實容量與排他資源；每個在途包附 AI 時程基準（監督技能 `scripts/pace.cjs estimate` 產生；測試、主機程序等非代理工作填本場實測時長）；真實測試資源（主機排查名額、測試身分）宣告 `capacity.resources` 與各包 `uses`；包一做完就從在途移出；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。未綁定監督的單對話任務不需此快照。
 
 ## 啟動與續接
 

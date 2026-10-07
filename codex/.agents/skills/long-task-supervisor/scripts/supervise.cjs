@@ -5,6 +5,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { hash, read, need, validateContract, validateDecision } = require('./guard.cjs');
 const { stillCurrent } = require('./dispatch-audit.cjs');
+const pace = require('./pace.cjs');
 const [command, runArg, other] = process.argv.slice(2);
 const run = runArg && path.resolve(runArg);
 const now = () => new Date().toISOString();
@@ -75,6 +76,40 @@ function status() {
     error: state.error || null
   };
 }
+function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
+// The last assistant texts of the executor, read from its rollout's tail. Tool output fills a Codex rollout
+// (the 2026-10-08 executor: 5.6 MB, its last message 667 KB from the end), so the window grows until it has them.
+function executorTail(file, count = 3) {
+  if (!file) return [];
+  const size = fs.statSync(file).size;
+  let texts = [];
+  for (let length = 262144; ; length *= 4) {
+    length = Math.min(size, length);
+    const buffer = Buffer.alloc(length), fd = fs.openSync(file, 'r');
+    try {fs.readSync(fd, buffer, 0, length, size - length);} finally {fs.closeSync(fd);}
+    texts = [];
+    for (const line of buffer.toString('utf8').split('\n')) {
+      try {const row = JSON.parse(line), item = row.payload; if (row.type !== 'response_item' || item?.type !== 'message' || item.role !== 'assistant') continue;
+        const text = (item.content || []).filter(block => block.type === 'output_text').map(block => block.text).join('\n').trim();
+        if (text) texts.push({at: row.timestamp, text: text.slice(-600)});} catch {}
+    }
+    if (texts.length >= count || length === size || length >= 16777216) return texts.slice(-count);
+  }
+}
+// Everything one review needs, in one call: the event, whether the watcher runs, pace against baselines, the
+// executor's latest words and the dispatch picture, instead of probing file by file.
+function brief() {
+  const {binding} = load(), state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
+  const paced = pace.inFlight(binding, snapshot, Date.now(), state.sleeps), iso = value => value ? new Date(value).toISOString() : null;
+  const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
+    disposition:item.obsolete ? 'obsolete' : item.decision?.disposition, at:item.event?.at}));
+  return {status:status(), pending:state.pending || null, pace:paced, sleeps:(state.sleeps || []).slice(-5),
+    executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, paced.subagentActivityAt || 0)),
+      lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(state.executorLog || pace.sessionFile(binding.executorId))},
+    dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
+      inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
+    recentDecisions:resolved};
+}
 function decision() {
   need(other && path.isAbsolute(other), 'Use absolute decision path');
   const { binding, contract } = load();
@@ -111,11 +146,12 @@ try {
     : command === 'effective-contract' ? contractState.effective(run,load().binding)
     : command === 'init' ? init()
     : command === 'status' ? status()
+    : command === 'brief' ? brief()
     : command === 'decision' ? decision()
     : command === 'attach-dispatch' ? attachDispatch()
     : command === 'dispatch-preflight' ? dispatchPreflight()
     : command === 'stop' ? stop()
-    : (() => { throw Error('Commands: init RUN INPUT, status RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN'); })();
+    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN'); })();
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(error.message);
