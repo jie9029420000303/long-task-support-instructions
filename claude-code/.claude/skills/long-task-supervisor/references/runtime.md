@@ -26,7 +26,7 @@ LONG_TASK_EVENT {"kind":"waiting","nextAction":"正在等待的背景工作與�
 LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
 ```
 
-若工作正在執行而回合尚未結束，背景監看保持安靜。若完成回合仍有可執行工作，`progress` 附下一步，監督用桌面原生跨對話傳訊送一則短續接。純背景等待可用 `waiting`，或相容的 `progress` 加 `waitMinutes`（1～120），都由背景程式等待，不補發保活續接；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。
+若工作正在執行而回合尚未結束，背景監看保持安靜。若完成回合仍有可執行工作，`progress` 附下一步，監督用桌面原生跨對話傳訊送一則短續接。純背景等待可用 `waiting`，或相容的 `progress` 加 `waitMinutes`（1～120）：分鐘數用 `scripts/pace.cjs` 依等待中工作包的剩餘 AI 時程基準算出，不憑人類開發經驗填；宣告的等待不會暫停監督自己的進度時鐘，也不補發保活續接；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。
 
 監督寫 `RUN/decision-<eventId>.json`。`eventId` 精確相同，`disposition` 為 `accept`、`reject`、`reply`、`observe` 或 `needs_user`。執行者問到待核准動作、但仍有其他工作可做時，使用 `reply` 指明已決定的可逆方案、暫停的具體動作與繼續項目，**不可用 `needs_user` 凍結整條主線**。純確認、已知阻塞且無需再發訊時使用 `observe`，即使當下只剩待核准事項，也須繼續接收新事件。`reject/reply` 有具體 `reply`；`accept` 有同一 `revision` 和每條 `PASS` 的 `method`、`expected`、`actual`、`evidence:[{path,sha256}]`。需向執行者續接、退件或代答時，訊息首行加入 `LONG_TASK_DELIVERY:<eventId>`，呼叫桌面原生送訊工具，保存它回報的 `delivered` 或 `queued` 及 `messageId` 到 `decision.delivery`。`delivered` 時 `decision` 檢查標記已進精確執行 transcript；只有 `queued` 時，桌面主機會把訊息扣到執行端本回合結束才寫入，`decision` 先記為待對帳（`status` 的 `unconfirmedDeliveries`），重新掛監看後由 watcher 讀到同一標記時確認。已排隊不可聲稱執行者已讀；遲遲未確認者列在進度查核事件，先對帳，不重送。`needs_user` 是保留當前 pending、暫停消費新事件的相容操作，只在確實需要整體暫停且已有使用者指示時使用；不是一般待核准事項的預設。
 
@@ -62,11 +62,22 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 ```
 
-只在 `current:true` 時送具體指示並照原協定保存 delivery、執行 decision。`current:false` 表示事件已過期，程式清除該 pending 並保留尚未處理的問題；不送訊、不為舊事件寫決策，重新掛 watcher。preflight 與桌面傳訊是兩個步驟，中間仍有狀態改變的時間窗，執行者收到後也須核對，不宣稱原子送達保證。監督只在需要處理事件時醒來，不以定時模型回合保活。
+只在 `current:true` 時送具體指示並照原協定保存 delivery、執行 decision。`current:false` 表示事件已過期，程式清除該 pending 並保留尚未處理的問題；不送訊、不為舊事件寫決策，重新掛 watcher。preflight 與桌面傳訊是兩個步驟，中間仍有狀態改變的時間窗，執行者收到後也須核對，不宣稱原子送達保證。監督只在需要處理事件或自己的進度時鐘到點時醒來（見[主動進度查核](#主動進度查核)），不以定時模型回合保活。
 
 ## 主動進度查核
 
-執行者 transcript 與其背景子代理 transcript 都靜默 15 分鐘後輸出 progress_review，事件附最後子代理活動時間與尚未確認的送達。執行者宣告的等待（`waiting`，或 `progress` 加 `waitMinutes`）期間不做這項查核，到期由 `continue` 事件喚醒監督。先核對實際工作，並在決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`；過期事件不送訊。可行工作或證據不足時用 reply，附 progressCheck.evidence、finding、guidance，實際原生訊息必須含 guidance。
+監督有自己的進度時鐘，不以執行者宣告的等待為準：`waiting` 或 `progress` 加 `waitMinutes` 只是參考，到期仍另以 `continue` 喚醒。背景程式在以下任一情況輸出 `progress_review`，`reasons` 標明原因：
+
+- `silence`：執行者與其背景子代理 transcript 都靜默 15 分鐘。
+- `interval`：距上次進度查核決策滿 30 分鐘，執行者再忙也查；只有監督自己核實並保存的等待（下段的 checked wait）會暫停它。
+- `overdue`：派工快照中在途工作包的經過時間達 AI 時程基準 1.5 倍；同一包只通知一次，之後由 interval 追蹤。
+- `repeat`：同一條指令連續失敗 3 次。同一個 `nextAction` 連報兩次則直接成為 `stalled` 事件。
+
+事件附 `pace`（每個在途包的開始時間、經過分鐘、基準分鐘、比值、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token 與最後活動時間、本場各模型實測每秒輸出 token）、`overdue`、`failedCommands`、`declaredWaitMinutes`、最後子代理活動時間與尚未確認的送達。
+
+AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token，加上已量測的工具時間（完整測試、部署等）。`scripts/pace.cjs status RUN` 列出在途包與基準；`pace.cjs estimate RUN --model <模型> [--tokens N] [--tool-minutes M]` 產生快照用的基準。本場同模型已完成的子代理少於 3 個時，用技能內建的實測預設值。不用人類開發經驗估時；執行端寫進派工快照的基準，監督以同一公式重算覆核，差超過一半先請執行端說明依據。
+
+先核對實際工作：子代理是否仍在輸出、輸出速度、測試與程序紀錄。決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`：`silence` 類事件遇到新活動即過期；`interval`、`overdue`、`repeat` 本來就是為忙碌中的執行者設計，不因新活動過期。落後、重複或證據不足時用 reply，附 progressCheck.evidence、finding、guidance；guidance 是已授權範圍內的具體加速建議，例如拆包並行、只跑受影響測試、停止重試改換做法、先收回整合已完成成果，實際原生訊息必須含 guidance。進度正常時用 observe，附 reason、progressCheck.evidence、finding，不傳訊、不打斷執行者；`silence` 類事件的 observe 仍須依下段保存 wait。
 
 只剩已核對的等待時用 observe，填 reason、progressCheck.evidence、finding 及 `wait:{kind:"user_approval",conditions:[]}`；外部結果用 external_result，必須列允許根目錄內的條件檔 conditions:[{path,sha256}] 或有原訂期限來源的 resumeAt。尚未出現的結果檔 sha256 填 null，不自行新增期限。決策後重掛唯一背景 watcher；它繼續讀執行事件、使用者在監督對話的新答覆及條件檔，條件變動立即解除等待。監督自身的工具輸出或結束回合不解除等待，也不催促同一條未變核准。
 

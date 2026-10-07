@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const contractState = require('./contract-state.cjs');
 const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
-const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS, deliveryRecorded, subagentActivityAt } = require('./guard.cjs');
+const { hash, read, need, validateContract, validateDecision, PROGRESS_REVIEW_MS, quietReview, deliveryRecorded, subagentActivityAt } = require('./guard.cjs');
 const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
@@ -156,7 +156,7 @@ function decision() {
   checkedWait.remember(state,value,binding);
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
-  if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();}
+  if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();state.failedCommands={};}
   state.phase=value.disposition==='accept'?'accepted':'idle';
   if (state.phase==='accepted') state.acceptedAt=now();
   save(path.join(run,'daemon-state.json'),state);
@@ -165,7 +165,7 @@ function decision() {
 function stop() {load();fs.writeFileSync(path.join(run,'STOP'),now()+'\n');return {run,stopRequested:true};}
 function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
 function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
-function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS;if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
+function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
     const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))

@@ -12,7 +12,9 @@ argument-hint: "[目標描述 | 續接 | 狀態]"
 
 監督綁定完成後，收到精確 run 路徑時，提問、阻塞及送驗依監督 runtime 的[原生事件交接](../long-task-supervisor/references/runtime.md#原生事件交接)：先以唯一 ID 保存完整事件，`handoff.cjs prepare` 取得持久 pending 收據及唯一傳訊資格，才使用桌面原生工具送一次短訊並記 receipt；最終回覆使用其 `finalEventLine`，不重複手寫事件或雜湊。送達不明先對帳，STOP 不重啟；純等待不發保活短訊。未安全接入的舊 run 仍用原事件格式，不自行改 run。
 
-監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，用監督技能 `dispatch.cjs write` 原子更新指定 run 的 `dispatch.json`。只記實際工作包、代理 handle、已核實容量與排他資源；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。未綁定監督的單對話任務不需此快照。
+監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，用監督技能 `dispatch.cjs write` 原子更新指定 run 的 `dispatch.json`。只記實際工作包、代理 handle、已核實容量與排他資源；每個在途包附 AI 時程基準（監督技能 `scripts/pace.cjs estimate` 產生；測試、主機程序等非代理工作填本場實測時長），等待事件的 `waitMinutes` 用等待中各包的剩餘基準；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。未綁定監督的單對話任務不需此快照。
+
+**時程以 AI 實測速度估**：完成時間、等待分鐘與進度是否落後，一律用「預估輸出 token ÷ 本場同模型子代理實測每秒輸出 token（各包輸出 token ÷ 經過時間的中位數），加上已量測的工具時間」推估，不用人類開發經驗。使用者問還要多久時，逐段列出依據與還沒實測的部分。
 
 目前 session：effort = `${CLAUDE_EFFORT}`；session id = `${CLAUDE_SESSION_ID}`；引數 = `$ARGUMENTS`。
 

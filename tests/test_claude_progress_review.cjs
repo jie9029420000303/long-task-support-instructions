@@ -192,16 +192,17 @@ test('subagent work that resumes before the supervisor sends makes the progress 
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('a declared background wait stays quiet past fifteen minutes until its own deadline',async()=>{
-  // The executor said "waiting on background work for 60 minutes"; waking the supervisor every 15 minutes
-  // during that wait spent model turns on a run that had already told us when to look again.
+test('an executor-declared wait no longer silences the supervisor check',async()=>{
+  // 2026-10-07 GDB run: 43 of 46 executor events declared 15-40 minute waits, so in 6.4 hours the supervisor
+  // never checked progress once. Jay: the supervisor keeps its own clock instead of trusting the executor's.
   const f=fixture(16),state=JSON.parse(fs.readFileSync(f.statePath));
   state.progressWait={event:{id:'wait-1',kind:'waiting',nextAction:'Wait for the build',waitMinutes:60},deadline:Date.now()+44*60000};
   save(f.statePath,state);
   const child=start(f);
   try{
-    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
-    await new Promise(resolve=>setTimeout(resolve,300));
-    assert.equal(JSON.parse(fs.readFileSync(f.statePath)).pending,null);
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).pending?.kind==='progress_review');
+    const event=JSON.parse(fs.readFileSync(f.statePath)).pending;
+    assert.deepEqual(event.reasons,['silence']);
+    assert.equal(event.declaredWaitMinutes,60);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
