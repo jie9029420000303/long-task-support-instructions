@@ -8,6 +8,9 @@ const PROGRESS_REVIEW_MS = 15 * 60 * 1000;
 // The supervisor's own clock (Jay 2026-10-07): a progress check at least every 30 minutes, and at once when a
 // package runs past 1.5x its AI-speed baseline or the same failing command repeats three times.
 const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_RATIO = 1.5, REPEAT_FAILURES = 3;
+// A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
+// a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
+const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -123,5 +126,5 @@ function subagentActivityAt(binding) {
   return Math.min(latest, Date.now());
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, quietReview,
+  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, quietReview,
   deliveredText, deliveryRecorded, subagentActivityAt };

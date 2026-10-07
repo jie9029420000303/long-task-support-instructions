@@ -237,3 +237,110 @@ test('the supervisor recomputes the executor baseline and flags a large mismatch
     assert.equal(item.supervisorBaselineMinutes,10);assert.equal(item.executorBaselineMinutes,40);assert.equal(item.mismatch,true);
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+// 2026-10-07/08 GDB run findings: a command stuck behind a permission prompt for 93 minutes, two lid-closed sleeps
+// (38 and 40 minutes), drills that wait silently by design, finished packages left in the snapshot, and a host
+// running 2 of its 4 diagnosis slots while tests waited.
+function toolRow(f,id,command,minutesAgoValue){
+  line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),timestamp:minutesAgo(minutesAgoValue),message:{id:'m-'+id,stop_reason:'tool_use',content:[{type:'tool_use',id,name:'Bash',input:{command}}]}});
+}
+
+test('a command with no result and no process for 5 minutes is reported as needing the user',async()=>{
+  const f=fixture();toolRow(f,'toolu_stuck','bash archive_case_client_never_started_4711.sh uat3',6);
+  const child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='progress_review',15000);
+    const event=pending(f);
+    assert.deepEqual(event.reasons,['executor_blocked']);
+    assert.equal(event.executorBlocked[0].command,'bash archive_case_client_never_started_4711.sh uat3');
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a long command that is really running is not reported as blocked',async()=>{
+  const f=fixture();
+  const runner=spawn('/bin/sh',['-c','sleep 30; echo still_running_marker_8842_long_suite'],{stdio:'ignore'});
+  toolRow(f,'toolu_run',"/bin/sh -c sleep 30; echo still_running_marker_8842_long_suite",6);
+  const child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(f),null);
+  }finally{child.kill('SIGTERM');runner.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a machine sleep is reported once and its minutes do not count against a package',async()=>{
+  const f=fixture(),state=JSON.parse(fs.readFileSync(f.statePath));
+  state.sleeps=[{from:minutesAgo(17),to:minutesAgo(9)}];save(f.statePath,state);
+  agent(f.subagents,'napped',{minutes:19,tokens:30000,done:false});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-NAP',handle:'agent:napped',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(19),basis:'measured'}}]}});
+  let child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    const event=pending(f);
+    assert.deepEqual(event.reasons,['machine_slept'],'19 minutes minus 8 asleep is 11, inside the 12-minute baseline');
+    assert.equal(event.machineSlept.length,1);
+    assert.equal(event.pace.packages[0].sleptMinutes,8);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a test process that is alive is activity, not a stall, even while its log is quiet',async()=>{
+  const f=fixture({quietMinutes:16,lastReviewMinutesAgo:16}),stateDir=path.join(f.root,'task'),logs=path.join(stateDir,'resources');
+  fs.mkdirSync(logs,{recursive:true});const log=path.join(logs,'r9.log');fs.writeFileSync(log,'drill waiting on lease\n');
+  const old=new Date(Date.now()-20*60000);fs.utimesSync(log,old,old);
+  const drill=spawn('/bin/sh',['-c','sleep 30'],{stdio:'ignore',detached:true});
+  save(path.join(stateDir,'resources.json'),{resources:[{id:'r9',pgid:drill.pid,kind:'process',log}]});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'C12-drill',handle:'resource:r9',evidence:[log],baseline:{minutes:85,startedAt:minutesAgo(30),basis:'drill design'}}]}});
+  let child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,600));
+    assert.equal(pending(f),null,'a live drill waiting on its lease is neither stalled nor silence');
+    child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));
+    process.kill(-drill.pid,'SIGTERM');await new Promise(resolve=>setTimeout(resolve,200));
+    const state=JSON.parse(fs.readFileSync(f.statePath));state.lastProcessActivityAt=0;save(f.statePath,state);
+    child=start(f);
+    await until(()=>pending(f)?.kind==='progress_review');
+    assert.ok(pending(f).reasons.includes('process_stalled'));
+  }finally{child.kill('SIGTERM');try{process.kill(-drill.pid,'SIGTERM');}catch{}fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a finished package left in the snapshot is not overdue and the record lists it as stale',async()=>{
+  const f=fixture({lastReviewMinutesAgo:31});
+  agent(f.subagents,'done1',{minutes:30,tokens:60000,done:true,endedMinutesAgo:1});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-DONE',handle:'agent:done1',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(31),basis:'measured'}}]}});
+  const child=start(f);
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(pending(f),null);
+    const record=JSON.parse(fs.readFileSync(path.join(f.run,'clock.jsonl'),'utf8').trim().split('\n').pop());
+    assert.deepEqual(record.open,['snapshot_stale:WP-DONE']);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('free slots on a declared test resource while work waits on it are surfaced once',async()=>{
+  const f=fixture(),log=path.join(f.root,'r1.log');fs.writeFileSync(log,'running\n');
+  save(path.join(f.run,'dispatch.json'),{capacity:{verified:20,evidence:['x'],resources:[{key:'host:gateway',slots:4}]},packages:{
+    inFlight:[{id:'line-a',handle:'resource:r1',evidence:[log],uses:[{key:'host:gateway',units:1}],baseline:{minutes:180,startedAt:minutesAgo(10),basis:'measured'}},
+      {id:'line-b',handle:'resource:r1',evidence:[log],uses:[{key:'host:gateway',units:1}],baseline:{minutes:180,startedAt:minutesAgo(10),basis:'measured'}}],
+    blocked:[{id:'C9',kind:'resource_conflict',uses:[{key:'host:gateway',units:2}]}]}});
+  const child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    assert.deepEqual(pending(f).reasons,['resource_underused']);
+    assert.deepEqual(pending(f).resourceUnderused,[{key:'host:gateway',slots:4,used:2,free:2,waiting:['C9']}]);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a wait that expires is reported with its due time, not the time it was declared',async()=>{
+  const f=fixture(),state=JSON.parse(fs.readFileSync(f.statePath));
+  state.progressWait={event:{id:'w1',kind:'waiting',nextAction:'Wait for tests',waitMinutes:20,at:minutesAgo(21)},deadline:Date.now()-60000};save(f.statePath,state);
+  const child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='continue');
+    const event=pending(f);
+    assert.equal(event.declaredAt,state.progressWait.event.at);
+    assert.equal(Date.parse(event.dueAt),state.progressWait.deadline);
+    assert.equal(Date.now()-Date.parse(event.at)<60000,true);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});

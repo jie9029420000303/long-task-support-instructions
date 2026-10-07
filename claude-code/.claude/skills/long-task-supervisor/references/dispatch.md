@@ -4,7 +4,7 @@
 
 ## 啟用與寫入
 
-新的 `supervise.cjs init` 預設啟用。監督在原始執行 prompt 指定 run 絕對路徑與本協定；綁定完成後只送一次短訊，通知執行者更新快照。綁定前先整理工作包並照常工作，不因尚無 binding 檔案停止；收到綁定通知後寫入第一份快照。
+新的 `supervise.cjs init` 預設啟用。監督在原始執行 prompt 指定 run 絕對路徑與本協定；綁定完成後只送一次短訊，通知執行者更新快照。執行者的 transcript 出現 run 路徑（收到綁定短訊）之後，或綁定後 15 分鐘，背景程式才把「缺快照」當成事件；綁定短訊還在排隊時不會先喚醒監督。綁定前先整理工作包並照常工作，不因尚無 binding 檔案停止；收到綁定通知後寫入第一份快照。
 
 既有 run 由監督在安全停點執行 `node "<skill>/scripts/supervise.cjs" attach-dispatch "<RUN>"`，再將同一份協定及路徑交給執行者。不重建 run、不改原契約或原啟動 prompt 雜湊；已停止的 run 不因此恢復。使用舊版或專用 watcher 的現役任務須另行確認相容性，不能只建快照就宣稱已接線。
 
@@ -36,6 +36,8 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 | `blocked` | `kind`、`exclusiveResources`、`evidence` | 具體阻塞；排他資源衝突用 `resource_conflict` |
 | `completed` | `acceptanceIds`、`evidence` | 已核對工作與所支援的驗收條目；不是監督已接受 |
 | `recurringRework` | `count`、`evidence` | 同一項已重做至少兩次，交監督判斷是否有效重驗 |
+
+真實測試資源（例如正式主機的排查名額、測試身分）用 `capacity.resources:[{key,slots}]` 宣告總名額，各包用 `uses:[{key,units}]` 宣告占用。在途包的占用合計低於名額，同時有就緒或受阻的包也要用同一資源時，背景程式通知監督評估能否並行。`capacity.verified` 仍只表示 AI 子代理席位。
 
 `inFlight` 每筆附 AI 時程基準 `baseline`：`minutes`（基準分鐘）、`startedAt`、`basis`（算法與來源）；代理工作另附 `model`、`estimatedOutputTokens`、`tokensPerSecond`、`toolMinutes`，用 `node "<skill>/scripts/pace.cjs" estimate "<RUN>" --model <模型> [--tokens <預估輸出 token>] [--tool-minutes <已量測工具分鐘>]` 產生。測試、主機程序等非代理工作以本場實測時長填 `minutes`，`basis` 寫明量測來源。不用人類開發經驗估時；沒有基準的在途包會叫醒監督一次，請執行端補上。
 

@@ -116,9 +116,11 @@ test('stale bundled event releases the still-current member for a new review',()
 
 test('Claude watcher routes missing attached snapshot and preflight cancels obsolete instruction before desktop send',async()=>{
   const f=fixture('dispatch-claude-','claude-code',true);
-  const log=path.join(f.root,'executor.jsonl'),prompt=path.join(f.run,'executor-prompt.txt');fs.writeFileSync(log,'');fs.writeFileSync(prompt,'prompt');
+  const log=path.join(f.root,'executor.jsonl'),prompt=path.join(f.run,'executor-prompt.txt');fs.writeFileSync(prompt,'prompt');
+  // The executor already received the binding message that names the run, so its snapshot is due.
+  fs.writeFileSync(log,JSON.stringify({type:'user',message:{content:'監督綁定完成：RUN＝'+f.run}})+'\n');
   Object.assign(f.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:log,promptSha256:sha(prompt)});save(path.join(f.run,'binding.json'),f.binding);
-  save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:0,turnText:[],seen:[],pending:null,reads:0});
+  save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:fs.statSync(log).size,turnText:[],seen:[],pending:null,reads:0});
   const child=spawn(process.execPath,[path.join(claude,'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',b=>output+=b);
   try{
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.kind==='dispatch_review');
@@ -129,6 +131,23 @@ test('Claude watcher routes missing attached snapshot and preflight cancels obso
     await new Promise(resolve=>child.exitCode!==null?resolve():child.once('exit',resolve));
     const second=spawn(process.execPath,[path.join(claude,'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});
     try{await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.issues?.some(item=>item.affected.includes('B')));}finally{second.kill('SIGTERM');}
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a fresh binding does not ask for the first snapshot before the executor has been told the run',async()=>{
+  // 2026-10-07 GDB run: the watcher's very first event was "snapshot missing" while the binding message was still
+  // queued, so the supervisor woke for nothing. Once the executor sees the run (or 15 minutes pass) it is due.
+  const f=fixture('dispatch-fresh-','claude-code',true);
+  const log=path.join(f.root,'executor.jsonl'),prompt=path.join(f.run,'executor-prompt.txt');fs.writeFileSync(log,'');fs.writeFileSync(prompt,'prompt');
+  Object.assign(f.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:log,promptSha256:sha(prompt),createdAt:new Date().toISOString()});save(path.join(f.run,'binding.json'),f.binding);
+  save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:0,turnText:[],seen:[],pending:null,reads:0});
+  const child=spawn(process.execPath,[path.join(claude,'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending,null);
+    fs.appendFileSync(log,JSON.stringify({type:'user',message:{content:'監督綁定完成：RUN＝'+f.run}})+'\n');
+    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.issues?.[0]?.kind==='snapshot_missing');
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 

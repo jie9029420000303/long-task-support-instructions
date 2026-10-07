@@ -68,13 +68,16 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 監督有自己的進度時鐘，不以執行者宣告的等待為準：`waiting` 或 `progress` 加 `waitMinutes` 只是參考，到期仍另以 `continue` 喚醒。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題）；只有發現問題才輸出 `progress_review` 喚醒模型，`reasons` 標明原因：
 
-- `silence`：執行者、背景子代理與在跑的測試程序（派工快照中非代理的在途包，以其 evidence 檔、例如紀錄檔的更新時間為準）全部靜止 15 分鐘。
-- `overdue`：在途工作包經過時間達 AI 時程基準 1.5 倍；同一包只通知一次。
+- `executor_blocked`：執行者的前景指令發出 5 分鐘仍沒有結果，程序清單裡也找不到它在跑，代表它停在權限確認或其他要本人處理的地方。**監督直接通知使用者到執行對話處理**，不要再傳訊給執行者，它收不到。
+- `machine_slept`：電腦睡眠 5 分鐘以上，例如用電池闔蓋，整場因此停住。監督請使用者接電源、不要闔蓋，並把停擺時長記進決策帳與驗收報告。
+- `silence`：執行者、背景子代理與在跑的測試程序全部靜止 15 分鐘。測試程序是派工快照中非代理的在途包，以 evidence 檔（例如紀錄檔）的更新時間為準；透過資源帳本啟動、程序還活著的，即使不寫紀錄也算在動。
+- `overdue`：在途工作包扣掉電腦睡眠後的經過時間，達 AI 時程基準 1.5 倍；同一包只通知一次。子代理紀錄已顯示做完、只是派工快照沒更新的包不算落後，記為 `snapshot_stale`。
 - `baseline_missing`：在途工作包沒有基準時長；同一包只通知一次，請執行端補上。
-- `process_stalled`：在跑的測試程序 15 分鐘沒有產出。
+- `process_stalled`：在跑的測試程序 15 分鐘沒有產出，而且查不到它還活著。例如故障演練依設計等待租約時，程序還在就不算停住。
+- `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有就緒或受阻的工作在等同一個資源；監督評估能否並行，例如同一身分同時跑兩題、但同一題號不同時跑。
 - `repeat`：同一條指令連續失敗 3 次。同一個 `nextAction` 連報兩次則直接成為 `stalled` 事件。
 
-事件附 `pace`（每個在途包的開始時間、經過分鐘、基準分鐘、比值、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`overdue`、`baselineMissing`、`processStalled`、`failedCommands`、`declaredWaitMinutes`、各類最後活動時間與尚未確認的送達。
+事件附 `pace`（每個在途包的開始時間、扣掉睡眠後的經過分鐘、睡眠分鐘、基準分鐘、比值、是否已做完、程序是否還活著、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`executorBlocked`、`machineSlept`、`overdue`、`baselineMissing`、`processStalled`、`resourceUnderused`、`failedCommands`、`declaredWaitMinutes`、各類最後活動時間與尚未確認的送達。`clock.jsonl` 每筆另列 `open`：當下仍未解決的問題，包括已通報過的，去重只決定要不要喚醒模型。等待到期的 `continue` 事件帶 `dueAt`（到期時間）與 `declaredAt`（宣告時間），`at` 是事件產生時間。
 
 每次喚醒的模型回合都會重讀整段監督對話的快取（GDB 實測每次呼叫約 47.5 萬 token），所以處理步驟要少：① `supervise.cjs brief RUN` 一次取得事件、監看狀態、各包速度、執行端最後幾段話、派工現況與最近決策，不逐檔探查；② 同一個 Bash 先跑 `progress-preflight`（progress_review 事件）再寫決策並執行 `decision`；需回訊時在 preflight 後、decision 前送原生訊息；③ 同一則回覆並行送出背景 `claude-watch.cjs RUN` 與 `supervise.cjs status RUN --wait-active 10`；④ 回報。
 
@@ -83,6 +86,10 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 先核對實際工作：子代理是否仍在輸出、輸出速度、測試與程序紀錄。決策前執行 `supervise.cjs progress-preflight RUN EVENT_ID`：`silence` 類事件遇到新活動即過期；`overdue`、`baseline_missing`、`process_stalled`、`repeat` 本來就是為忙碌中的執行者設計，不因新活動過期。落後、重複或證據不足時用 reply，附 progressCheck.evidence、finding、guidance；guidance 是已授權範圍內的具體加速建議，例如拆包並行、只跑受影響測試、停止重試改換做法、先收回整合已完成成果，實際原生訊息必須含 guidance。進度正常時用 observe，附 reason、progressCheck.evidence、finding，不傳訊、不打斷執行者；`silence` 類事件的 observe 仍須依下段保存 wait。
 
 只剩已核對的等待時用 observe，填 reason、progressCheck.evidence、finding 及 `wait:{kind:"user_approval",conditions:[]}`；外部結果用 external_result，必須列允許根目錄內的條件檔 conditions:[{path,sha256}] 或有原訂期限來源的 resumeAt。尚未出現的結果檔 sha256 填 null，不自行新增期限。決策後重掛唯一背景 watcher；它繼續讀執行事件、使用者在監督對話的新答覆及條件檔，條件變動立即解除等待。監督自身的工具輸出或結束回合不解除等待，也不催促同一條未變核准。
+
+**備援喚醒**：分層時鐘減少了喚醒，監督閒置時間跟著變長。GDB 實測監督閒置 96 分鐘後，背景完成通知沒有啟動模型回合，只留下 `<synthetic>`「No response requested.」，直到使用者打字才醒。Claude adapter 的狀態面板 mod（`claude-code/plugins/lt-status`，以環境變數 `CLAUDE_CODE_PLUGIN_DIRS` 載入，對話啟動時讀取）在監督自己的對話裡看到：事件已等 3 分鐘、這段期間沒有任何模型回合、當下也沒有回合在跑，就送一句短續接，請監督執行 `brief` 處理，等同使用者打字。每個事件最多一次，只在監督對話動作，不在執行對話送訊。這是失敗後的備援，不是定時保活；沒載入面板的對話沒有這層保護。
+
+**外部送訊**：觀察者或其他對話要傳訊給進行中的監督或執行對話時，只用會排隊的桌面原生傳訊。對方忙碌時會等它這輪結束才送達；直接插入的跨對話傳訊會中斷對方正在跑的工具呼叫。
 
 背景接收須保持運作，不因減少模型回合停止監看；避免為 idle watcher 外包會定時殺掉接收器的 timeout 命令。使用當前 App 真正支援的長期背景工具及事件完成通知，核對 status.active。若平台強制終止背景工具，據實記錄失效與原生交接途徑，不能保證 App 內部的喚醒，不能另建定時模型 heartbeat 或改由 CLI 代替桌面主線。
 
