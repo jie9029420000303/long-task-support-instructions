@@ -3,7 +3,7 @@
 const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
-const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,IDLE_WORK_MS,deliveredText,subagentActivityAt}=require('./guard.cjs');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
@@ -150,10 +150,16 @@ function supervisorClock(){
   const blocked=blockedTools().filter(item=>once('blocked:'+item.id));
   const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
   const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+'@'+item.used+':'+item.waiting.join(',')));
+  // A background job running alone is still idle capacity: only the executor's own turns and its subagents count here.
+  const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastSubagentActivityAt||0);
+  const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
+  const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
+  const idle=Date.now()-idleSince>=IDLE_WORK_MS&&(openCriteria.length||readyPackages.length);
+  const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round((Date.now()-idleSince)/60000),openCriteria,readyPackages}:null;
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
   for(const [,item] of repeated)item.announced=now();
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
-    ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[])];
+    ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(idleWork?['idle_with_work']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
@@ -161,11 +167,11 @@ function supervisorClock(){
       processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
       problems:reasons,open:[...paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
         ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
-        ...blockedTools().map(item=>'executor_blocked:'+item.command.slice(0,60))]})+'\n');
+        ...blockedTools().map(item=>'executor_blocked:'+item.command.slice(0,60)),...(idle?['idle_with_work']:[])]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
-    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources};
+    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork};
 }
 async function waitChange(){
   await new Promise(resolve=>{
@@ -311,7 +317,7 @@ async function watch(){
         lastProcessActivityAt:state.lastProcessActivityAt?new Date(state.lastProcessActivityAt).toISOString():null,
         unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],
         baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
-        machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],
+        machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       console.log('LONG_TASK_WAKE '+JSON.stringify(event));

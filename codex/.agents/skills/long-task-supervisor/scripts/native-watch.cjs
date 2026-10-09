@@ -17,6 +17,10 @@ const lockPath = path.join(run, 'watcher.lock');
 let state = read(statePath), ownsLock = false, lastMentionCheck = 0;
 const client = createClient({nodePath:process.execPath});
 const meta = {'x-codex-turn-metadata':{thread_id:binding.supervisorId,turn_id:binding.callerTurnId}};
+const SUPERVISOR_WAKE_MS = Number(process.env.CODEX_SUPERVISOR_WAKE_MS) || 45000;
+const DECISION_POLL_MS = Number(process.env.CODEX_SUPERVISOR_DECISION_POLL_MS) || 15000;
+const WATCH_IDLE_SLEEP_MS = Number(process.env.CODEX_WATCH_IDLE_SLEEP_MS) || 15000;
+const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
 const now = () => new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function save(file, object) {
@@ -63,6 +67,13 @@ function markSent(target, key) {
   checkpoint();
 }
 function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
+function assistantMarker(detail) {
+  for (const turn of detail.turns || []) {
+    const message=(turn.items || []).filter(item=>item.type==='agentMessage').at(-1);
+    if(message)return JSON.stringify([turn.id,message.id || null,require('node:crypto').createHash('sha256').update(message.text || '').digest('hex')]);
+  }
+  return null;
+}
 function localReceipt(target, key) {
   const sessions=path.join(process.env.CODEX_HOME || path.join(process.env.HOME,'.codex'),'sessions');
   let files=[];
@@ -121,10 +132,15 @@ function extractEvent(turn, message) {
     try { item = JSON.parse(text.slice(markerAt + marker.length).trim()); }
     catch { item = {kind:'protocol_error'}; }
   } else item = {kind:'unmarked_final'};
-  if (!item || !['submission','question','blocked','progress','unmarked_final'].includes(item.kind)) item = {kind:'protocol_error'};
+  if (!item || !['submission','question','blocked','progress','waiting','unmarked_final'].includes(item.kind)) item = {kind:'protocol_error'};
   if (item.kind === 'submission' && (!/^sha256:[a-f0-9]{64}$/.test(item.revision) || typeof item.manifest !== 'string')) item = {kind:'protocol_error'};
-  if (item.kind === 'progress' && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
-  return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,text:text.slice(0,8000),at:now()};
+  if (['progress','waiting'].includes(item.kind) && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
+  return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,
+    waitMinutes:Number.isFinite(item.waitMinutes)?item.waitMinutes:null,text:text.slice(0,8000),at:now()};
+}
+function waitingHasBlocker(text) {
+  const body=text.split('\n').filter(line=>!line.trim().startsWith('LONG_TASK_EVENT ')).join('\n');
+  return /(?:權限.{0,16}(?:審查|拒絕|阻擋)|(?:審查|核准).{0,16}(?:拒絕|阻擋)|(?:merge|push|release|deploy|合併|發版|發布).{0,40}(?:被擋|遭擋|阻塞|拒絕|blocked|denied|approval)|(?:需要|等待|等).{0,20}(?:Jay|使用者).{0,20}(?:決定|核准|授權)|(?:requires?|needs?|waiting for).{0,20}(?:user|Jay).{0,20}(?:approval|authorization|decision)|(?:待決|需要授權|授權或處置))/i.test(body);
 }
 async function exactFinal(turnId) {
   for (let attempt=0;attempt<3;attempt++) {
@@ -166,7 +182,7 @@ async function changed(directory, alreadyChanged = () => false) {
       clearTimeout(timer); clearInterval(poll);
       watcher?.close(); resolve();
     };
-    const timer = setTimeout(done,15000);
+    const timer = setTimeout(done,DECISION_POLL_MS);
     const poll = setInterval(()=>{if (alreadyChanged()||fs.existsSync(path.join(run,'STOP'))) done();},1000);
     try {
       watcher = fs.watch(directory,done);
@@ -177,9 +193,28 @@ async function changed(directory, alreadyChanged = () => false) {
 }
 async function pendingDecision() {
   const event = state.pending;
+  if (!(state.supervisorWake ||= {})[event.id]) {
+    const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
+    state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),wakeSentAt:null};checkpoint();
+  }
   await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
   const file = path.join(run,'decision-' + event.id + '.json');
-  if (!fs.existsSync(file)) {await changed(run,()=>fs.existsSync(file));return;}
+  const armed=state.supervisorWake[event.id];
+  if(!armed.deliveredAt){armed.deliveredAt=Date.now();checkpoint();}
+  if (!fs.existsSync(file)) {
+    await changed(run,()=>fs.existsSync(file));
+    const wake=state.supervisorWake[event.id];
+    if(!fs.existsSync(file)&&!fs.existsSync(path.join(run,'STOP'))&&!wake.wakeSentAt&&Date.now()-wake.deliveredAt>=SUPERVISOR_WAKE_MS){
+      const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
+      if(assistantMarker(detail)===wake.assistantMarker){
+        await sendAndRead(binding.supervisorId,
+          `監督喚醒補訊 ${event.id}：既有事件已送達，但尚未偵測到本對話的模型輸出。請處理既有 ${deliveryMarker('review-'+event.id)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
+          'wake-review-' + event.id);
+        wake.wakeSentAt=Date.now();checkpoint();
+      }else{wake.modelStartedAt=Date.now();checkpoint();}
+    }
+    return;
+  }
   const decision = validateDecision(binding,checkSources(),event,read(file));
   if(event.kind==='dispatch_review'){
     const preflight=stillCurrent(run,binding,state,event);checkpoint();
@@ -284,18 +319,33 @@ async function watch() {
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
     if (turn?.status === 'completed' && !state.seen.includes(turn.id)) {
+      if(state.progressWait)state.progressWait=null;
       const event = extractEvent(turn,await exactFinal(turn.id));
+      if(event.kind==='waiting'){
+        if(waitingHasBlocker(event.text))event.kind='blocked';
+        else if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';
+        else{
+          state.progressWait={event,deadline:Date.now()+event.waitMinutes*WAIT_MINUTE_MS};
+          state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
+        }
+      }
       if (event.kind === 'progress') {
         const repeated = state.lastProgressAction === event.nextAction ? (state.repeatedProgress || 0) + 1 : 1;
         state.lastProgressAction = event.nextAction;
         state.repeatedProgress = repeated;
-        if (repeated < 2) {
+        if (repeated < 2 && event.waitMinutes!==null) {
+          if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';
+          else{
+            state.progressWait={event,deadline:Date.now()+event.waitMinutes*WAIT_MINUTE_MS};
+            state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
+          }
+        } else if (repeated < 2) {
           await sendAndRead(binding.executorId,
             `長任務續接 ${event.id}：執行你剛才明列的下一步「${event.nextAction}」。沿用原契約及已完成工作；只在下一個真實事件送驗或回報，不重述整份 prompt。`,
             'continue-' + event.id);
           state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
         }
-        event.kind = 'stalled';
+        if(event.kind==='progress')event.kind = 'stalled';
       }
       state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
       state.pending = event;
@@ -303,6 +353,14 @@ async function watch() {
       await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
     } else {
       state.cursor=nextCursor;
+      if(state.progressWait&&Date.now()>=state.progressWait.deadline){
+        const event={...state.progressWait.event,kind:'continue',declaredAt:state.progressWait.event.at,
+          dueAt:new Date(state.progressWait.deadline).toISOString(),at:now()};
+        state.progressWait=null;state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
+        state.pending=event;state.phase='awaiting_decision';checkpoint();
+        await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
+        continue;
+      }
       // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
       // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.
       const hadCheckedWait=Boolean(state.checkedWait),found=clock.check(run,binding,state),silent=progressDue(state);
@@ -316,7 +374,7 @@ async function watch() {
         continue;
       }
       checkpoint();
-      if (Date.now() - started < 1000) await sleep(15000);
+      if (Date.now() - started < 1000) await sleep(WATCH_IDLE_SLEEP_MS);
     }
   }
   if (state.phase !== 'accepted') {state.phase = 'stopped';state.stoppedAt = now();checkpoint();}
@@ -324,11 +382,13 @@ async function watch() {
 (async () => {
   try {await watch();}
   catch (error) {
-    state.phase = fs.existsSync(path.join(run,'STOP')) ? 'stopped' : error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
-    state.error = {message:error.message,at:now()};
-    checkpoint();
-    console.error(error.stack || error);
-    process.exitCode = 1;
+    if(fs.existsSync(path.join(run,'STOP'))){
+      state.phase='stopped';state.stoppedAt=now();delete state.error;checkpoint();
+    }else{
+      state.phase = error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
+      state.error = {message:error.message,at:now()};checkpoint();
+      console.error(error.stack || error);process.exitCode = 1;
+    }
   } finally {
     state.endedAt = now();checkpoint();
     if (ownsLock) {

@@ -89,7 +89,7 @@
 
 - **G4 壓縮後重載**（SessionStart，`compact`）：本對話載入過本技能時，壓縮後直接印出狀態檔重點：還沒通過的驗收條、還沒結的工作包、待決清單，並提醒派工或判定前讀完整狀態檔；對話裡沒有附回技能內容時，先 `Skill(long-task-orchestrator, "續接")`。
 - **G3 不用提問框卡主線**（PreToolUse，`AskUserQuestion`）：本對話載入過本技能且任務未完成時擋下；受監督（有 `LONG_TASK_BIND` 綁定訊息）提示改交監督代答，未受監督提示採推薦並記已採預設。狀態檔「逐項確認模式」記有使用者原話、或最終判定為 PASS 時放行。
-- **G1＋G2 派工前檢查**（PreToolUse，`Agent`）：只看 `lt-*`。工作包（派工提示加上它引用的 `wp/<id>.md`）缺 `[工作區]`／`[可修改範圍]`／`[共用資源]` 擋；錯誤次數（狀態檔工作包表優先，其次派工表頭「目前錯誤次數」）已滿 3 擋；派的檔次高於錯誤次數允許的檔次擋，訊息寫明狀態檔與派工表頭各記幾次；查不到錯誤次數放行加備註。
+- **G1＋G2 派工前檢查**（PreToolUse，`Agent`）：只看 `lt-*`。工作包（派工提示加上它引用的 `wp/<id>.md`）缺 `[工作區]`／`[可修改範圍]`／`[共用資源]` 擋；錯誤次數（狀態檔工作包表優先，其次派工表頭「目前錯誤次數」）已滿 3 擋；派的檔次高於錯誤次數允許的檔次擋，訊息寫明狀態檔與派工表頭各記幾次；查不到錯誤次數放行加備註。同一套檢查也套用到 PreToolUse(`Workflow`)：長任務中只放行技能附的 `long-task-batch`，`args.packages` 逐包檢查（任一包不合格整批擋下），其他工作流程擋下，因為它們派出的代理不經過這兩道閘。
 
 三道閘的狀態檔不假設在目前工作目錄（主線常在 git worktree 裡，或沿用舊版 `.codex/long-task`）：依序取派工引用的 wp 檔所在任務、本對話工具呼叫最近碰過的 `state.md`，最後才是目前工作目錄的 `.claude/long-task/`；工作包表的錯誤次數欄依表頭含「錯誤」的那欄定位。
 
@@ -98,9 +98,11 @@
 ```json
 {"hooks": {
   "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": "python3 <skill>/scripts/gates.py"}]}],
-  "PreToolUse": [{"matcher": "AskUserQuestion|Agent|Task", "hooks": [{"type": "command", "command": "python3 <skill>/scripts/gates.py"}]}]
+  "PreToolUse": [{"matcher": "AskUserQuestion|Agent|Task|Workflow", "hooks": [{"type": "command", "command": "python3 <skill>/scripts/gates.py"}]}]
 }}
 ```
+
+批次派工另需三項使用者層設定：把 `claude-code/.claude/workflows/long-task-batch.js` 複製到 `~/.claude/workflows/`；`permissions.allow` 加 `"Workflow(long-task-batch)"`，執行對話不是略過權限模式時才不會停在工作流程核准卡；`"workflowSizeGuideline": "large"`，預設的 `medium` 會讓模型把每次工作流程壓在 10 個代理以內。
 
 ## 並行與完成
 

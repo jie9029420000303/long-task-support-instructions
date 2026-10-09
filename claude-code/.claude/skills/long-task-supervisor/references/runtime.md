@@ -70,12 +70,13 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 - `executor_blocked`：執行者的前景指令發出 5 分鐘仍沒有結果，程序清單裡也找不到它在跑，代表它停在權限確認或其他要本人處理的地方。**監督直接通知使用者到執行對話處理**，不要再傳訊給執行者，它收不到。
 - `machine_slept`：綁定後電腦睡眠 5 分鐘以上，例如用電池闔蓋，整場因此停住。監督請使用者接電源、不要闔蓋，並把停擺時長記進決策帳與驗收報告。綁定前的睡眠不算。
-- `silence`：執行者、背景子代理與在跑的測試程序全部靜止 15 分鐘。測試程序是派工快照中非代理的在途包，以 evidence 檔（例如紀錄檔）的更新時間為準；透過資源帳本啟動、程序還活著的，即使不寫紀錄也算在動。
+- `silence`：執行者、背景子代理（含 Dynamic workflows 派出的代理，紀錄在 `subagents/workflows/<runId>/`）與在跑的測試程序全部靜止 15 分鐘。測試程序是派工快照中非代理的在途包，以 evidence 檔（例如紀錄檔）的更新時間為準；透過資源帳本啟動、程序還活著的，即使不寫紀錄也算在動。
 - `overdue`：在途工作包扣掉電腦睡眠後的經過時間，達 AI 時程基準 1.5 倍；同一包只通知一次。子代理紀錄已顯示做完、只是派工快照沒更新的包不算落後，記為 `snapshot_stale`。
 - `baseline_missing`：在途工作包沒有基準時長；同一包只通知一次，請執行端補上。
 - `process_stalled`：在跑的測試程序 15 分鐘沒有產出，而且查不到它還活著。例如故障演練依設計等待租約時，程序還在就不算停住。
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有就緒或受阻的工作在等同一個資源；監督評估能否並行，例如同一身分同時跑兩題、但同一題號不同時跑。
 - `repeat`：同一條指令連續失敗 3 次。同一個 `nextAction` 連報兩次則直接成為 `stalled` 事件。
+- `idle_with_work`：執行端與所有子代理都停了 5 分鐘（只有背景指令在跑也算停），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。
 
 事件附 `pace`（每個在途包的開始時間、扣掉睡眠後的經過分鐘、睡眠分鐘、基準分鐘、比值、是否已做完、程序是否還活著、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`executorBlocked`、`machineSlept`、`overdue`、`baselineMissing`、`processStalled`、`resourceUnderused`、`failedCommands`、`declaredWaitMinutes`、各類最後活動時間與尚未確認的送達。`clock.jsonl` 每筆另列 `open`：當下仍未解決的問題，包括已通報過的，去重只決定要不要喚醒模型。等待到期的 `continue` 事件帶 `dueAt`（到期時間）與 `declaredAt`（宣告時間），`at` 是事件產生時間。
 

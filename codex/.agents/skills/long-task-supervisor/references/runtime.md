@@ -2,7 +2,7 @@
 
 ## 一次性啟動
 
-使用者只說「研究定案，啟動監督」即可。監督在本對話建一份 task-owned `input.json`，勿要求使用者填 schema：
+使用者明確說「研究定案，啟動監督並建立執行對話」，或明確指定要綁定的既有執行對話即可。`create_thread` 與往另一對話傳訊都要有使用者直接授權；把原話、來源位置、目標專案／對話與用途寫入契約，不能把一般查狀態或「監看」擴成建立新 task。監督在本對話建一份 task-owned `input.json`，勿要求使用者填 schema：
 
 ```json
 {
@@ -43,12 +43,14 @@ node <installed-skill>/scripts/supervise.cjs stop RUN
 
 ```text
 LONG_TASK_EVENT {"kind":"progress","nextAction":"接下來要執行的具體工作"}
+LONG_TASK_EVENT {"kind":"waiting","nextAction":"背景工作完成後要做的事","waitMinutes":15}
+LONG_TASK_EVENT {"kind":"progress","nextAction":"背景工作完成後要做的事","waitMinutes":15}
 LONG_TASK_EVENT {"kind":"question"}
 LONG_TASK_EVENT {"kind":"blocked"}
 LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
 ```
 
-`progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。普通進度應在回合中通報；回合結束仍有工作才使用 `progress`。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。新事件只傳摘要及契約／證據路徑，不重貼全部歷史。
+普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，到期前不發續接，結果變化或到期才產生 `continue` 事件。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。新事件只傳摘要及契約／證據路徑，不重貼全部歷史。
 
 送驗前用 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...` 產生候選清單及**可直接貼在最終回覆末尾的完整事件行**；不要手寫或截短雜湊。清單至少列一個檔案，包含本次候選版所有直接修改的交付檔。監督接收時會重算清單及每個候選檔，變動後必須另建清單並重交，不得拼接舊證據。
 
@@ -59,6 +61,8 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 監看可能在決策檔寫入後、`decision` 命令執行前就已處理它；此時命令仍須對保存的同一事件與決策雜湊回傳 `valid:true, processed:true`。若檔案事後改動則拒絕，不能把競速造成的「無待決事件」誤當驗收失敗。
 
 背景程式只把 `reject` 或 `reply` 傳給精確執行對話，並讀回完整訊息保存 receipt。執行者問到待核准動作而仍有其他工作可做時，監督用 `reply` 指明可逆方案、暫停的具體動作與繼續項目；**不可用 `needs_user` 凍結整條主線**。純確認、已知阻塞且無需再發訊時用 `observe`，即使當下只剩待核准事項也繼續接新事件。`needs_user` 保留當前 pending 並暫停消費新事件，只在已有使用者指示確實需要整體暫停時使用；不是一般待核准事項的預設。送達不明只讀回對帳，不重送。接受後關閉該 run 的監看；執行對話即使先自稱完成也不得讓監督狀態提前完成。
+
+送往監督的事件讀回確認後，若 45 秒仍沒有監督模型輸出、decision 不存在且沒有 `STOP`，resident watcher 送一次獨立的短喚醒訊息，只引用原 `LONG_TASK_DELIVERY` 識別；不得複製或重送原業務事件。模型已有輸出、decision 已出現或 STOP 存在時不補送；每個事件至多一次。這是漏啟動備援，不是固定 heartbeat。
 
 `observe`（記錄後繼續監看）必須有非空 `reason`；可附 `pendingApprovals` 非空字串陣列，逐項保存仍待核准的具體動作。不得含 `reply`、`delivery`、`revision`、`results`。背景程式保存完整決策及雜湊、清除該 pending，再繼續等新事件；不向執行者發訊、不接受候選、不把待核准改成授權。範例：
 

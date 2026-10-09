@@ -14,6 +14,8 @@ exit 2 把原因交回模型自行修正。絕不用 ask 跳確認框（長任�
   新包從基準檔起跳、升一檔＝錯一次；錯 3 停止子代理鏈由主線接手。工作包＝派工提示加上它引用的 wp 檔
   （技能規定 prompt 先存成 <狀態目錄>/wp/<id>.md，派工訊息常只引用該檔）。錯誤次數以狀態檔工作包表為準，
   查不到才用派工提示表頭；兩者都查不到就放行加備註，不猜。
+- G1＋G2 也套用到 PreToolUse(Workflow)：長任務一批互不相依的包改交技能附的 long-task-batch 工作流程一次派出，
+  args.packages 每包照單獨派工的同一套檢查；長任務中其他工作流程會繞過這兩道閘，所以擋下。
 
 狀態檔不假設在目前工作目錄：主線常在 git worktree 裡、或沿用舊版 .codex/long-task 工作（2026-10-06 Gateway
 實測兩者皆是，閘因此一直找不到狀態檔）。依序取 wp 檔所在任務的 state.md、本對話工具呼叫最近碰過的
@@ -34,6 +36,7 @@ PROMPT_ERRORS = re.compile(r"錯誤次數\s*[=＝:：]?\s*(\d+)")
 STATE_TAIL = r"/long-task/[^/\s\"'`]+/state\.md"
 WP_TAIL = r"/wp/[^/\s\"'`]+\.md"
 ITEMIZED = re.compile(r"^-\s*逐項確認模式[:：]\s*(?!關閉|<)(\S.*)$", re.M)
+BATCH = "long-task-batch"
 
 
 def file_refs(text, tail):
@@ -202,20 +205,20 @@ def ask(data):
                  "使用者明說要逐項確認時，先在狀態檔記「- 逐項確認模式：<使用者原話＋時間>」再問。")
 
 
-def dispatch(data):
-    tool = data.get("tool_input") or {}
-    match = AGENT.match(str(tool.get("subagent_type") or "").split(":")[-1])
+def check(data, subagent_type, prompt, fallback_id=None):
+    """一個工作包的 G1＋G2；回 None（放行）、("note", 備註) 或 ("block", 原因)。"""
+    match = AGENT.match(str(subagent_type or "").split(":")[-1])
     if not match:
-        return 0
+        return None
     role, tier = match.groups()
-    prompt = str(tool.get("prompt") or "")
+    prompt = str(prompt or "")
     wps = file_refs(prompt, WP_TAIL)
     work = "\n".join([prompt] + [wp.read_text(encoding="utf-8", errors="replace") for wp in wps])
     missing = [field for field in REQUIRED if field not in work]
     if missing:
-        return block(f"派 lt-* 前工作包缺 {'、'.join(missing)}（派工提示與它引用的 wp 檔都沒有）：補齊後重派（並行閘靠這三段判斷隔離，不能猜）。")
+        return "block", f"派 lt-* 前工作包缺 {'、'.join(missing)}（派工提示與它引用的 wp 檔都沒有）：補齊後重派（並行閘靠這三段判斷隔離，不能猜）。"
     match = PACKAGE.search(work)
-    package = match.group(1) if match else (wps[0].stem if wps else None)
+    package = match.group(1) if match else (wps[0].stem if wps else fallback_id)
     errors = source = None
     if package:
         for state in states(data, wps):
@@ -228,17 +231,53 @@ def dispatch(data):
     if errors is None:
         errors = header_errors
     if errors is None:
-        return note("PreToolUse", "派工閘：查不到這個工作包的錯誤次數（狀態檔工作包表或派工表頭的「目前錯誤次數」），未檢查起跳檔。")
+        return "note", "派工閘：查不到這個工作包的錯誤次數（狀態檔工作包表或派工表頭的「目前錯誤次數」），未檢查起跳檔。"
     if errors >= 3:
-        return block(f"工作包{' ' + package if package else ''}已錯 {errors} 次：停止子代理鏈，由主線接手未完成部分並復用正確成果。")
+        return "block", f"工作包{' ' + package if package else ''}已錯 {errors} 次：停止子代理鏈，由主線接手未完成部分並復用正確成果。"
     ladder = TIERS[role]
     if tier not in ladder or ladder.index(tier) > errors:
         # 2026-10-07 GDB：主線只改了工作包檔表頭就派高一檔，被擋時看不出是哪邊記的次數；直接講清楚兩邊各記幾次。
         where = f"狀態檔工作包表（{source}）記錯誤 {errors} 次" if source else f"派工表頭記錯誤 {errors} 次"
         conflict = (f"；派工提示／工作包檔表頭寫 {header_errors} 次，兩邊不一致：先把狀態檔工作包表改成實際次數再派"
                     if source and header_errors is not None and header_errors != errors else "")
-        return block(f"lt-{role} 這包{where}，應派 lt-{role}-{ladder[min(errors, 2)]}{conflict}：新包從基準檔起跳，升一檔＝錯一次。")
-    return 0
+        return "block", f"lt-{role} 這包{where}，應派 lt-{role}-{ladder[min(errors, 2)]}{conflict}：新包從基準檔起跳，升一檔＝錯一次。"
+    return None
+
+
+def dispatch(data):
+    tool = data.get("tool_input") or {}
+    verdict = check(data, tool.get("subagent_type"), tool.get("prompt"))
+    if not verdict:
+        return 0
+    return block(verdict[1]) if verdict[0] == "block" else note("PreToolUse", verdict[1])
+
+
+def workflow(data):
+    """長任務的批次派工只走 long-task-batch，每包照單獨派工的檢查；其他工作流程裡的代理不經過 G1＋G2。"""
+    if not long_task(user_texts(data)):
+        return 0
+    tool = data.get("tool_input") or {}
+    if tool.get("name") != BATCH and not str(tool.get("scriptPath") or "").endswith(BATCH + ".js"):
+        return block(f"長任務的批次派工用技能附的工作流程：Workflow(name=\"{BATCH}\", args={{packages:[{{id, agentType, prompt}}]}})，"
+                     "每包的 agentType 與 prompt 同單獨派工；其他工作流程不經過派工閘（起跳檔、錯 3 接手、隔離欄位），長任務中不用。")
+    args = tool.get("args")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = None
+    packages = args.get("packages") if isinstance(args, dict) else None
+    if not isinstance(packages, list) or not packages:
+        return block(f"{BATCH} 的 args.packages 是空的：放入這批要派的工作包（id、agentType、prompt）。")
+    notes = []
+    for item in packages:
+        item = item if isinstance(item, dict) else {}
+        verdict = check(data, item.get("agentType"), item.get("prompt"), item.get("id"))
+        if verdict and verdict[0] == "block":
+            return block(f"工作包 {item.get('id')}：{verdict[1]}")
+        if verdict:
+            notes.append(f"{item.get('id')}：{verdict[1]}")
+    return note("PreToolUse", "；".join(notes)) if notes else 0
 
 
 def main():
@@ -253,6 +292,8 @@ def main():
         return ask(data)
     if event == "PreToolUse" and tool in ("Agent", "Task"):
         return dispatch(data)
+    if event == "PreToolUse" and tool == "Workflow":
+        return workflow(data)
     return 0
 
 
