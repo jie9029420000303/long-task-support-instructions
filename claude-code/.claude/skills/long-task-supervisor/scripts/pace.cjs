@@ -27,15 +27,30 @@ function agentRun(file){
   return {id:path.basename(file,'.jsonl').replace(/^agent-/,''),model,startedAt,lastAt,outputTokens,done,seconds};
 }
 function subagentDir(binding){return path.join(path.dirname(binding.executorLog),binding.executorId,'subagents');}
-function agentRuns(binding){
-  const dir=subagentDir(binding);let names=[];
-  try{names=fs.readdirSync(dir).filter(name=>/^agent-.+\.jsonl$/.test(name));}catch{}
-  return names.map(name=>agentRun(path.join(dir,name)));
+const agentFiles=dir=>{try{return fs.readdirSync(dir).filter(name=>/^agent-.+\.jsonl$/.test(name)).map(name=>path.join(dir,name));}catch{return [];}};
+// Agents a dynamic workflow starts live one level down, in subagents/workflows/<runId>/. Its journal names each one
+// with the label the script gave it (the work package id; the snapshot names it workflow:<runId>:<label>) and records
+// result or failed when it ends: a workflow agent ends on a structured-output tool call, not on end_turn.
+function workflowRuns(binding){
+  const root=path.join(subagentDir(binding),'workflows');let dirs=[];
+  try{dirs=fs.readdirSync(root,{withFileTypes:true}).filter(entry=>entry.isDirectory()).map(entry=>entry.name);}catch{}
+  return dirs.flatMap(dir=>{
+    const events=new Map();
+    try{for(const line of fs.readFileSync(path.join(root,dir,'journal.jsonl'),'utf8').split('\n')){
+      let row;try{row=JSON.parse(line);}catch{continue;}
+      if(!row.agentId)continue;const item=events.get(row.agentId)||{};
+      if(row.type==='started')item.label=row.label??null;else if(row.type==='result')item.result=true;else if(row.type==='failed')item.failed=true;
+      events.set(row.agentId,item);
+    }}catch{}
+    return agentFiles(path.join(root,dir)).map(file=>{const run=agentRun(file),item=events.get(run.id)||{};
+      return {...run,workflow:dir,label:item.label??null,done:Boolean(item.result||item.failed),failed:Boolean(item.failed)};});
+  });
 }
+function agentRuns(binding){return [...agentFiles(subagentDir(binding)).map(agentRun),...workflowRuns(binding)];}
 // A finished run shorter than a minute is a launch failure or a one-line answer, not a speed sample.
 function speed(runs){
   const models={};
-  for(const run of runs.filter(item=>item.done&&item.model&&item.seconds>=60&&item.outputTokens>0))(models[run.model]||=[]).push(run);
+  for(const run of runs.filter(item=>item.done&&!item.failed&&item.model&&item.seconds>=60&&item.outputTokens>0))(models[run.model]||=[]).push(run);
   const result={};
   for(const [model,items] of Object.entries(models))if(items.length>=MIN_SAMPLES)
     result[model]={tokensPerSecond:round(median(items.map(item=>item.outputTokens/item.seconds))),outputTokens:Math.round(median(items.map(item=>item.outputTokens))),samples:items.length,source:'this run'};
@@ -85,8 +100,9 @@ function sleptWithin(sleeps,from,to){
 // agent whose transcript already ended is finished (the snapshot is stale), not overdue.
 function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
   const runs=agentRuns(binding),measured=speed(runs),byId=new Map(runs.map(run=>[run.id,run]));
+  for(const run of runs)if(run.workflow&&run.label)byId.set(run.workflow+':'+run.label,run);
   const packages=(snapshot?.packages?.inFlight||[]).map(item=>{
-    const agentId=/^agent:(.+)$/.exec(item.handle||'')?.[1],run=agentId?byId.get(agentId):null,declared=item.baseline||null;
+    const agentId=/^(?:agent|workflow):(.+)$/.exec(item.handle||'')?.[1],run=agentId?byId.get(agentId):null,declared=item.baseline||null;
     const startedAt=Date.parse(declared?.startedAt)||run?.startedAt||null;
     const own=run?baseline({model:run.model||declared?.model,estimatedOutputTokens:declared?.estimatedOutputTokens,toolMinutes:declared?.toolMinutes},measured):null;
     const minutes=declared?.minutes||own?.minutes||null,process=!agentId,activity=process?evidenceActivity(item):run?.lastAt;

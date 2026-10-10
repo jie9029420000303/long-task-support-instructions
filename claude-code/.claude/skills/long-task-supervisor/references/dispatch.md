@@ -39,6 +39,8 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 
 真實測試資源（例如正式主機的排查名額、測試身分）用 `capacity.resources:[{key,slots}]` 宣告總名額，各包用 `uses:[{key,units}]` 宣告占用。在途包的占用合計低於名額，同時有就緒或受阻的包也要用同一資源時，背景程式通知監督評估能否並行。`capacity.verified` 仍只表示 AI 子代理席位。
 
+在途包的 `handle`：單獨派出的子代理寫 `agent:<agentId>`；執行端用 `long-task-batch` 工作流程派出的寫 `workflow:<runId>:<工作包 id>`，監督從工作流程紀錄（`subagents/workflows/<runId>/journal.jsonl` 的代理標籤）找到它；資源帳本啟動的程序寫 `resource:<id>`。每次 `dispatch.cjs write` 另在 run 目錄附加一行 `dispatch-history.jsonl`（時間、activity、就緒／在途／受阻包與未通過條件），供事後量「有工作卻空等」的時間。
+
 `inFlight` 每筆附 AI 時程基準 `baseline`：`minutes`（基準分鐘）、`startedAt`、`basis`（算法與來源）；代理工作另附 `model`、`estimatedOutputTokens`、`tokensPerSecond`、`toolMinutes`，用 `node "<skill>/scripts/pace.cjs" estimate "<RUN>" --model <模型> [--tokens <預估輸出 token>] [--tool-minutes <已量測工具分鐘>]` 產生。測試、主機程序等非代理工作以本場實測時長填 `minutes`，`basis` 寫明量測來源。不用人類開發經驗估時；沒有基準的在途包會叫醒監督一次，請執行端補上。
 
 各 evidence 欄位至少一筆非空引用，指向可重查的檔案、行號或平台事件位置。`updatedAt` 可記更新時間。`exclusiveResources` 只列**不可並行共享的實際占用**，每筆 `{key,kind}`；kind 為 `worktree`、`browser`、`account`、`database`、`test_environment` 或 `other`。key 使用跨工作包一致的實際識別（例如 `database:localhost:55431/qa`）。一般共享文件的唯讀查閱不列成排他資源；同一工作目錄的修改／整體測試、同一瀏覽器工具與測試帳號等仍依原隔離規則。

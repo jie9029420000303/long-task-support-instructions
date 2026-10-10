@@ -11,6 +11,9 @@ const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_RATIO = 1.5, REPEAT_FAILURES 
 // A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
 // a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
 const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
+// The executor and every subagent quiet for 5 minutes while acceptance work remains: dispatch what can run in parallel
+// instead of waiting on one background job (2026-10-07 GDB: 10.2 of 23.7 hours had the executor idle, no subagent).
+const IDLE_WORK_MS = 5 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -119,12 +122,15 @@ function deliveryRecorded(file, requires) {
   });
 }
 // Background subagents write their own transcripts beside the executor's; their growth is executor work.
+// Subagents of the executor, including the agents its dynamic workflows start one level down in workflows/<runId>/.
 function subagentActivityAt(binding) {
   const dir = path.join(path.dirname(binding.executorLog), binding.executorId, 'subagents');
   let latest = 0;
-  try { for (const name of fs.readdirSync(dir)) if (name.endsWith('.jsonl')) latest = Math.max(latest, fs.statSync(path.join(dir, name)).mtimeMs); } catch {}
+  const scan = folder => { try { for (const name of fs.readdirSync(folder)) if (name.endsWith('.jsonl')) latest = Math.max(latest, fs.statSync(path.join(folder, name)).mtimeMs); } catch {} };
+  scan(dir);
+  try { for (const entry of fs.readdirSync(path.join(dir, 'workflows'), { withFileTypes: true })) if (entry.isDirectory()) scan(path.join(dir, 'workflows', entry.name)); } catch {}
   return Math.min(latest, Date.now());
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, quietReview,
+  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, quietReview,
   deliveredText, deliveryRecorded, subagentActivityAt };
