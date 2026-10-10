@@ -287,6 +287,29 @@ test('a wait permission rejection remains an error, never a read fallback',async
   }finally{await f.stop();}
 });
 
+// 2026-10-11 equity re-review: one transient read_thread bridge error ended a live watcher with a pending event.
+test('a transient read failure is retried and the watcher keeps delivering instead of stopping',async()=>{
+  const f=fixture({final:'Need the approved source.\nLONG_TASK_EVENT {"kind":"question"}'}),errors=path.join(f.root,'read-errors');
+  fs.writeFileSync(errors,'2');const mock=read(f.mock);mock.readErrorFile=errors;save(f.mock,mock);
+  f.env.LONG_TASK_READ_RETRY_MS='50';f.start();
+  try{
+    await until(()=>pending(f)?.kind==='question'&&sends(f).length===1);
+    const state=read(f.statePath);
+    assert.notEqual(state.phase,'error');assert.equal(state.readRetries.length,2);
+    assert.equal(fs.readFileSync(errors,'utf8'),'0');
+  }finally{await f.stop();}
+});
+
+test('a read that keeps failing still stops with the original error after the retries',async()=>{
+  const f=fixture(),errors=path.join(f.root,'read-errors');
+  fs.writeFileSync(errors,'99');const mock=read(f.mock);mock.readErrorFile=errors;save(f.mock,mock);
+  f.env.LONG_TASK_READ_RETRY_MS='50';f.start();
+  try{
+    await until(()=>read(f.statePath).phase==='error');
+    assert.match(read(f.statePath).error.message,/Codex app tool request failed/);assert.equal(sends(f).length,0);
+  }finally{await f.stop();}
+});
+
 
 test('fallback keeps checking active work locally without waking a model',async()=>{
   const f=fixture();const mock=read(f.mock);

@@ -33,13 +33,22 @@ function unpack(result) {
   const block = result.content && result.content.find(item => item.type === 'text');
   return block ? JSON.parse(block.text) : result;
 }
+const TRANSIENT_APP_ERROR='MCP error -32000: Codex app tool request failed';
+// A read is safe to repeat; one transient bridge failure stopped a live run for 35 minutes (2026-10-11 equity
+// re-review). Sends are never retried here: a repeated send needs receipt reconciliation, not a blind resend.
+const READ_RETRY_MS=[2000,5000,15000];
 async function rpc(name, args, timeout = 75000) {
-  const response = await client.request('tools/call',{name,arguments:args,_meta:meta},timeout);
-  if (response.error || response.result?.isError) {
+  for(let attempt=0;;attempt++){
+    const response = await client.request('tools/call',{name,arguments:args,_meta:meta},timeout);
+    if (!(response.error || response.result?.isError)) return response.result;
+    const transient=name==='read_thread'&&response.error?.code===-32000&&response.error.message===TRANSIENT_APP_ERROR;
+    if(transient&&attempt<READ_RETRY_MS.length){
+      (state.readRetries||=[]).push({tool:name,attempt:attempt+1,at:now()});if(state.readRetries.length>20)state.readRetries.splice(0,state.readRetries.length-20);
+      await sleep(Number(process.env.LONG_TASK_READ_RETRY_MS)||READ_RETRY_MS[attempt]);continue;
+    }
     const error=Error(name + ': ' + JSON.stringify(response.error || response.result));
     error.rpcError=response.error;throw error;
   }
-  return response.result;
 }
 // A bridge-internal wait failure must not strand the run in a reconnect loop.
 // Read the same bound thread through its working read API; keep decisions and receipts unchanged.

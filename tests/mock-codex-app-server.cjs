@@ -24,6 +24,10 @@ function call(name,args) {
     return reply({polls:args.targets.map(target=>target.threadId===data.executorId?executor:supervisor)});
   }
   if (name==='read_thread') {
+    if(data.readErrorFile&&fs.existsSync(data.readErrorFile)){
+      const left=Number(fs.readFileSync(data.readErrorFile,'utf8'));
+      if(left>0){fs.writeFileSync(data.readErrorFile,String(left-1));throw Object.assign(Error('MCP error -32000: Codex app tool request failed'),{code:-32000});}
+    }
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
     if (args.threadId===data.executorId) {
       const finals=data.finals||[data.final],turnId='executor-turn-'+(currentTurn+1);
