@@ -199,6 +199,26 @@ class CodexDispatchContractTests(unittest.TestCase):
         self.assertIn("完成通知一到", execution)
         self.assertIn("不等原批全部完成", execution)
 
+    def test_dispatcher_decomposes_unpassed_acceptance_and_keeps_mainline_focused(self):
+        # The Codex adapter must carry the current orchestration design without copying
+        # Claude-only workflow syntax or a fixed Claude concurrency ceiling.
+        skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
+        execution = (self.SKILL / "references" / "execution.md").read_text(encoding="utf-8")
+        for marker in ("每條未通過的驗收條件至少對應一條工作線", "5～10 分鐘 AI 時間", "主線集中做規劃", "主線自做"):
+            self.assertIn(marker, skill)
+        self.assertIn("每條未通過條件至少有一條工作線", execution)
+        self.assertNotIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", skill)
+        self.assertNotIn("Dynamic workflows", skill)
+
+    def test_supervisor_requires_direct_thread_and_messaging_authorization(self):
+        supervisor = self.SKILL.parent / "long-task-supervisor"
+        skill = (supervisor / "SKILL.md").read_text(encoding="utf-8")
+        runtime = (supervisor / "references" / "runtime.md").read_text(encoding="utf-8")
+        for marker in ("明確授權「建立／啟動另一個執行對話」", "一般「監看」自行擴成建立新 task", "跨對話傳訊"):
+            self.assertIn(marker, skill)
+        self.assertIn("create_thread", runtime)
+        self.assertIn("使用者直接授權", runtime)
+
 
 def acceptance_sidecar(rows, verdict):
     """rows＝[(條文, 狀態, 核准依據)]；產生含驗收逐條表與最終判定的 sidecar。"""

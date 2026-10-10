@@ -21,6 +21,11 @@ try{
   acceptance.record(run,value.acceptance,output);
   fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{flag:'wx'});
   fs.renameSync(temporary,output);
+  // A short line per write, so a finished run shows when work waited while packages were ready or criteria open.
+  const ids=list=>(list||[]).map(item=>item.id);
+  fs.appendFileSync(path.join(run,'dispatch-history.jsonl'),JSON.stringify({at:new Date().toISOString(),planningRevision:value.planningRevision,activity:value.activity,
+    ready:ids(value.packages.ready),inFlight:(value.packages.inFlight||[]).map(item=>({id:item.id,handle:item.handle})),blocked:ids(value.packages.blocked),
+    openCriteria:(value.acceptance?.items||[]).filter(item=>!['PASS','EXCLUDED'].includes(item.status)).map(item=>item.id)})+'\n');
   console.log(JSON.stringify({written:true,path:output,planningRevision:value.planningRevision}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}

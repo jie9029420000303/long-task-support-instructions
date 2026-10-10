@@ -18,7 +18,23 @@ function inside(file, root) {
   const relative = path.relative(root, file);
   return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
 }
-function validateContract(contract) {
+function relocatedSource(run, binding, source) {
+  if (!run || !binding) return false;
+  const file = path.join(run, 'source-relocations.json');
+  if (!fs.existsSync(file)) return false;
+  const manifest = read(file);
+  need(manifest?.schema === 1 && manifest.contractSha256 === binding.contractSha256 && Array.isArray(manifest.entries), 'Invalid source relocation manifest');
+  const matches = manifest.entries.filter(entry => entry?.originalPath === source.path);
+  need(matches.length <= 1, 'Duplicate source relocation');
+  if (!matches.length) return false;
+  const entry = matches[0];
+  need(entry.sha256 === source.sha256 && path.isAbsolute(entry.relocatedPath) &&
+    binding.allowedRoots.some(root => inside(entry.relocatedPath, root)) &&
+    fs.existsSync(entry.relocatedPath) && hash(entry.relocatedPath) === source.sha256,
+    'Relocated acceptance source missing, outside allowed roots or changed');
+  return true;
+}
+function validateContract(contract, context = {}) {
   need(contract && typeof contract === 'object', 'Missing acceptance contract');
   need(typeof contract.goal === 'string' && contract.goal.trim(), 'Missing original goal');
   need(typeof contract.authorization === 'string' && contract.authorization.trim(), 'Missing original authorization');
@@ -33,7 +49,9 @@ function validateContract(contract) {
   }
   need(Array.isArray(contract.sources) && contract.sources.length > 0, 'Missing locked source');
   for (const source of contract.sources) {
-    need(path.isAbsolute(source.path) && fs.existsSync(source.path) && hash(source.path) === source.sha256, 'Acceptance source missing or changed');
+    need(path.isAbsolute(source.path), 'Acceptance source path must be absolute');
+    const originalMatches = fs.existsSync(source.path) && hash(source.path) === source.sha256;
+    need(originalMatches || relocatedSource(context.run, context.binding, source), 'Acceptance source missing or changed');
   }
   return contract;
 }

@@ -238,3 +238,64 @@ test('a missing snapshot waits until the executor has seen the run path, then is
     assert.equal(pending(f).issues[0].kind,'snapshot_missing');
   }finally{await f.stop();}
 });
+
+test('an overdue package with fresh output stays model-free, but silence on that package is still reviewed',async()=>{
+  const f=fixture({createdMinutesAgo:40});
+  subagent(f.home,'executor-qa','/root/producing',{turns:[{start:minutesAgo(30),end:minutesAgo(0.3),tokens:12000},{start:minutesAgo(0.2),tokens:20}]});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-PRODUCING',handle:'/root/producing',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(30),basis:'measured'}}]}});
+  f.start();
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    assert.equal(pending(f),null);assert.equal(sends(f).length,0);
+    assert.ok(read(path.join(f.run,'clock.jsonl')).open.includes('overdue:WP-PRODUCING'),'overrun remains recorded for audit');
+    assert.equal(read(f.statePath).clockAnnounced?.['overdue:WP-PRODUCING@'+read(path.join(f.run,'dispatch.json')).packages.inFlight[0].baseline.startedAt],undefined,'fresh output must not consume the later stall notification');
+  }finally{await f.stop();}
+});
+
+test('successful completion breaks a failure streak instead of waking on scattered old failures',async()=>{
+  const f=fixture({createdMinutesAgo:30}),command='npm run import';
+  for(const [minutes,exit_code] of [[9,1],[8,1],[7,0],[6,1]])line(f.executorLog,{timestamp:minutesAgo(minutes),type:'event_msg',payload:{type:'item_completed',item:{type:'CommandExecution',command:['/bin/zsh','-lc',command],exit_code,status:exit_code?'failed':'completed'}}});
+  f.start();
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    assert.equal(pending(f),null);assert.equal(sends(f).length,0);
+    assert.equal(read(f.statePath).failedCommands[command].count,1);
+  }finally{await f.stop();}
+});
+
+
+test('bridge wait failure still delivers the exact question once through the same bound read API',async()=>{
+  const f=fixture({final:'Need the approved source.\nLONG_TASK_EVENT {"kind":"question"}'});
+  const mock=read(f.mock);mock.waitError={code:-32000,message:'MCP error -32000: Codex app tool request failed'};save(f.mock,mock);
+  f.start();
+  try{
+    await until(()=>pending(f)?.kind==='question'&&sends(f).length===1);
+    const state=read(f.statePath);
+    assert.equal(state.waitFallback.tool,'wait_threads');
+    assert.equal(state.reads,1);assert.equal(state.pending.id,'executor-turn-1');
+    assert.ok(state.pending.text.includes('Need the approved source.'));
+    assert.equal(state.phase,'awaiting_decision');
+  }finally{await f.stop();}
+});
+
+test('a wait permission rejection remains an error, never a read fallback',async()=>{
+  const f=fixture();const mock=read(f.mock);mock.waitError={code:-32000,message:'Permission denied'};save(f.mock,mock);f.start();
+  try{
+    await until(()=>read(f.statePath).phase==='error');
+    const state=read(f.statePath);assert.match(state.error.message,/Permission denied/);
+    assert.equal(state.waitFallback,undefined);assert.equal(sends(f).length,0);
+  }finally{await f.stop();}
+});
+
+
+test('fallback keeps checking active work locally without waking a model',async()=>{
+  const f=fixture();const mock=read(f.mock);
+  mock.waitError={code:-32000,message:'MCP error -32000: Codex app tool request failed'};mock.readTurnStatus='inProgress';save(f.mock,mock);
+  f.env.CODEX_WATCH_IDLE_SLEEP_MS='40';f.start();
+  try{
+    await until(()=>read(f.statePath).reads>=2);
+    const state=read(f.statePath);assert.equal(state.phase,'watching');
+    assert.equal(state.pending,null);assert.equal(sends(f).length,0);
+    assert.equal(state.waitFallback.tool,'wait_threads');
+  }finally{await f.stop();}
+});

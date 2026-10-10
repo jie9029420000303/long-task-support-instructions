@@ -37,7 +37,10 @@ function trackTools(state,row,boundAt=0){
     const item=payload.item,command=(Array.isArray(item.command)?item.command.at(-1):String(item.command||'')).replace(/\s+/g,' ').trim().slice(0,300);
     // A command that ran while a call was open means that call is not frozen behind a prompt.
     for(const open of Object.values(state.openTools||{}))open.ran=true;
-    if((item.status==='failed'||Number.isInteger(item.exit_code)&&item.exit_code!==0)&&Date.parse(at)>=boundAt){const value=((state.failedCommands||={})[command]||={count:0});value.count++;value.lastAt=at;}
+    if(Date.parse(at)>=boundAt && command){
+      if(item.status==='failed'||Number.isInteger(item.exit_code)&&item.exit_code!==0){const value=((state.failedCommands||={})[command]||={count:0});value.count++;value.lastAt=at;}
+      else if(item.exit_code===0)delete state.failedCommands?.[command];
+    }
   }
 }
 function readExecutor(state,binding){
@@ -87,6 +90,10 @@ function kernelSleep(state,binding){
 }
 function snapshotOf(run,binding){try{return JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{return null;}}
 function paceNow(run,binding,state,snapshot=snapshotOf(run,binding)){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps);}
+function overdueNeedsReview(item,nowMs=Date.now()){
+  const last=Date.parse(item.lastActivityAt);
+  return item.ratio>=OVERDUE_RATIO && (!Number.isFinite(last) || last>nowMs || nowMs-last>=PROGRESS_REVIEW_MS);
+}
 let lastClockAt=0;
 function check(run,binding,state){
   if(Date.now()-lastClockAt<60000)return null;
@@ -96,7 +103,10 @@ function check(run,binding,state){
   if(paced.processActivityAt)state.lastProcessActivityAt=Math.max(state.lastProcessActivityAt||0,paced.processActivityAt);
   if(paced.subagentActivityAt)state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,paced.subagentActivityAt);
   const once=key=>announced[key]?false:(announced[key]=now(),true);
-  const overdue=paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO&&once('overdue:'+item.id+'@'+item.startedAt));
+  // A baseline overrun is a diagnostic, not evidence of a stalled worker. Reuse the existing
+  // silence window: keep recording overruns while this package produces, wake if it goes quiet.
+  const overdue=paced.packages.filter(item=>overdueNeedsReview(item) &&
+    once('overdue:'+item.id+'@'+item.startedAt));
   const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
@@ -120,4 +130,4 @@ function check(run,binding,state){
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources};
 }
-module.exports={check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf};
+module.exports={overdueNeedsReview,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf};

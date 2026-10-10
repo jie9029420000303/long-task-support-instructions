@@ -18,7 +18,7 @@ function load() {
   const binding = read(path.join(run, 'binding.json'));
   const contractFile = path.join(run, 'contract.json');
   need(hash(contractFile) === binding.contractSha256, 'Locked contract changed');
-  return { binding, contract: validateContract(contractState.effective(run,binding)) };
+  return { binding, contract: validateContract(contractState.effective(run,binding), {run, binding}) };
 }
 function currentTurn(threadId) {
   if (process.env.CODEX_TURN_ID) return process.env.CODEX_TURN_ID;
@@ -103,13 +103,27 @@ function brief() {
   const paced = pace.inFlight(binding, snapshot, Date.now(), state.sleeps), iso = value => value ? new Date(value).toISOString() : null;
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.decision?.disposition, at:item.event?.at}));
-  return {status:status(), pending:state.pending || null, pace:paced, sleeps:(state.sleeps || []).slice(-5),
+  return {status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, paced.subagentActivityAt || 0)),
       lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(state.executorLog || pace.sessionFile(binding.executorId))},
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     recentDecisions:resolved};
 }
+function context() {
+  const {binding,contract}=load(),state=read(path.join(run,'daemon-state.json'));
+  const event=state.pending;
+  need(event && event.id===other,'No matching pending event; do not replay an old review');
+  const review=require('./review-context.cjs'),saved=review.persist(run,event);
+  const operational=['progress_review','dispatch_review','continue'].includes(event.kind);
+  return {eventId:event.id,stopped:fs.existsSync(path.join(run,'STOP')),event:saved,
+    brief:brief(),...(!operational?{detail:event}:{}),
+    authorization:operational ? {command:"supervise.cjs authorization RUN",contractSha256:binding.contractSha256,contractStateSha256:contract.contractStateSha256||null} : review.authorization(contract,binding),
+    ...(event.kind==='submission'?{contract}:{}),
+    instructions:fs.readFileSync(path.join(__dirname,'../references/event-review.md'),'utf8'),
+    decisionPath:path.join(run,'decision-'+event.id+'.json')};
+}
+
 function decision() {
   need(other && path.isAbsolute(other), 'Use absolute decision path');
   const { binding, contract } = load();
@@ -134,6 +148,31 @@ function attachDispatch() {
   fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');
   return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};
 }
+function relocateSources() {
+  need(other && path.isAbsolute(other), 'Use absolute source relocation input path');
+  need(run && fs.existsSync(path.join(run, 'binding.json')), 'Run not initialized');
+  const binding = read(path.join(run, 'binding.json'));
+  const contractFile = path.join(run, 'contract.json');
+  need(hash(contractFile) === binding.contractSha256, 'Locked contract changed');
+  const contract = contractState.effective(run, binding), input = read(other);
+  need(input?.schema === 1 && Array.isArray(input.entries) && input.entries.length > 0, 'Invalid source relocation input');
+  const locked = new Map(contract.sources.map(source => [source.path, source]));
+  const seen = new Set();
+  for (const entry of input.entries) {
+    const source = locked.get(entry?.originalPath);
+    need(source && !seen.has(entry.originalPath), 'Relocation must identify one locked source exactly');
+    need(entry.sha256 === source.sha256 && path.isAbsolute(entry.relocatedPath) && entry.relocatedPath !== entry.originalPath,
+      'Relocation must preserve the locked source hash at another absolute path');
+    need(binding.allowedRoots.some(root => require('./guard.cjs').inside(entry.relocatedPath, root)) &&
+      fs.existsSync(entry.relocatedPath) && hash(entry.relocatedPath) === source.sha256,
+      'Relocated source missing, outside allowed roots or changed');
+    seen.add(entry.originalPath);
+  }
+  const manifest = {schema:1, contractSha256:binding.contractSha256, entries:input.entries, registeredAt:now()};
+  write(path.join(run, 'source-relocations.json'), manifest);
+  validateContract(contract, {run, binding});
+  return {run, relocated:manifest.entries.length, manifest:path.join(run, 'source-relocations.json')};
+}
 function dispatchPreflight() {
   const {binding}=load(),state=read(path.join(run,'daemon-state.json'));
   need(state.pending?.id===other&&state.pending.kind==='dispatch_review','No matching pending dispatch review');
@@ -147,11 +186,14 @@ try {
     : command === 'init' ? init()
     : command === 'status' ? status()
     : command === 'brief' ? brief()
+    : command === 'context' ? context()
+    : command === 'authorization' ? (()=>{const {binding,contract}=load();return require('./review-context.cjs').authorization(contract,binding);})()
     : command === 'decision' ? decision()
+    : command === 'relocate-sources' ? relocateSources()
     : command === 'attach-dispatch' ? attachDispatch()
     : command === 'dispatch-preflight' ? dispatchPreflight()
     : command === 'stop' ? stop()
-    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, decision RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN'); })();
+    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN'); })();
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(error.message);

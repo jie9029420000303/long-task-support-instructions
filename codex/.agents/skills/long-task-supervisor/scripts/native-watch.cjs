@@ -17,6 +17,10 @@ const lockPath = path.join(run, 'watcher.lock');
 let state = read(statePath), ownsLock = false, lastMentionCheck = 0;
 const client = createClient({nodePath:process.execPath});
 const meta = {'x-codex-turn-metadata':{thread_id:binding.supervisorId,turn_id:binding.callerTurnId}};
+const SUPERVISOR_WAKE_MS = Number(process.env.CODEX_SUPERVISOR_WAKE_MS) || 45000;
+const DECISION_POLL_MS = Number(process.env.CODEX_SUPERVISOR_DECISION_POLL_MS) || 15000;
+const WATCH_IDLE_SLEEP_MS = Number(process.env.CODEX_WATCH_IDLE_SLEEP_MS) || 15000;
+const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
 const now = () => new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function save(file, object) {
@@ -31,8 +35,28 @@ function unpack(result) {
 }
 async function rpc(name, args, timeout = 75000) {
   const response = await client.request('tools/call',{name,arguments:args,_meta:meta},timeout);
-  if (response.error || response.result?.isError) throw Error(JSON.stringify(response.error || response.result));
+  if (response.error || response.result?.isError) {
+    const error=Error(name + ': ' + JSON.stringify(response.error || response.result));
+    error.rpcError=response.error;throw error;
+  }
   return response.result;
+}
+// A bridge-internal wait failure must not strand the run in a reconnect loop.
+// Read the same bound thread through its working read API; keep decisions and receipts unchanged.
+let readPolling=false;
+async function waitExecutor(timeoutMs) {
+  if(!readPolling){
+    try{return unpack(await rpc('wait_threads',{
+      targets:[{threadId:binding.executorId,...(state.cursor?{afterCursor:state.cursor}:{})}],timeoutMs}));}
+    catch(error){
+      if(error.rpcError?.code!==-32000 || error.rpcError.message!=='MCP error -32000: Codex app tool request failed')throw error;
+      readPolling=true;
+      state.waitFallback={tool:'wait_threads',error:error.message,at:now()};checkpoint();
+    }
+  }
+  const detail=unpack(await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+  need(detail.thread?.id===binding.executorId,'Bound executor missing from fallback read');
+  return {polls:[{thread:detail.thread,...supervisorPollFromThread(detail)}]};
 }
 function contains(value, needle) {
   if (typeof value === 'string') {
@@ -43,7 +67,7 @@ function contains(value, needle) {
 }
 function checkSources() {
   need(hash(contractPath) === binding.contractSha256, 'Locked contract changed');
-  return validateContract(require('./contract-state.cjs').effective(run,binding));
+  return validateContract(require('./contract-state.cjs').effective(run,binding), {run, binding});
 }
 function lock() {
   need(!fs.existsSync(path.join(run,'contract-update.lock')),'Contract update is in progress');
@@ -63,6 +87,13 @@ function markSent(target, key) {
   checkpoint();
 }
 function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
+function assistantMarker(detail) {
+  for (const turn of detail.turns || []) {
+    const message=(turn.items || []).filter(item=>item.type==='agentMessage').at(-1);
+    if(message)return JSON.stringify([turn.id,message.id || null,require('node:crypto').createHash('sha256').update(message.text || '').digest('hex')]);
+  }
+  return null;
+}
 function localReceipt(target, key) {
   const sessions=path.join(process.env.CODEX_HOME || path.join(process.env.HOME,'.codex'),'sessions');
   let files=[];
@@ -73,8 +104,17 @@ function localReceipt(target, key) {
 async function reconcile(delivery) {
   for (let attempt = 0; attempt < 8; attempt++) {
     need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
-    const readback = await rpc('read_thread',{threadId:delivery.target,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000});
-    const confirmed = contains(readback, deliveryMarker(delivery.key)) || localReceipt(delivery.target,delivery.key);
+    // The local session transcript is the smallest and most reliable receipt on
+    // this host. Check it before asking read_thread for a potentially large turn;
+    // otherwise a tool-heavy executor turn can time out even though delivery was
+    // already durably recorded.
+    let confirmed = localReceipt(delivery.target,delivery.key);
+    if (!confirmed) {
+      const readback = await rpc('read_thread',{
+        threadId:delivery.target,turnLimit:2,includeOutputs:false,maxOutputCharsPerItem:4000
+      });
+      confirmed = contains(readback, deliveryMarker(delivery.key));
+    }
     save(path.join(run,'receipt-' + delivery.key + '.json'),{
       target:delivery.target,key:delivery.key,promptSha256:require('node:crypto').createHash('sha256').update(delivery.prompt).digest('hex'),
       sent:delivery.sent || null,confirmed,at:now()
@@ -121,10 +161,15 @@ function extractEvent(turn, message) {
     try { item = JSON.parse(text.slice(markerAt + marker.length).trim()); }
     catch { item = {kind:'protocol_error'}; }
   } else item = {kind:'unmarked_final'};
-  if (!item || !['submission','question','blocked','progress','unmarked_final'].includes(item.kind)) item = {kind:'protocol_error'};
+  if (!item || !['submission','question','blocked','progress','waiting','unmarked_final'].includes(item.kind)) item = {kind:'protocol_error'};
   if (item.kind === 'submission' && (!/^sha256:[a-f0-9]{64}$/.test(item.revision) || typeof item.manifest !== 'string')) item = {kind:'protocol_error'};
-  if (item.kind === 'progress' && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
-  return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,text:text.slice(0,8000),at:now()};
+  if (['progress','waiting'].includes(item.kind) && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
+  return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,
+    waitMinutes:Number.isFinite(item.waitMinutes)?item.waitMinutes:null,text,at:now()};
+}
+function waitingHasBlocker(text) {
+  const body=text.split('\n').filter(line=>!line.trim().startsWith('LONG_TASK_EVENT ')).join('\n');
+  return /(?:權限.{0,16}(?:審查|拒絕|阻擋)|(?:審查|核准).{0,16}(?:拒絕|阻擋)|(?:merge|push|release|deploy|合併|發版|發布).{0,40}(?:被擋|遭擋|阻塞|拒絕|blocked|denied|approval)|(?:需要|等待|等).{0,20}(?:Jay|使用者).{0,20}(?:決定|核准|授權)|(?:requires?|needs?|waiting for).{0,20}(?:user|Jay).{0,20}(?:approval|authorization|decision)|(?:待決|需要授權|授權或處置))/i.test(body);
 }
 async function exactFinal(turnId) {
   for (let attempt=0;attempt<3;attempt++) {
@@ -139,24 +184,11 @@ async function exactFinal(turnId) {
   throw Error('Completed executor turn has no exact readable final message: '+turnId);
 }
 function reviewPrompt(event) {
-  const shellQuote=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
-  const dispatch=event.kind==='dispatch_review'
-    ? '\n這是派工快照檢查，只是要求人工判斷，不代表應增加代理。先重讀目前快照，並核對平台代理 handle/狀態、依賴與可行性、工作區/瀏覽器/帳號/資料庫/測試環境衝突、實際驗收進度。執行對話仍是唯一 dispatcher；若問題已消失，不得送出舊指示。'
-    : '';
-  const progress=event.kind==='progress_review'
-    ? '\n這是監督自己的進度時鐘發出的查核，reasons 列原因，不代表工作必然異常。先執行 '+[process.execPath,path.join(__dirname,'supervise.cjs'),'brief',run].map(shellQuote).join(' ')+' 一次取得在途包速度、執行端最後幾段話、派工現況與最近決策，不逐檔探查；需要時再讀相關原始證據。'
-      +'overdue＝在途包扣掉電腦睡眠後達 AI 時程基準 1.5 倍；baseline_missing＝在途包沒有基準；process_stalled＝測試程序 15 分鐘沒產出且查不到還活著；repeat＝同一指令連續失敗 3 次；resource_underused＝派工快照宣告的真實資源有空位，卻有工作在等同一資源。這幾類若確有落後或重複，用 reply 給已授權範圍內的具體加速建議（拆包並行、只跑受影響測試、停止重試改換做法、先收回整合已完成成果、補基準或更新快照）；pace 裡執行端與監督算的基準差超過一半（mismatch）先請執行端說明依據；核對後進度正常就 observe，不傳訊、不打斷執行端。'
-      +'executor_blocked＝執行端指令 5 分鐘沒有結果、也沒有程序在跑，多半停在權限確認；machine_slept＝電腦睡眠 5 分鐘以上，整場停住。這兩類只有使用者能處理：用 observe，不傳訊給執行端，在本回合直接請使用者到執行對話處理，或接電源、不闔蓋，並把停擺時長記入決策帳。'
-      +'silence＝兩個對話、執行端子代理與在跑的測試程序全部靜止 15 分鐘；wait_changed＝已核對的等待條件變了。這兩類若進度證據不足，向執行端提出可回答的具體進度／阻塞問題；已有可行工作就直接指引推進，用 reply；只剩已核對且未變的等待才可 observe，附 wait:{kind:user_approval/external_result,conditions:[{path,sha256}],resumeAt:僅有既定期限才填}。'
-      +'每次都填 progressCheck:{evidence:[具定位的實際查核來源],finding:進度判斷與不確定性,guidance:給執行端的具體下一步}；reply 時 guidance 原文須出現在 reply。不得重問已提出的授權題或照貼上次催促，不要停止事件監看。'
-    : '';
-  return '長任務監督事件。這是已綁定的原執行對話；背景程式負責等待與傳訊，你這一回合只處理此事件，完成後正常結束即可。'
-    + '\n驗收契約：' + contractPath + '；工作紀錄：' + run + '；事件：' + JSON.stringify(event)
-    + '\n先以 supervise.cjs effective-contract RUN 讀有效契約、使用者授權更新與排除項；有 contractStateSha256 時必須原樣填入接受決策。\n請依原始條件自行核對候選版與真實證據，不採信執行者的 PASS 自述。'
-    + '以 ' + path.join(run,'decision-' + event.id + '.json') + ' 寫入 eventId、disposition（accept/reject/reply/needs_user/observe）、revision（accept 時）、results（accept 時每條含 id,status,method,expected,actual,evidence[{path,sha256}]）、reply（reject/reply 時）、reason（observe 時非空，可另列 pendingApprovals 字串陣列；observe 不送訊也不代表核准）。'
-    + '寫完執行 ' + [process.execPath,path.join(__dirname,'supervise.cjs'),'decision',run,path.join(run,'decision-' + event.id + '.json')].map(shellQuote).join(' ')
-    + '；只有檢查成功才可宣稱全部驗收通過。未通過要給具體退件。新商業取捨才向使用者確認。不要自行傳訊給執行對話，背景程式會精確送達並讀回。'+dispatch+progress;
+  // Preserve an unresolved old delivery byte-for-byte across upgrades.
+  if(state.inflight?.key==='review-'+event.id && state.inflight.target===binding.supervisorId)return state.inflight.prompt;
+  return require('./review-context.cjs').prompt(run,event);
 }
+
 async function changed(directory, alreadyChanged = () => false) {
   await new Promise(resolve => {
     let watcher, finished = false;
@@ -166,7 +198,7 @@ async function changed(directory, alreadyChanged = () => false) {
       clearTimeout(timer); clearInterval(poll);
       watcher?.close(); resolve();
     };
-    const timer = setTimeout(done,15000);
+    const timer = setTimeout(done,DECISION_POLL_MS);
     const poll = setInterval(()=>{if (alreadyChanged()||fs.existsSync(path.join(run,'STOP'))) done();},1000);
     try {
       watcher = fs.watch(directory,done);
@@ -177,20 +209,41 @@ async function changed(directory, alreadyChanged = () => false) {
 }
 async function pendingDecision() {
   const event = state.pending;
+  if (!(state.supervisorWake ||= {})[event.id]) {
+    const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
+    state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),wakeSentAt:null};checkpoint();
+  }
   await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
   const file = path.join(run,'decision-' + event.id + '.json');
-  if (!fs.existsSync(file)) {await changed(run,()=>fs.existsSync(file));return;}
+  const armed=state.supervisorWake[event.id];
+  if(!armed.deliveredAt){armed.deliveredAt=Date.now();checkpoint();}
+  if (!fs.existsSync(file)) {
+    await changed(run,()=>fs.existsSync(file));
+    const wake=state.supervisorWake[event.id];
+    if(!fs.existsSync(file)&&!fs.existsSync(path.join(run,'STOP'))&&!wake.wakeSentAt&&Date.now()-wake.deliveredAt>=SUPERVISOR_WAKE_MS){
+      const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
+      if(assistantMarker(detail)===wake.assistantMarker){
+        await sendAndRead(binding.supervisorId,
+          `監督喚醒補訊 ${event.id}：既有事件已送達，但尚未偵測到本對話的模型輸出。請處理既有 ${deliveryMarker('review-'+event.id)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
+          'wake-review-' + event.id);
+        wake.wakeSentAt=Date.now();checkpoint();
+      }else{wake.modelStartedAt=Date.now();checkpoint();}
+    }
+    return;
+  }
   const decision = validateDecision(binding,checkSources(),event,read(file));
   if(event.kind==='dispatch_review'){
     const preflight=stillCurrent(run,binding,state,event);checkpoint();
     if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
   }
   if(event.kind==='progress_review'){
-    const fresh=unpack(await rpc('wait_threads',{targets:[{threadId:binding.executorId,...(state.cursor?{afterCursor:state.cursor}:{})}],timeoutMs:0}));
+    const fresh=await waitExecutor(0);
     const poll=fresh.polls?.find(item=>item.thread?.id===binding.executorId);
     need(poll,'Bound executor missing from progress preflight');
     // Silence ends with new activity; overdue, blocked and the other clock reasons are meant for a busy executor.
-    if(fs.existsSync(path.join(run,'STOP'))||quietReview(event)&&activityMarker(poll)!==event.activityMarker){
+    const recoveredOverdue=event.reasons?.length===1 && event.reasons[0]==='overdue' &&
+      !clock.paceNow(run,binding,state).packages.some(item=>event.overdue?.includes(item.id)&&clock.overdueNeedsReview(item));
+    if(fs.existsSync(path.join(run,'STOP'))||recoveredOverdue||quietReview(event)&&activityMarker(poll)!==event.activityMarker){
       observeActivity(state,poll,binding);
       (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};
       state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;
@@ -237,9 +290,7 @@ async function watch() {
   const initialized = await client.request('initialize',{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'long-task-supervisor',version:'1.0'}});
   if (initialized.error) throw Error(JSON.stringify(initialized.error));
   client.notify('notifications/initialized');
-  const listed = await client.request('tools/list',{});
-  if (listed.error) throw Error(JSON.stringify(listed.error));
-  const available = new Set(listed.result.tools.map(tool => tool.name));
+  const available = await require('./mcp-client.cjs').listTools(client,meta);
   for (const name of ['wait_threads','read_thread','send_message_to_thread']) need(available.has(name),'Missing Codex App tool ' + name);
   const proof = await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500});
   need(contains(proof,binding.executorId),'Cannot read bound executor conversation');
@@ -268,10 +319,7 @@ async function watch() {
     const auditEvent=dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const started = Date.now();
-    const response = unpack(await rpc('wait_threads',{
-      targets:[{threadId:binding.executorId,...(state.cursor ? {afterCursor:state.cursor} : {})}],
-      timeoutMs:45000
-    }));
+    const response = await waitExecutor(45000);
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
     const supervisorDetail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
@@ -284,18 +332,33 @@ async function watch() {
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
     if (turn?.status === 'completed' && !state.seen.includes(turn.id)) {
+      if(state.progressWait)state.progressWait=null;
       const event = extractEvent(turn,await exactFinal(turn.id));
+      if(event.kind==='waiting'){
+        if(waitingHasBlocker(event.text))event.kind='blocked';
+        else if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';
+        else{
+          state.progressWait={event,deadline:Date.now()+event.waitMinutes*WAIT_MINUTE_MS};
+          state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
+        }
+      }
       if (event.kind === 'progress') {
         const repeated = state.lastProgressAction === event.nextAction ? (state.repeatedProgress || 0) + 1 : 1;
         state.lastProgressAction = event.nextAction;
         state.repeatedProgress = repeated;
-        if (repeated < 2) {
+        if (repeated < 2 && event.waitMinutes!==null) {
+          if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';
+          else{
+            state.progressWait={event,deadline:Date.now()+event.waitMinutes*WAIT_MINUTE_MS};
+            state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
+          }
+        } else if (repeated < 2) {
           await sendAndRead(binding.executorId,
             `長任務續接 ${event.id}：執行你剛才明列的下一步「${event.nextAction}」。沿用原契約及已完成工作；只在下一個真實事件送驗或回報，不重述整份 prompt。`,
             'continue-' + event.id);
           state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
         }
-        event.kind = 'stalled';
+        if(event.kind==='progress')event.kind = 'stalled';
       }
       state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
       state.pending = event;
@@ -303,6 +366,14 @@ async function watch() {
       await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
     } else {
       state.cursor=nextCursor;
+      if(state.progressWait&&Date.now()>=state.progressWait.deadline){
+        const event={...state.progressWait.event,kind:'continue',declaredAt:state.progressWait.event.at,
+          dueAt:new Date(state.progressWait.deadline).toISOString(),at:now()};
+        state.progressWait=null;state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
+        state.pending=event;state.phase='awaiting_decision';checkpoint();
+        await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
+        continue;
+      }
       // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
       // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.
       const hadCheckedWait=Boolean(state.checkedWait),found=clock.check(run,binding,state),silent=progressDue(state);
@@ -316,7 +387,7 @@ async function watch() {
         continue;
       }
       checkpoint();
-      if (Date.now() - started < 1000) await sleep(15000);
+      if (readPolling || Date.now() - started < 1000) await sleep(WATCH_IDLE_SLEEP_MS);
     }
   }
   if (state.phase !== 'accepted') {state.phase = 'stopped';state.stoppedAt = now();checkpoint();}
@@ -324,11 +395,13 @@ async function watch() {
 (async () => {
   try {await watch();}
   catch (error) {
-    state.phase = fs.existsSync(path.join(run,'STOP')) ? 'stopped' : error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
-    state.error = {message:error.message,at:now()};
-    checkpoint();
-    console.error(error.stack || error);
-    process.exitCode = 1;
+    if(fs.existsSync(path.join(run,'STOP'))){
+      state.phase='stopped';state.stoppedAt=now();delete state.error;checkpoint();
+    }else{
+      state.phase = error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
+      state.error = {message:error.message,at:now()};checkpoint();
+      console.error(error.stack || error);process.exitCode = 1;
+    }
   } finally {
     state.endedAt = now();checkpoint();
     if (ownsLock) {

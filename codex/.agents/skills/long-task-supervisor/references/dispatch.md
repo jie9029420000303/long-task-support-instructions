@@ -16,6 +16,8 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 
 新 run 同時保存[逐條驗收與最新完成案例](acceptance.md)；每筆完成即寫入，歷史由工具持久化，不塞進當前快照。
 
+每次 `dispatch.cjs write` 另在 run 目錄附加一行 `dispatch-history.jsonl`（時間、activity、就緒／在途／受阻包與未通過條件），供事後量「有工作卻空等」的時間。
+
 `dispatch.json` 只保存當前工作、未處理回報、直接依賴及目前返工證據，不複製整段對話或全部歷史。不能只更新時間而保留過期代理狀態；正常更新不另外傳訊、不啟動監督模型。
 
 ## 格式
