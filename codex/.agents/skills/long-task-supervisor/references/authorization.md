@@ -14,6 +14,31 @@
 - 鎖定的原驗收契約不改寫。後續授權另存來源快照及雜湊，登記於決策帳／狀態檔，並以精確跨對話訊息交給原執行主線；執行端讀回後，同步自己的授權表與待決清單。不得把監督提案當使用者授權。
 - 重新盤點已解鎖的工作：撤下已被新授權解決的舊核准題，按真實依賴執行或補派。授權只限使用者指明的任務／專案；不自行擴到其他帳號、資料、專案或業務用途。
 
+## 跨對話與子代理承接
+
+派工時附最小授權交接：使用者逐字原話、原始對話／訊息定位、操作、目標資源／資料目的地、允許資料範圍、條件及禁令。使用 `supervise.cjs authorization RUN` 取得有效授權與補充的來源位置；只把本包相關的來源交給執行者，不反覆貼全部契約。雜湊只證明檔案未變，不證明文字確實來自人類。
+
+接收者先查原始使用者來源。read_thread 的 includeOutputs:false 仍包含其他歷史項目；呼叫與篩選須放在同一次工具編排內，完成篩選才輸出，不先 text(raw) 或輸出整個 Promise 結果。原文確實涵蓋目前操作、目的地與資料，且無後續撤回時，就承接同一授權；不因來自另一對話或上層轉派而要求本人在每個子對話重說。代理說「已授權」不足以證明；來源不明時請原監督提供精確來源，不自行擴權。已核對的來源與範圍保存於工作包，只有操作、來源或限制變更才重核。
+
+需要查原始對話時，沿用下列最小擷取方式（`wantedMessageIds` 由交接來源提供）；本頁沒找到就以 `page.nextCursor` 讀下一頁，只輸出匹配的原始使用者訊息與分頁資訊。找不到、訊息截斷或來源不是 userMessage 時不以代理摘要替代；回原來源補齊後再判斷。
+
+```js
+const raw = await tools.mcp__codex_app__read_thread({
+  threadId, turnLimit: 10, includeOutputs: false,
+  ...(cursor ? {cursor} : {})
+});
+if (raw.isError) throw new Error(JSON.stringify(raw));
+const data = JSON.parse(raw.content.find(x => x.type === 'text').text);
+const selected = (data.turns || []).flatMap(turn => (turn.items || [])
+  .filter(item => item.type === 'userMessage' && wantedMessageIds.includes(item.id))
+  .map(item => ({threadId: data.thread.id, turnId: turn.id, messageId: item.id,
+    text: (item.content || []).filter(part => part.type === 'text')
+      .map(part => part.text).join('\n')})));
+text({selected, page: data.page});
+```
+
+區分「模型尚未核對來源」與「實際工具拒絕」。前者完成來源核對後依已有授權執行；後者保存工具名稱、拒絕原文、受阻操作與已核對來源，一次交回原監督處理。不能自行聲稱服務端、額度或權限問題，也不重試相同被拒 payload、拆掉必要內容假裝完成，或換工具迴避拒絕。只有實際工具要求且原授權無法滿足的確認才交使用者，明說限制來源；不承諾技能可以改變平台審查。
+
 ## Git 的持續授權
 
 若使用者明確授權「本專案 Git 除刪除外直接做，保留每步紀錄與可回復版本」，原執行主線就串連該範圍內所需的 commit、push、合併、tag、Release 等步驟，不再逐次詢問。每步保存操作前後分支／提交、目標、測試與結果；可能改寫歷史前先保留可用的回復參照及未提交成果。不得使用刪除檔案、資料、分支或 tag 的操作，也不為清理而刪 worktree；費用及其他明示禁令照舊。

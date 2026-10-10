@@ -11,6 +11,9 @@ const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_RATIO = 1.5, REPEAT_FAILURES 
 // A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
 // a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
 const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
+// An unreasonably long baseline would keep a package from ever counting as overdue (Jay 2026-10-11): one
+// question when an hour passes with no real executor event, counted again from each new event.
+const NO_EVENT_REVIEW_MS = 60 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -18,7 +21,23 @@ function inside(file, root) {
   const relative = path.relative(root, file);
   return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
 }
-function validateContract(contract) {
+function relocatedSource(run, binding, source) {
+  if (!run || !binding) return false;
+  const file = path.join(run, 'source-relocations.json');
+  if (!fs.existsSync(file)) return false;
+  const manifest = read(file);
+  need(manifest?.schema === 1 && manifest.contractSha256 === binding.contractSha256 && Array.isArray(manifest.entries), 'Invalid source relocation manifest');
+  const matches = manifest.entries.filter(entry => entry?.originalPath === source.path);
+  need(matches.length <= 1, 'Duplicate source relocation');
+  if (!matches.length) return false;
+  const entry = matches[0];
+  need(entry.sha256 === source.sha256 && path.isAbsolute(entry.relocatedPath) &&
+    binding.allowedRoots.some(root => inside(entry.relocatedPath, root)) &&
+    fs.existsSync(entry.relocatedPath) && hash(entry.relocatedPath) === source.sha256,
+    'Relocated acceptance source missing, outside allowed roots or changed');
+  return true;
+}
+function validateContract(contract, context = {}) {
   need(contract && typeof contract === 'object', 'Missing acceptance contract');
   need(typeof contract.goal === 'string' && contract.goal.trim(), 'Missing original goal');
   need(typeof contract.authorization === 'string' && contract.authorization.trim(), 'Missing original authorization');
@@ -33,7 +52,9 @@ function validateContract(contract) {
   }
   need(Array.isArray(contract.sources) && contract.sources.length > 0, 'Missing locked source');
   for (const source of contract.sources) {
-    need(path.isAbsolute(source.path) && fs.existsSync(source.path) && hash(source.path) === source.sha256, 'Acceptance source missing or changed');
+    need(path.isAbsolute(source.path), 'Acceptance source path must be absolute');
+    const originalMatches = fs.existsSync(source.path) && hash(source.path) === source.sha256;
+    need(originalMatches || relocatedSource(context.run, context.binding, source), 'Acceptance source missing or changed');
   }
   return contract;
 }
@@ -100,4 +121,4 @@ function validateDecision(config, contract, event, decision) {
   return decision;
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, quietReview };
+  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, quietReview };

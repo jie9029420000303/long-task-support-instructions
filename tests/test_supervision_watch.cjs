@@ -86,7 +86,8 @@ test('Codex observe sends no executor reply, preserves approval, and continues t
     assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
     fs.writeFileSync(secondTurnGate,'go\n');
     child=start();child.stderr.on('data',chunk=>stderr+=chunk.toString());
-    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id==='executor-turn-2');
+    // Pending is persisted before delivery; assert sends only after the receipt checkpoint.
+    await until(()=>{const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));return state.pending?.id==='executor-turn-2'&&state.messages.length===2;});
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.pending.kind,'submission');
     assert.equal(state.resolved['executor-turn-1'].decision.disposition,'observe');

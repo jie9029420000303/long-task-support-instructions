@@ -60,4 +60,17 @@ async function close() {
 }
 return { request, notify, close, pid: child.pid };
 }
-module.exports = { createClient };
+// Follow MCP pagination and pass the calling context on discovery as well as calls.
+async function listTools(client,meta={}) {
+  const names=new Set(),seen=new Set();let cursor;
+  do {
+    const response=await client.request('tools/list',{...(cursor?{cursor}:{}),_meta:meta});
+    if(response.error)throw Error(JSON.stringify(response.error));
+    if(!Array.isArray(response.result?.tools))throw Error('Invalid Codex App tools/list response');
+    for(const tool of response.result.tools)names.add(tool.name);
+    cursor=response.result.nextCursor;
+    if(cursor){if(seen.has(cursor))throw Error('Repeated Codex App tools cursor');seen.add(cursor);}
+  }while(cursor);
+  return names;
+}
+module.exports = { createClient, listTools };
