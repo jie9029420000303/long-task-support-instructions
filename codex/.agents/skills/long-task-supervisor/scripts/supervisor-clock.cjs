@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS}=require('./guard.cjs');
+const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS}=require('./guard.cjs');
 const now=()=>new Date().toISOString();
 // The executor's own rollout holds its tool calls and command results; the App tools only show messages.
 function executorLog(state,binding){
@@ -24,10 +24,23 @@ function commandsOf(payload){
   }
   return [];
 }
+// Polling a running job or waiting on a tool is not work: a main line that only polls one background job is idle.
+function pollOnly(payload){
+  if(payload.type==='function_call'){
+    if(['wait','wait_agent'].includes(payload.name))return true;
+    if(payload.name==='write_stdin'){try{return !JSON.parse(payload.arguments||'{}').chars;}catch{return false;}}
+    return false;
+  }
+  const input=typeof payload.input==='string'?payload.input:'';
+  return payload.type==='custom_tool_call'&&/write_stdin|custom_wait/.test(input)&&!/exec_command|apply_patch|chars\s*:\s*["'`][^"'`]/.test(input);
+}
 // Count failing commands the executor repeats; three identical failures mean it is retrying instead of changing
 // approach. Calls still open count from any time (a turn's end closes them); failures count from the binding on.
 function trackTools(state,row,boundAt=0){
   const payload=row.payload||{},at=row.timestamp||now();
+  if(row.type==='response_item'&&['custom_tool_call','function_call','message','reasoning'].includes(payload.type)&&!pollOnly(payload)){
+    const workAt=Date.parse(at);if(Number.isFinite(workAt))state.lastExecutorWorkAt=Math.max(state.lastExecutorWorkAt||0,workAt);
+  }
   if(row.type==='response_item'&&['custom_tool_call','function_call'].includes(payload.type)){
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
     if(commands.length)(state.openTools||={})[payload.call_id]={commands,at};
@@ -124,8 +137,15 @@ function check(run,binding,state){
   for(const [,item] of repeated)item.announced=now();
   const lastEvent=state.lastRealEventAt||Date.parse(binding.createdAt)||Date.now(),quietEvent=awakeSince(state,lastEvent)>=NO_EVENT_REVIEW_MS;
   const noEventHour=quietEvent&&once('no_event_hour:'+lastEvent);
+  // A background job running alone is still idle capacity: only the executor's own turns and its subagents count.
+  const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0)||Date.parse(binding.createdAt)||Date.now();
+  const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
+  const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
+  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length);
+  const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round(awakeSince(state,idleSince)/60000),openCriteria,readyPackages}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
-    ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[])];
+    ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
+    ...(idleWork?['idle_with_work']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
@@ -133,11 +153,12 @@ function check(run,binding,state){
       processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
       problems:reasons,open:[...paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
         ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
-        ...stuck.map(item=>'executor_blocked:'+item.command.slice(0,60)),...(quietEvent?['no_event_hour']:[])]})+'\n');
+        ...stuck.map(item=>'executor_blocked:'+item.command.slice(0,60)),...(quietEvent?['no_event_hour']:[]),...(idle?['idle_with_work']:[])]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
-    ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{})};
+    ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
+    ...(idleWork?{idleWithWork:idleWork}:{})};
 }
-module.exports={overdueNeedsReview,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf};
+module.exports={overdueNeedsReview,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly};
