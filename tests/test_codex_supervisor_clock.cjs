@@ -343,3 +343,44 @@ test('an overdue package whose process is still running and a quiet log does not
     assert.ok(read(path.join(f.run,'clock.jsonl')).open.includes('overdue:WP-IMPORT'));
   }finally{try{process.kill(-worker.pid);}catch{}await f.stop();}
 });
+
+// Claude adapter parity (Jay 2026-10-11): a main line that only polls one background job while criteria are open
+// leaves every subagent seat empty; the GDB run spent 10.2 of 23.7 hours like that. Five quiet minutes wake once.
+function poll(f,minutes){line(f.executorLog,{timestamp:minutesAgo(minutes),type:'response_item',payload:{type:'function_call',name:'write_stdin',call_id:'p'+minutes,arguments:JSON.stringify({session_id:7,chars:''})}});}
+function work(f,minutes){line(f.executorLog,{timestamp:minutesAgo(minutes),type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'w'+minutes,arguments:JSON.stringify({cmd:'npm test'})}});}
+test('a main line only polling a background job with criteria open wakes the supervisor once to push dispatch',async()=>{
+  const f=fixture({createdMinutesAgo:10,quietMinutes:8});
+  work(f,8);poll(f,3);poll(f,1);
+  save(path.join(f.run,'dispatch.json'),{acceptance:{items:[{id:'A1',status:'PASS'},{id:'A2',status:'PENDING'}]},packages:{ready:[{id:'WP-NEXT'}],inFlight:[]}});
+  f.start();
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    const event=pending(f);
+    assert.deepEqual(event.reasons,['idle_with_work']);
+    assert.deepEqual(event.idleWithWork.openCriteria,['A2']);assert.deepEqual(event.idleWithWork.readyPackages,['WP-NEXT']);
+    assert.ok(event.idleWithWork.idleMinutes>=5,'polling the job does not count as work');
+    assert.equal(validateDecision(f.binding,read(path.join(f.run,'contract.json')),event,{eventId:event.id,disposition:'observe',reason:'Only user approval left',
+      progressCheck:{evidence:['brief'],finding:'waiting on approval'}}).disposition,'observe','an idle-work review is not a silence review');
+  }finally{await f.stop();}
+});
+
+test('an idle executor with every criterion passed and nothing ready is left alone',async()=>{
+  const f=fixture({createdMinutesAgo:10,quietMinutes:8});
+  save(path.join(f.run,'dispatch.json'),{acceptance:{items:[{id:'A1',status:'PASS'}]},packages:{ready:[],inFlight:[]}});
+  f.start();
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    assert.equal(pending(f),null);assert.equal(sends(f).length,0);
+  }finally{await f.stop();}
+});
+
+test('an executor running real commands in one long turn is not idle even without new messages',async()=>{
+  const f=fixture({createdMinutesAgo:10,quietMinutes:8});
+  work(f,0.5);
+  save(path.join(f.run,'dispatch.json'),{acceptance:{items:[{id:'A1',status:'PENDING'}]},packages:{ready:[],inFlight:[]}});
+  f.start();
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    assert.equal(pending(f),null);assert.ok(!read(path.join(f.run,'clock.jsonl')).open.includes('idle_with_work'));
+  }finally{await f.stop();}
+});

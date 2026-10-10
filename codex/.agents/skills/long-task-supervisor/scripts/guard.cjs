@@ -14,6 +14,9 @@ const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
 // An unreasonably long baseline would keep a package from ever counting as overdue (Jay 2026-10-11): one
 // question when an hour passes with no real executor event, counted again from each new event.
 const NO_EVENT_REVIEW_MS = 60 * 60 * 1000;
+// Executor and subagents quiet for 5 minutes while criteria are open or packages are ready: work waits on nobody,
+// e.g. the main line sits on one background job (2026-10-07 GDB: 10.2 of 23.7 hours idle, no subagent).
+const IDLE_WORK_MS = 5 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -121,4 +124,4 @@ function validateDecision(config, contract, event, decision) {
   return decision;
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, quietReview };
+  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS, quietReview };

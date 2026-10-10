@@ -92,6 +92,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 - `process_stalled`：在跑的測試程序 15 分鐘沒有產出，而且查不到它還活著。例如故障演練依設計等待租約時，程序還在就不算停住。
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有就緒或受阻的工作在等同一個資源；監督評估能否並行。
 - `repeat`：綁定後同一條指令連續失敗 3 次。處理過一次進度查核後重新計數。
+- `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
 
 處理 `no_event_hour`：先用 brief 的 pace 以同一公式重算各在途包基準，對照執行端填的時長與實際輸出。基準明顯過長、產出與進度不符或證據不足時，reply 一則具體問題：請執行端回報目前完成到哪、剩下什麼，並以實測速度重估在途包時長、更新派工快照；只剩已核對的使用者核准或外部結果等待時用 observe。這類事件不是 silence，observe 不需 wait。
 

@@ -383,7 +383,7 @@ async function watch() {
         const event=progressEvent(state,Date.now(),{reasons,pace:found?.pace||clock.paceNow(run,binding,state),overdue:found?.overdue||[],
           baselineMissing:found?.baselineMissing||[],processStalled:found?.processStalled||[],executorBlocked:found?.executorBlocked||[],
           machineSlept:found?.machineSlept||[],resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[],
-          ...(found?.noEventHour?{noEventHour:found.noEventHour}:{})});
+          ...(found?.noEventHour?{noEventHour:found.noEventHour}:{}),...(found?.idleWithWork?{idleWithWork:found.idleWithWork}:{})});
         state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
         continue;
