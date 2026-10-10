@@ -332,6 +332,7 @@ async function watch() {
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
     if (turn?.status === 'completed' && !state.seen.includes(turn.id)) {
+      state.lastRealEventAt=Date.now();
       if(state.progressWait)state.progressWait=null;
       const event = extractEvent(turn,await exactFinal(turn.id));
       if(event.kind==='waiting'){
@@ -381,7 +382,8 @@ async function watch() {
         const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(found?.reasons||[])];
         const event=progressEvent(state,Date.now(),{reasons,pace:found?.pace||clock.paceNow(run,binding,state),overdue:found?.overdue||[],
           baselineMissing:found?.baselineMissing||[],processStalled:found?.processStalled||[],executorBlocked:found?.executorBlocked||[],
-          machineSlept:found?.machineSlept||[],resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[]});
+          machineSlept:found?.machineSlept||[],resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[],
+          ...(found?.noEventHour?{noEventHour:found.noEventHour}:{})});
         state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
         continue;

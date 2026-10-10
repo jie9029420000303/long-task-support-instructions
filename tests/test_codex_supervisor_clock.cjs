@@ -299,3 +299,47 @@ test('fallback keeps checking active work locally without waking a model',async(
     assert.equal(state.waitFallback.tool,'wait_threads');
   }finally{await f.stop();}
 });
+
+// Jay 2026-10-11: an executor can report a baseline so long that a stuck package never counts as overdue. An hour
+// with no real executor event is asked about once, even while subagents look busy.
+test('an hour without a real executor event wakes the supervisor once even when an inflated baseline hides the stall',async()=>{
+  const f=fixture({createdMinutesAgo:70});
+  subagent(f.home,'executor-qa','/root/inflated',{turns:[{start:minutesAgo(65),tokens:10},{start:minutesAgo(0.5),tokens:10}]});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-INFLATED',handle:'/root/inflated',evidence:['wp'],baseline:{minutes:600,startedAt:minutesAgo(65),basis:'executor estimate'}}]}});
+  f.start();
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    const event=pending(f);
+    assert.deepEqual(event.reasons,['no_event_hour'],'the inflated package is not overdue, so only the hour catches it');
+    assert.ok(event.noEventHour.awakeMinutes>=60);
+    assert.equal(read(f.statePath).clockAnnounced['no_event_hour:'+Date.parse(f.binding.createdAt)]!==undefined,true,'one question per quiet stretch');
+    assert.equal(validateDecision(f.binding,read(path.join(f.run,'contract.json')),event,{eventId:event.id,disposition:'observe',reason:'Asked and on pace',
+      progressCheck:{evidence:['brief'],finding:'baseline reviewed'}}).disposition,'observe','an hourly check is not a silence review and needs no checked wait');
+  }finally{await f.stop();}
+});
+
+test('a real executor event restarts the hour, so a run that keeps reporting is never asked',async()=>{
+  const f=fixture({createdMinutesAgo:70}),state=read(f.statePath);
+  save(f.statePath,{...state,lastRealEventAt:Date.now()-10*60000});
+  f.start();
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    assert.equal(pending(f),null);assert.equal(sends(f).length,0);
+  }finally{await f.stop();}
+});
+
+test('an overdue package whose process is still running and a quiet log does not wake the supervisor',async()=>{
+  const f=fixture({createdMinutesAgo:40}),{spawn:start}=require('node:child_process');
+  const worker=start('sleep',['30'],{detached:true,stdio:'ignore'});
+  const resources=path.join(f.run,'resources'),evidence=path.join(resources,'import.log');
+  fs.mkdirSync(resources);fs.writeFileSync(evidence,'started\n');
+  const old=(Date.now()-20*60000)/1000;fs.utimesSync(evidence,old,old);
+  save(path.join(f.run,'resources.json'),{resources:[{id:'import',pgid:worker.pid}]});
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-IMPORT',handle:'resource:import',evidence:[evidence],baseline:{minutes:10,startedAt:minutesAgo(30),basis:'measured import'}}]}});
+  f.start();
+  try{
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    assert.equal(pending(f),null,'running work past its baseline is recorded, not interrupted');
+    assert.ok(read(path.join(f.run,'clock.jsonl')).open.includes('overdue:WP-IMPORT'));
+  }finally{try{process.kill(-worker.pid);}catch{}await f.stop();}
+});
