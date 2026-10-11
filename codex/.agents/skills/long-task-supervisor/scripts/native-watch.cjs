@@ -113,6 +113,19 @@ function localReceipt(target, key) {
   if(!result.files)state.receiptLookup={target,key,files:0,note:'No local rollout for this thread; confirming through read_thread',at:now()};
   return result.found;
 }
+// A message sent while the target runs a turn is queued, and an interrupted turn drops it (2026-10-11 GDB: an event
+// sent at 22:07 never reached the supervisor and the watcher restarted every 30 seconds for half an hour). Resend
+// once, only with proof it was not taken in: the target has local rollouts, it is idle, a turn finished after the
+// send, and no segment holds the delivery marker. Without that proof the delivery stays uncertain as before.
+async function provenLost(delivery) {
+  if (delivery.resentAt) return false;
+  const pace=require('./pace.cjs');
+  if (!pace.sessionFiles(delivery.target).length) return false;
+  const detail=unpack(await rpc('read_thread',{threadId:delivery.target,turnLimit:3,includeOutputs:false,maxOutputCharsPerItem:500}));
+  const sentAt=Date.parse(delivery.at)/1000;
+  if (detail.thread?.status?.type!=='idle' || !(detail.turns||[]).some(turn=>Number(turn.completedAt)>sentAt)) return false;
+  return !pace.markerIn(delivery.target,deliveryMarker(delivery.key)).found;
+}
 async function reconcile(delivery) {
   for (let attempt = 0; attempt < 8; attempt++) {
     need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
@@ -132,7 +145,15 @@ async function reconcile(delivery) {
       sent:delivery.sent || null,confirmed,at:now()
     });
     if (confirmed) { markSent(delivery.target, delivery.key); return; }
-    await sleep(2000);
+    await sleep(Number(process.env.LONG_TASK_RECEIPT_RETRY_MS)||2000);
+  }
+  if (await provenLost(delivery)) {
+    (state.lostDeliveries ||= []).push({target:delivery.target,key:delivery.key,sentAt:delivery.at,resentAt:now()});
+    delivery.resentAt = now();
+    delivery.sent = await rpc('send_message_to_thread',{threadId:delivery.target,prompt:deliveryMarker(delivery.key)+'\n'+delivery.prompt});
+    delivery.at = now(); delivery.phase = 'resent-awaiting-readback';
+    checkpoint();
+    return reconcile(delivery);
   }
   throw Error('Delivery uncertain: ' + delivery.key);
 }

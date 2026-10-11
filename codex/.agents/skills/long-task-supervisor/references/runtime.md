@@ -113,7 +113,7 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 
 ### 延遲收件恢復
 
-App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；該 delivery 不再送第二次。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
+App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；該 delivery 預設不再送第二次。唯一例外是能證明遺失：目標對話在本機有紀錄檔、目前閒置、送出後已有回合結束，所有紀錄段落卻都沒有該送達標記（例如訊息排在進行中的回合後面，該回合被中斷而丟失）。這時重送一次並記入 `lostDeliveries`；重送後仍對不到，或缺任何一項證據，照舊停在 needs_reconcile。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
 
 ## 原契約、使用者修訂與舊 run 接入
 

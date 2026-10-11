@@ -266,3 +266,29 @@ test('Jay counts as online for 10 minutes after typing in the supervisor chat',(
   observeSupervisorInput(state,{turns:[{id:'t2',startedAt:startedAt+60,items:[{type:'userMessage',id:'d1',text:'LONG_TASK_DELIVERY:review-x\nevent'}]}]});
   assert.equal(state.lastUserInputAt,startedAt*1000,'a watcher delivery is not Jay typing');
 });
+
+// 2026-10-11 GDB: an event sent at 22:07 was queued behind a running supervisor turn, that turn was interrupted and
+// the message was dropped. The watcher could only say "uncertain" and restarted every 30 seconds for half an hour.
+test('a delivery proven lost is resent once; without a local rollout it stays uncertain and nothing is resent',async()=>{
+  const lost=fixture({settings:fullAccess,mock:{supervisorIdle:true}}),unknown=fixture({settings:fullAccess,mock:{supervisorIdle:true}});
+  for(const f of [lost,unknown]){
+    const state=read(f.statePath);
+    state.phase='needs_reconcile';state.inflight={target:f.binding.supervisorId,prompt:'Review event E1',key:'review-lost',at:minutesAgo(5),phase:'sent-awaiting-readback',sent:{}};
+    save(f.statePath,state);f.env.LONG_TASK_RECEIPT_RETRY_MS='20';
+  }
+  // Only the lost case has the supervisor's own rollout on this host, with later work but no marker.
+  const supervisorLog=path.join(today(lost.home),'rollout-t-supervisor-qa.jsonl');
+  line(supervisorLog,{timestamp:minutesAgo(10),type:'session_meta',payload:{id:'supervisor-qa',session_id:'supervisor-qa'}});
+  line(supervisorLog,{timestamp:minutesAgo(1),type:'event_msg',payload:{type:'task_complete'}});
+  lost.start();const unknownChild=unknown.start(),unknownExit=new Promise(resolve=>unknownChild.once('exit',resolve));
+  try{
+    await until(()=>read(lost.statePath).messages.some(item=>item.key==='review-lost'));
+    const state=read(lost.statePath);
+    assert.equal(lost.calls().length,1,'resent exactly once');
+    assert.match(lost.calls()[0].prompt,/^LONG_TASK_DELIVERY:review-lost\nReview event E1$/);
+    assert.equal(state.inflight,null);assert.equal(state.lostDeliveries[0].key,'review-lost');
+    await unknownExit;
+    assert.equal(read(unknown.statePath).phase,'needs_reconcile','no proof of loss keeps the delivery uncertain');
+    assert.equal(unknown.calls().length,0,'nothing is sent a second time without proof');
+  }finally{await lost.stop();await unknown.stop();}
+});
