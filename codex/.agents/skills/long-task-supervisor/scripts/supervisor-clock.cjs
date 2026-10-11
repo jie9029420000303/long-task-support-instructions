@@ -39,6 +39,17 @@ function pollOnly(payload){
 }
 // Count failing commands the executor repeats; three identical failures mean it is retrying instead of changing
 // approach. Calls still open count from any time (a turn's end closes them); failures count from the binding on.
+// What a call works on, for telling a new blocked item from another refusal of the same one: the first program and
+// its subcommand (cd/export prefixes skipped), or the tool name when the call runs no shell command.
+function workItem(payload){
+  for(const command of commandsOf(payload))for(const part of command.split(/&&|\|\||;|\|/)){
+    const words=part.trim().split(/\s+/).filter(word=>word&&!/^-/.test(word)&&!/^[A-Z_]+=/.test(word));
+    if(!words.length||['cd','export','set','source','.'].includes(words[0]))continue;
+    return words.slice(0,2).map(word=>word.split('/').pop()).join(' ').slice(0,60);
+  }
+  const input=typeof payload.input==='string'?payload.input:'';
+  return /tools\.(?!exec_command\b)([A-Za-z_]+)/.exec(input)?.[1]||payload.name||'unknown';
+}
 function trackTools(state,row,boundAt=0){
   const payload=row.payload||{},at=row.timestamp||now();
   // The executor's permission mode and model, as each turn applies them. Under "auto review" the platform reviewer
@@ -50,16 +61,22 @@ function trackTools(state,row,boundAt=0){
     effort:applied.effort||state.executorSettings?.effort||null,at};
   if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type)){
     const output=typeof payload.output==='string'?payload.output:JSON.stringify(payload.output||'');
-    if(/rejected due to unacceptable risk/i.test(output)&&!(state.reviewRejections||[]).some(item=>item.callId===payload.call_id)){
+    // A real refusal carries the reviewer's reason or the denial notice; output that merely quotes the phrase
+    // (2026-10-11 GDB: cat of the skill notes, git log) does not.
+    const refused=/Auto-review denied/i.test(output)||/rejected due to unacceptable risk/i.test(output)&&/Reason:/.test(output);
+    if(refused&&!(state.reviewRejections||[]).some(item=>item.callId===payload.call_id)){
       const reason=/Reason:\s*([\s\S]{0,400}?)(?:\\n|\n|The agent must|$)/.exec(output)?.[1]||output.slice(0,300);
-      (state.reviewRejections||=[]).push({callId:payload.call_id,at,reason:reason.replace(/\\+"?/g,'').trim()});
+      (state.reviewRejections||=[]).push({callId:payload.call_id,at,item:state.callItems?.[payload.call_id]||'unknown',reason:reason.replace(/\\+"?/g,'').trim()});
       if(state.reviewRejections.length>10)state.reviewRejections.splice(0,state.reviewRejections.length-10);
+      state.rejectionCount=(state.rejectionCount||0)+1;
     }
   }
   if(row.type==='response_item'&&['custom_tool_call','function_call','message','reasoning'].includes(payload.type)&&!pollOnly(payload)){
     const workAt=Date.parse(at);if(Number.isFinite(workAt))state.lastExecutorWorkAt=Math.max(state.lastExecutorWorkAt||0,workAt);
   }
   if(row.type==='response_item'&&['custom_tool_call','function_call'].includes(payload.type)){
+    const items=state.callItems||={};items[payload.call_id]=workItem(payload);
+    const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
     if(commands.length)(state.openTools||={})[payload.call_id]={commands,at};
   }else if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type))delete state.openTools?.[payload.call_id];
@@ -193,10 +210,12 @@ function check(run,binding,state){
       if(sent.misses>=2)state.instruction=null;
     }
   }
-  // Permission mode: tell the supervisor once while the executor runs under auto review, again on each new
-  // refusal, and once more when Jay switches it to full access so blocked work resumes without anyone asking.
+  // Permission mode: tell the supervisor once while the executor runs under auto review, again only when a refusal
+  // blocks a work item not refused before, and once more when Jay switches it to full access so blocked work resumes
+  // without anyone asking. Repeat refusals of the same item are kept for the dashboard (2026-10-11 GDB: four wakes in
+  // 100 minutes, each answered "still waiting for the switch").
   const settings=state.executorSettings,autoReview=Boolean(settings?.approvalPolicy&&settings.approvalPolicy!=='never');
-  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId));
+  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId)&&once('rejected-item:'+(item.item||item.callId)));
   let permission=null,permissionChanged=null;
   if(autoReview&&(once('permission:'+settings.approvalPolicy+':'+settings.reviewer)||rejections.length)){
     permission={approvalPolicy:settings.approvalPolicy,reviewer:settings.reviewer,since:settings.at,newRejections:rejections,title:state.threadTitles?.executor||null};
