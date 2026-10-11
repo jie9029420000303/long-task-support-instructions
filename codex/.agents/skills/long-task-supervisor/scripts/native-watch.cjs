@@ -103,12 +103,12 @@ function assistantMarker(detail) {
   }
   return null;
 }
+// Every segment of the target thread counts: after compaction a delivery can sit in an earlier or later file.
+// No local file is not a receipt failure; reconcile then reads the thread through the App instead.
 function localReceipt(target, key) {
-  const sessions=path.join(process.env.CODEX_HOME || path.join(process.env.HOME,'.codex'),'sessions');
-  let files=[];
-  try {files=execFileSync('rg',['--files','--hidden','--glob','*'+target+'.jsonl',sessions],{encoding:'utf8',timeout:10000}).trim().split('\n').filter(Boolean);} catch {return false;}
-  if (files.length!==1) return false;
-  try {execFileSync('rg',['--quiet','--fixed-strings',deliveryMarker(key),files[0]],{timeout:10000});return true;} catch {return false;}
+  const result=require('./pace.cjs').markerIn(target,deliveryMarker(key));
+  if(!result.files)state.receiptLookup={target,key,files:0,note:'No local rollout for this thread; confirming through read_thread',at:now()};
+  return result.found;
 }
 async function reconcile(delivery) {
   for (let attempt = 0; attempt < 8; attempt++) {

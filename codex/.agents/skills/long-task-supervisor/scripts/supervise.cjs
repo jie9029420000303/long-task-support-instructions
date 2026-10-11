@@ -22,10 +22,9 @@ function load() {
 }
 function currentTurn(threadId) {
   if (process.env.CODEX_TURN_ID) return process.env.CODEX_TURN_ID;
-  const sessions = path.join(process.env.CODEX_HOME || path.join(process.env.HOME, '.codex'), 'sessions');
-  const files = execFileSync('rg', ['--files', '--hidden', '--glob', '*' + threadId + '.jsonl', sessions], {encoding:'utf8', timeout:10000}).trim().split('\n').filter(Boolean);
-  need(files.length === 1, 'Cannot identify exact supervisor session log');
-  const starts = fs.readFileSync(files[0], 'utf8').split('\n').filter(Boolean).map(line => {
+  const file = pace.sessionFile(threadId);
+  need(file, 'Cannot find the supervisor session log for ' + threadId + ' under CODEX_HOME/sessions, including compacted segments');
+  const starts = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => {
     try { return JSON.parse(line); } catch { return null; }
   }).filter(row => row && row.type === 'event_msg' && row.payload.type === 'task_started');
   need(starts.length > 0, 'Cannot identify current supervisor turn');

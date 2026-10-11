@@ -9,9 +9,10 @@ const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCK
 const now=()=>new Date().toISOString();
 // The executor's own rollout holds its tool calls and command results; the App tools only show messages.
 function executorLog(state,binding){
-  if(state.executorLog&&fs.existsSync(state.executorLog))return state.executorLog;
+  // A compacted executor continues in a newer segment; switch to it instead of reading the closed file forever.
   const file=pace.sessionFile(binding.executorId);
-  if(file){state.executorLog=file;state.executorOffset=0;}
+  if(file&&file!==state.executorLog){state.executorLog=file;state.executorOffset=0;}
+  if(!file&&state.executorLog&&fs.existsSync(state.executorLog))return state.executorLog;
   return file;
 }
 const unquote=text=>text.replace(/\\(.)/g,(match,char)=>({n:'\n',t:'\t',r:'\r'})[char]??char);
