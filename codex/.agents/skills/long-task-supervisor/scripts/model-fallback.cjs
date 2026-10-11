@@ -34,23 +34,40 @@ function resetFor(key,since){
   return {until:since+FALLBACK_MS,basis:'查不到額度重置時間，用 5 小時'};
 }
 function isLimit(row){return row.status===429||row.status===402||row.failureCause==='rate-limit'||['rate_limit_exceeded','insufficient_quota'].includes(row.errorCode);}
-// New refusals since the last read. The first read starts at the end: history before the watcher is not a new limit.
+const hitOf=(owner,row)=>({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
+function readRange(file,from,to){
+  const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(to-from);
+  try{fs.readSync(fd,buffer,0,buffer.length,from);}finally{fs.closeSync(fd);}
+  return buffer;
+}
+// New refusals since the last read. The first read looks back over the file's tail: a thread refused before the
+// watcher (re)started still waits on that refusal (2026-10-11 22:09: A's supervisor was refused, the watcher restarted
+// at 22:49 and read from the end, so the live limit was never handled). Only a thread whose latest request is still
+// the refusal, within the five-hour fallback window, counts; an older refusal followed by a success is history.
 function scan(state,threads){
   const file=usageFile();let size;
   try{size=fs.statSync(file).size;}catch{return [];}
-  if(state.usageOffset===undefined||size<state.usageOffset){state.usageOffset=size;return [];}
+  const owners=new Map(threads.map(item=>[hashId(item.threadId),item]));
+  if(state.usageOffset===undefined||size<state.usageOffset){
+    state.usageOffset=size;
+    const from=Math.max(0,size-32*1024*1024),latest=new Map();
+    for(const line of readRange(file,from,size).toString('utf8').split('\n')){
+      if(!line.includes('"conversationId"'))continue;
+      let row;try{row=JSON.parse(line);}catch{continue;}
+      if(owners.has(row.conversationId)&&row.model!=='codex-auto-review')latest.set(row.conversationId,row);
+    }
+    return [...latest].filter(([,row])=>isLimit(row)&&Date.now()-Number(row.timestamp)<FALLBACK_MS).map(([id,row])=>hitOf(owners.get(id),row));
+  }
   if(size===state.usageOffset)return [];
-  const fd=fs.openSync(file,'r'),length=Math.min(size-state.usageOffset,64*1024*1024),buffer=Buffer.alloc(length);
-  try{fs.readSync(fd,buffer,0,length,state.usageOffset);}finally{fs.closeSync(fd);}
+  const buffer=readRange(file,state.usageOffset,state.usageOffset+Math.min(size-state.usageOffset,64*1024*1024));
   const complete=buffer.lastIndexOf(10);if(complete<0)return [];
   state.usageOffset+=complete+1;
-  const owners=new Map(threads.map(item=>[hashId(item.threadId),item]));
   const hits=[];
   for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){
     if(!line.includes('"conversationId"'))continue;
     let row;try{row=JSON.parse(line);}catch{continue;}
     const owner=owners.get(row.conversationId);
-    if(owner&&isLimit(row))hits.push({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
+    if(owner&&isLimit(row))hits.push(hitOf(owner,row));
   }
   return hits;
 }

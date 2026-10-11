@@ -140,7 +140,7 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 - `permission_review`／`permission_changed`：從執行對話紀錄的 `turn_context` 與 `thread_settings_applied` 讀權限模式，從工具輸出讀「rejected due to unacceptable risk」拒絕原文。自動審查下開工通知一次，之後每次新拒絕再通知；切成完全存取（`approval_policy=never`）後發一次 `permission_changed`。
 - `automation_found`：啟動時及每 30 分鐘讀 `CODEX_HOME/automations/*/automation.toml`，找出 ACTIVE 且 `target_thread_id` 或 prompt 指向監督／執行對話的排程；同一排程同一版本只通知一次。
 - `login_expired`：`RUN/login-sites.json` 格式為 `{"sites":[{"name":"網站名","url":"https://…","loggedOutPattern":"登出時網址或標題會出現的正規式"}]}`。每小時用 chrome-relay 在使用者已登入的 Chrome 另開背景分頁，讀落點網址與標題後只關閉該分頁，結果寫入 `RUN/login-status.json`；每個網站每次登出只通知一次。
-- 限速換模型：讀 opencodex 的 `usage.jsonl`，以「對話 ID 的 SHA-256 前 32 碼」對應監督、執行對話與其子代理，看到 429／rate-limit 就記錄該系列的限速與恢復時間，寫入 `RUN/model-fallback.json`。監督或執行對話被拒時，送一則短訊並帶 `model` 參數，讓它改用下一個模型接續；恢復時間到了，下一則送給它的訊息帶回原模型。子代理被拒時，通知執行端改用新模型重派。全部可用模型都被限速時發 `rate_limited_all`。binding 的 `modelFallback` 設為 false 可關閉。
+- 限速換模型：讀 opencodex 的 `usage.jsonl`，以「對話 ID 的 SHA-256 前 32 碼」對應監督、執行對話與其子代理，看到 429／rate-limit 就記錄該系列的限速與恢復時間，寫入 `RUN/model-fallback.json`。背景程式（重新）啟動時回看檔尾一段：某對話最新一筆模型請求仍是被拒、且在 5 小時內，就當成現行限速；被拒後已有成功請求的不算。監督或執行對話被拒時，送一則短訊並帶 `model` 參數，讓它改用下一個模型接續；恢復時間到了，下一則送給它的訊息帶回原模型。子代理被拒時，通知執行端改用新模型重派。全部可用模型都被限速時發 `rate_limited_all`。binding 的 `modelFallback` 設為 false 可關閉。
 - `監督儀表板.md`：每分鐘更新一次，包括監看狀態、執行對話權限、限速換模型、等待中的指示、逐條驗收、在途工作，以及用已通過條數推算的預估完成時間和算法。
 - 暫停：`supervise.cjs pause RUN "<使用者原話>"` 寫入 `PAUSED.json`。暫停期間不送時鐘與派工事件，執行對話交回的真正事件照常處理；`supervise.cjs resume RUN` 解除暫停並重新起算各時鐘。另外，只剩等使用者核准（checked wait 的 kind 為 user_approval）時，不發 `no_event_hour` 和 `idle_with_work`。
 - 線上狀態：使用者 10 分鐘內在監督對話打過字，context 的 `brief.user.online` 為 true。

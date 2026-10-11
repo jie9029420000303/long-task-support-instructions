@@ -292,3 +292,20 @@ test('a delivery proven lost is resent once; without a local rollout it stays un
     assert.equal(unknown.calls().length,0,'nothing is sent a second time without proof');
   }finally{await lost.stop();await unknown.stop();}
 });
+
+// 2026-10-11 22:09: A's supervisor was refused on anthropic/claude-opus-5-5; the watcher restarted at 22:49 and read
+// usage from the end, so the live limit was never handled. A restart looks back; only a still-current refusal counts.
+test('a watcher restarted after a refusal still sees that limit, but not a refusal the thread already recovered from',()=>{
+  const fallback=require(path.join(scripts,'model-fallback.cjs'));
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-batch3-usage-')),usage=path.join(root,'usage.jsonl');
+  try{
+    const row=(id,status,minutes,model='anthropic/claude-opus-5-5')=>JSON.stringify({conversationId:hashId(id),timestamp:Date.now()-minutes*60000,requestedModel:model,model:model.split('/').pop(),status,
+      ...(status===429?{errorCode:'rate_limit_exceeded',upstreamError:'All Anthropic OAuth accounts are temporarily rate-limited'}:{})});
+    fs.writeFileSync(usage,[row('stuck',200,50),row('stuck',429,40),JSON.stringify({conversationId:hashId('stuck'),timestamp:Date.now()-39*60000,model:'codex-auto-review',status:200}),
+      row('recovered',429,30),row('recovered',200,20),row('old',429,6*60)].join('\n')+'\n');
+    const threads=['stuck','recovered','old'].map(id=>({role:'supervisor',threadId:id}));
+    const hits=withEnv({OPENCODEX_USAGE_FILE:usage},()=>fallback.scan({},threads));
+    assert.deepEqual(hits.map(item=>item.threadId),['stuck'],'only the thread whose latest model request is still refused');
+    assert.equal(hits[0].model,'anthropic/claude-opus-5-5');
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
