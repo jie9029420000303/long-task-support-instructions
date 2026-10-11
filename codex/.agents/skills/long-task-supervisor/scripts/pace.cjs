@@ -15,14 +15,29 @@ const MIN_SAMPLES=3;
 const median=values=>{const sorted=[...values].sort((a,b)=>a-b),mid=sorted.length>>1;return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;};
 const round=value=>Math.round(value*10)/10;
 function sessionsRoot(){return path.join(process.env.CODEX_HOME||path.join(os.homedir(),'.codex'),'sessions');}
-// A thread's rollout is sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl; newest days are searched first.
-function sessionFile(threadId){
-  const root=sessionsRoot(),list=dir=>{try{return fs.readdirSync(dir).filter(name=>/^\d+$/.test(name)).sort().reverse();}catch{return [];}};
+// A thread's rollout is sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl. After compaction the same thread
+// continues in rollout-<time>-<thread id>_<segment id>.jsonl (2026-10-11: the equity re-review supervisor moved
+// to such a file and receipt reconciliation stopped finding it). session_meta.payload.id names the thread.
+function sessionFiles(threadId){
+  const root=sessionsRoot(),list=dir=>{try{return fs.readdirSync(dir).filter(name=>/^\d+$/.test(name));}catch{return [];}};
+  const files=[];
   for(const year of list(root))for(const month of list(path.join(root,year)))for(const day of list(path.join(root,year,month))){
-    const dir=path.join(root,year,month,day),name=fs.readdirSync(dir).find(item=>item.endsWith('-'+threadId+'.jsonl'));
-    if(name)return path.join(dir,name);
+    const dir=path.join(root,year,month,day);let names=[];try{names=fs.readdirSync(dir);}catch{}
+    for(const name of names)if(name.endsWith('.jsonl')&&name.includes(threadId)){
+      const file=path.join(dir,name);
+      try{const meta=JSON.parse(firstLine(file));if(meta.type==='session_meta'&&meta.payload?.id===threadId)files.push(file);}catch{}
+    }
   }
-  return null;
+  // Oldest segment first: the file with the latest start holds the thread's current turns.
+  return files.sort((a,b)=>path.basename(a).localeCompare(path.basename(b)));
+}
+function sessionFile(threadId){return sessionFiles(threadId).at(-1)||null;}
+// Delivery receipt across every segment of the thread. files:0 means no local rollout exists for that thread.
+function markerIn(threadId,marker){
+  const files=sessionFiles(threadId);
+  if(!files.length)return {files:0,found:false};
+  try{require('node:child_process').execFileSync('rg',['--quiet','--fixed-strings',marker,...files],{timeout:10000});return {files:files.length,found:true};}
+  catch{return {files:files.length,found:false};}
 }
 function firstLine(file){
   const fd=fs.openSync(file,'r');
@@ -168,7 +183,7 @@ function resourceUse(snapshot){
     return {key,slots:Number(slots),used,free:Number(slots)-used,waiting};
   });
 }
-module.exports={DEFAULTS,sessionsRoot,sessionFile,agentRuns,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
+module.exports={DEFAULTS,sessionsRoot,sessionFile,sessionFiles,markerIn,agentRuns,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
 if(require.main===module){
   const [command,runArg,...rest]=process.argv.slice(2);
   try{

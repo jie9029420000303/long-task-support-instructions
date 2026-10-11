@@ -7,6 +7,9 @@ const { execFileSync } = require('node:child_process');
 const { createClient } = require('./mcp-client.cjs');
 const { hash, read, need, validateContract, validateDecision, quietReview, PROGRESS_REVIEW_MS } = require('./guard.cjs');
 const clock = require('./supervisor-clock.cjs');
+const fallback = require('./model-fallback.cjs');
+const dashboard = require('./dashboard.cjs');
+const pace = require('./pace.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
@@ -103,12 +106,12 @@ function assistantMarker(detail) {
   }
   return null;
 }
+// Every segment of the target thread counts: after compaction a delivery can sit in an earlier or later file.
+// No local file is not a receipt failure; reconcile then reads the thread through the App instead.
 function localReceipt(target, key) {
-  const sessions=path.join(process.env.CODEX_HOME || path.join(process.env.HOME,'.codex'),'sessions');
-  let files=[];
-  try {files=execFileSync('rg',['--files','--hidden','--glob','*'+target+'.jsonl',sessions],{encoding:'utf8',timeout:10000}).trim().split('\n').filter(Boolean);} catch {return false;}
-  if (files.length!==1) return false;
-  try {execFileSync('rg',['--quiet','--fixed-strings',deliveryMarker(key),files[0]],{timeout:10000});return true;} catch {return false;}
+  const result=require('./pace.cjs').markerIn(target,deliveryMarker(key));
+  if(!result.files)state.receiptLookup={target,key,files:0,note:'No local rollout for this thread; confirming through read_thread',at:now()};
+  return result.found;
 }
 async function reconcile(delivery) {
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -133,7 +136,12 @@ async function reconcile(delivery) {
   }
   throw Error('Delivery uncertain: ' + delivery.key);
 }
-async function sendAndRead(target, prompt, key) {
+// A thread switched for a rate limit gets its original model back on the first delivery after the limit resets.
+function restoreFor(target) {
+  const item = state.modelSwitch?.[target];
+  return item && !item.restored && Date.now() >= item.until ? item : null;
+}
+async function sendAndRead(target, prompt, key, options = {}) {
   need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
   need([binding.executorId,binding.supervisorId].includes(target), 'Target is not bound');
   if (state.messages.some(item => item.key === key)) return;
@@ -155,7 +163,11 @@ async function sendAndRead(target, prompt, key) {
   state.inflight = {target,prompt,key,at:now(),phase:'sending'};
   checkpoint();
   // If the process exits after send but before its receipt, never issue a second send.
-  const sent = await rpc('send_message_to_thread',{threadId:target,prompt:deliveryMarker(key)+'\n'+prompt});
+  const restore = options.model ? null : restoreFor(target);
+  const model = options.model || restore?.original, thinking = options.model ? options.thinking : restore?.effort;
+  const sent = await rpc('send_message_to_thread',{threadId:target,prompt:deliveryMarker(key)+'\n'+prompt,
+    ...(model?{model}:{}),...(model&&thinking?{thinking}:{})});
+  if (restore) restore.restored = now();
   state.inflight.sent = sent;
   state.inflight.phase = 'sent-awaiting-readback';
   checkpoint();
@@ -283,10 +295,68 @@ async function pendingDecision() {
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
   }
   await sendAndRead(binding.executorId,decision.reply,'answer-' + event.id);
+  // Every instruction is tracked against a deadline; the clock wakes the supervisor if nothing acts on it.
+  const given = decision.instruction;
+  state.instruction = {eventId:event.id,what:given?.what || decision.reply.replace(/\s+/g,' ').slice(0,200),doneWhen:given?.doneWhen || null,
+    sentAt:Date.now(),deadlineMs:(given?.deadlineMinutes || 30)*60000,misses:0};
   if(event.kind==='progress_review'){state.lastProgressReviewAt=Date.now();state.failedCommands={};}
   (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
   state.seen.push(event.id); state.pending = null;
   state.phase = 'watching'; checkpoint();
+}
+const isPaused = () => fs.existsSync(path.join(run,'PAUSED.json'));
+let lastDashboardAt = 0;
+function writeDashboard() {
+  if (Date.now() - lastDashboardAt < 60000) return;
+  lastDashboardAt = Date.now();
+  try {
+    // A paused run skips the clock, so the permission mode is read here too.
+    if (!state.executorSettings) { const found = fallback.settingsOf(binding.executorId); if (found) state.executorSettings = found; }
+    const snapshot = clock.snapshotOf(run,binding);
+    dashboard.write(run,{binding,state,snapshot,paced:clock.paceNow(run,binding,state,snapshot),alive:true,paused:isPaused()});
+  } catch (error) { state.dashboardError = {message:error.message,at:now()}; }
+}
+const clockText = ms => new Date(ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+// Rate limits (Jay 2026-10-11, default on): a refused supervisor or executor is told to continue on the next model
+// in anthropic/ -> anthropic-apikey/ -> gpt-5.6-sol; a refused subagent makes the executor re-dispatch on the next one.
+async function handleRateLimits() {
+  if (binding.modelFallback === false) return;
+  const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path}));
+  const hits = fallback.scan(state,[{role:'supervisor',threadId:binding.supervisorId},{role:'executor',threadId:binding.executorId},...subagents]);
+  for (const hit of hits) {
+    const key = fallback.keyOf(hit.model), known = state.rateLimits?.[key];
+    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,...fallback.resetFor(key,hit.at)};
+    const queue = state.switchQueue ||= [];
+    if (!queue.some(item => item.threadId === hit.threadId && item.model === hit.model)) queue.push(hit);
+  }
+  if (hits.length) { fallback.publish(run,state); checkpoint(); }
+  while (state.switchQueue?.length && !state.inflight) {
+    const hit = state.switchQueue[0], record = state.modelSwitch?.[hit.threadId];
+    const original = record && !record.restored ? record.original : hit.model;
+    // A refusal for a model this thread already left is stale.
+    if (record && !record.restored && record.current !== hit.model) { state.switchQueue.shift(); checkpoint(); continue; }
+    const target = fallback.next(original,hit.model,hit.role,state);
+    const until = state.rateLimits?.[fallback.keyOf(original)]?.until || Date.now() + fallback.FALLBACK_MS;
+    state.switchQueue.shift();
+    if (!target) { state.rateLimitedAll = {threadId:hit.threadId,role:hit.role,model:hit.model,error:hit.error,at:now()}; checkpoint(); continue; }
+    if (hit.role === 'subagent') {
+      const notice = 'subagent:' + fallback.keyOf(hit.model) + '@' + state.rateLimits[fallback.keyOf(hit.model)].since;
+      if ((state.rateNotices ||= []).includes(notice)) { checkpoint(); continue; }
+      state.rateNotices.push(notice); checkpoint();
+      await sendAndRead(binding.executorId,
+        '子代理 ' + (hit.path || hit.threadId.slice(0,8)) + ' 使用 ' + hit.model + ' 遇額度限速（' + hit.error + '）。之後派子代理依 ' + path.join(run,'model-fallback.json') +
+        ' 改用 ' + target + ' 同層級模型，' + clockText(until) + ' 後恢復原模型；已完成的成果照常收回，未完成的包改用新模型重派。',
+        'rate-subagent-' + require('node:crypto').createHash('sha256').update(notice).digest('hex').slice(0,16));
+      continue;
+    }
+    const settings = fallback.settingsOf(hit.threadId) || {};
+    (state.modelSwitch ||= {})[hit.threadId] = {role:hit.role,original,current:target,effort:settings.effort || null,since:Date.now(),until,restored:null};
+    state.modelSwitches = (state.modelSwitches || 0) + 1; checkpoint();
+    await sendAndRead(hit.threadId,
+      '額度限速：' + hit.model + ' 被拒（' + hit.error + '）。本對話自此改用 ' + target + '，預計 ' + clockText(until) + ' 換回 ' + original +
+      '。請從中斷處接續原本的工作，不需重述或重做已完成的部分。',
+      'model-switch-' + hit.threadId.slice(0,8) + '-' + state.modelSwitches,{model:target,thinking:settings.effort});
+  }
 }
 async function watch() {
   lock();
@@ -303,6 +373,10 @@ async function watch() {
   for (const name of ['wait_threads','read_thread','send_message_to_thread']) need(available.has(name),'Missing Codex App tool ' + name);
   const proof = await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500});
   need(contains(proof,binding.executorId),'Cannot read bound executor conversation');
+  try {
+    const supervisorProof = unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+    state.threadTitles = {executor:unpack(proof).thread?.title || null,supervisor:supervisorProof.thread?.title || null};
+  } catch {}
   save(path.join(run,'native-ready.json'),{pid:process.pid,bridgePid:client.pid,executorId:binding.executorId,readVerified:true,at:now()});
   if (state.error) {
     (state.history ||= []).push({error:state.error,at:state.endedAt});
@@ -313,19 +387,25 @@ async function watch() {
   state.phase = state.pending ? 'awaiting_decision' : 'watching';
   checkpoint();
   while (!fs.existsSync(path.join(run,'STOP'))) {
+    await handleRateLimits();
+    writeDashboard();
     if (state.pending) {
       await pendingDecision();
       if (state.phase === 'accepted') break;
       continue;
     }
     clock.tickSleep(state);
+    // Jay's pause stops every model wake; a real executor event still reaches the supervisor. Resuming restarts the clocks.
+    const paused = isPaused();
+    if (state.pausedSeen && !paused) { state.lastRealEventAt = Date.now(); state.lastExecutorWorkAt = Date.now(); state.lastProgressReviewAt = Date.now(); state.unplanned = {}; }
+    state.pausedSeen = paused;
     const audit=inspectDispatch(run,binding,state);
     // The executor learns the run from the binding message; until then, or 15 minutes, a missing snapshot is expected.
     if(!state.executorKnowsRun&&audit.newIssues.some(item=>item.kind==='snapshot_missing')&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS){
       if(Date.now()-lastMentionCheck>=60000){lastMentionCheck=Date.now();state.executorKnowsRun=contains(await rpc('read_thread',{threadId:binding.executorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}),run);}
       if(!state.executorKnowsRun)audit.newIssues=audit.newIssues.filter(item=>item.kind!=='snapshot_missing');
     }
-    const auditEvent=dispatchEvent(audit);checkpoint();
+    const auditEvent=paused?null:dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const started = Date.now();
     const response = await waitExecutor(45000);
@@ -386,13 +466,16 @@ async function watch() {
       }
       // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
       // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.
-      const hadCheckedWait=Boolean(state.checkedWait),found=clock.check(run,binding,state),silent=progressDue(state);
-      if(silent||found){
-        const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(found?.reasons||[])];
+      const hadCheckedWait=Boolean(state.checkedWait),found=paused?null:clock.check(run,binding,state),silent=paused?false:progressDue(state);
+      const allLimited=state.rateLimitedAll&&!state.rateLimitedAll.announced?state.rateLimitedAll:null;
+      if(allLimited)allLimited.announced=now();
+      if(silent||found||allLimited){
+        const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(found?.reasons||[]),...(allLimited?['rate_limited_all']:[])];
+        const {reasons:_r,pace:_p,...extra}=found||{};
         const event=progressEvent(state,Date.now(),{reasons,pace:found?.pace||clock.paceNow(run,binding,state),overdue:found?.overdue||[],
           baselineMissing:found?.baselineMissing||[],processStalled:found?.processStalled||[],executorBlocked:found?.executorBlocked||[],
           machineSlept:found?.machineSlept||[],resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[],
-          ...(found?.noEventHour?{noEventHour:found.noEventHour}:{}),...(found?.idleWithWork?{idleWithWork:found.idleWithWork}:{})});
+          ...extra,...(allLimited?{rateLimitedAll:allLimited}:{})});
         state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
         continue;

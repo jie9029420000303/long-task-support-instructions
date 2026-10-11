@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Resolve only the roles needed now from the actual tool inventories. This does not
-// change a running model, infer user authorization, or substitute another provider.
+// Resolve only the roles needed now from the actual tool inventories. This does not change a running model or
+// infer user authorization. It substitutes another provider only for a recorded rate limit (input.fallback =
+// RUN/model-fallback.json), in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-5.6-sol (2026-10-11).
 const fs=require('node:fs');
+const {keyOf,LAST_RESORT}=require('./model-fallback.cjs');
 const roles={executor:{tier:'opus',effort:'high',catalog:'executor'},general:{tier:'sonnet',effort:'medium',catalog:'subagent'},ui:{tier:'sonnet',effort:'low',catalog:'subagent'}};
 function identity(id){
   const match=typeof id==='string'&&id.match(/^(.*\/)?claude-([^/]+)$/i);
@@ -14,6 +16,8 @@ function resolve(input){
   const supervisor=identity(input.supervisorModel);
   if(!supervisor)return {family:'unchanged',reason:'監督不是 Claude；沿用既有 OpenAI 選模規則與已鎖定模型。',roles:{}};
   const result={family:'claude',supervisorModel:input.supervisorModel,provider:supervisor.provider,roles:{}};
+  let limits={};
+  if(input.fallback)try{limits=Object.fromEntries(Object.entries(JSON.parse(fs.readFileSync(input.fallback,'utf8')).limits||{}).filter(([,item])=>Date.parse(item.until)>Date.now()));}catch{}
   for(const role of input.roles){
     const policy=roles[role],catalog=input.catalogs?.[policy.catalog]||[],override=input.overrides?.[role];
     if(!Array.isArray(catalog)||catalog.some(item=>typeof item.id!=='string'||!Array.isArray(item.efforts)))throw Error('Catalog entries require observed id and supported efforts');
@@ -22,15 +26,25 @@ function resolve(input){
       const value=identity(item.id);
       return value&&value.provider===supervisor.provider&&value.name.startsWith(policy.tier+'-');
     }).sort((a,b)=>b.id.localeCompare(a.id,undefined,{numeric:true}));
-    const model=(!override?.model&&role==='executor'&&candidates.find(item=>item.id===input.supervisorModel))||candidates[0];
+    let model=(!override?.model&&role==='executor'&&candidates.find(item=>item.id===input.supervisorModel))||candidates[0];
     const effort=override?.effort||policy.effort;
+    let basis=override?'explicit-user-override':'claude-role-policy',limitedUntil=null;
+    if(model&&!override?.model&&limits[keyOf(model.id)]){
+      limitedUntil=limits[keyOf(model.id)].until;
+      const sameTier=prefix=>catalog.filter(item=>{const value=identity(item.id);return value&&value.provider===prefix&&value.name.startsWith(policy.tier+'-');})
+        .sort((a,b)=>b.id.localeCompare(a.id,undefined,{numeric:true}))[0];
+      const substitute=['anthropic/','anthropic-apikey/'].filter(prefix=>!limits[prefix]).map(sameTier).find(Boolean)||
+        (!limits[LAST_RESORT]&&catalog.find(item=>item.id===LAST_RESORT));
+      if(!substitute){result.roles[role]={status:'unavailable',reason:'這個角色可用的系列都在額度限速中，'+limitedUntil+' 後恢復；其他角色照常。'};continue;}
+      model=substitute;basis='rate-limit-fallback';
+    }
     if(!model){
       result.roles[role]={status:'unavailable',reason:override?.model?`工具未提供指定模型 ${override.model}。`:`工具未提供與監督相同供應商路徑 ${supervisor.provider||'(無前綴)'} 的 Claude ${policy.tier}；不自動換帳號、GPT 或其他層級。`};continue;
     }
     if(!model.efforts.includes(effort)){
       result.roles[role]={status:'unavailable',model:model.id,reason:`工具未提供 ${model.id} 的 ${effort} 推理；保留該角色待處理，其他角色可繼續。`};continue;
     }
-    result.roles[role]={status:'ready',model:model.id,effort,basis:override?'explicit-user-override':'claude-role-policy'};
+    result.roles[role]={status:'ready',model:model.id,effort,basis,...(limitedUntil?{restoreAfter:limitedUntil}:{})};
   }
   return result;
 }

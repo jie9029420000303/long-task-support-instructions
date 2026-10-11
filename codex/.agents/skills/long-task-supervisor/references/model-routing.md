@@ -45,3 +45,12 @@ Claude 路線參照 Claude 側既有分工：
 4. 綁定既有執行對話：已鎖定且符合路線就保留。新啟動需要套用 Claude 路線時，在回合結束後下一則本來就要送的啟動／續接訊息明確傳 `send_message_to_thread({model,thinking,...})`；不為改模型打斷在途回合、額外催促或丟棄成果。使用者明確指定保留的模型不覆寫。背景 watcher 後續傳訊省略模型，沿用該對話目前設定。
 5. 子代理使用 `spawn_agent({fork_turns:"none",model:完整ID,reasoning_effort:該包推理,...})`，prompt 只附完成此包所需來源。完整歷史 fork 不能覆寫模型／推理，不能拿它假裝指定了 Sonnet。工具只有繼承模式時，僅在已核對繼承的實際模型與推理符合該角色要求時使用；不以未經本機版本驗證的預設設定繞過工具限制。品質升檔同模型進行；工具不支援指定值時如實記錄，只阻塞該角色派工，其他已授權工作繼續，不偽稱已套用。子代理自稱的模型來自系統提示，常與實際不符，不能當證據；實際模型以子代理執行紀錄（session 的 turn_context）或代理伺服器紀錄為準。
 6. 把路線、供應商、各角色完整 ID、實際推理、工具清單來源與時間寫進既有 sidecar「模型／推理鎖定」。工具接受只代表已派出；從新回合實際模型資訊核對後才記已套用。原生 Goal 與第三方模型使用均不因此另獲建立新對話、傳訊或敏感操作的授權。
+
+## 額度限速時自動換模型（使用者 2026-10-11 定案，預設開啟）
+
+上面「不在 anthropic 與 anthropic-apikey 之間互換、不換 GPT」的規則，只有在撞到額度限速時有例外。順序固定為 `anthropic/` → `anthropic-apikey/` → `gpt-5.6-sol`，跳過目前正在用的和仍在限速中的系列，Claude 維持同層級（Opus 換 Opus、Sonnet 換 Sonnet）。
+
+- 監督與執行對話：背景程式看到 opencodex 記錄的 429／rate-limit，就送一則短訊並帶 `model` 參數，讓該對話改用下一個模型接續原工作。恢復時間到了，下一則送給它的訊息會帶回原模型。
+- 子代理：執行端派子代理前讀 `RUN/model-fallback.json`；Claude 路線在 model-route 輸入加上 `"fallback":"RUN/model-fallback.json"`，會自動選替代模型並回傳 `restoreAfter`。原模型的系列在 limits 裡且 until 還沒到，就改用替代模型；到了就換回原模型。
+- 恢復時間：opencodex 記錄得到 Anthropic 帳號實際的額度重置時間，就用最早重置的那個；查不到時用被拒後 5 小時。
+- 全部系列都在限速時，背景程式發 `rate_limited_all`，由監督安排不受影響的工作，不改全域設定。
