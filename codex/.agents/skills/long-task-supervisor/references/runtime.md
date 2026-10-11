@@ -52,7 +52,7 @@ LONG_TASK_EVENT {"kind":"blocked"}
 LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
 ```
 
-普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，到期前不發續接，結果變化或到期才產生 `continue` 事件。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。新事件先持久保存完整原文，喚醒只傳事件識別、雜湊及 `supervise.cjs context RUN EVENT_ID`；不附整段處理規則或歷史。context 只接受目前待決事件，一次提供 brief 與授權來源；送驗才載完整有效契約。舊版未確認送達的 prompt 保留原文對帳，不在升級時改寫或重送。
+普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，到期前不發續接，結果變化或到期才產生 `continue` 事件。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。事件標記那一行本身是完整 JSON 即可，標記後面另起一行的文字會被忽略。新事件先持久保存完整原文，喚醒只傳事件識別、雜湊及 `supervise.cjs context RUN EVENT_ID`；不附整段處理規則或歷史。context 只接受目前待決事件，一次提供 brief 與授權來源；送驗才載完整有效契約。舊版未確認送達的 prompt 保留原文對帳，不在升級時改寫或重送。
 
 送驗前用 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...` 產生候選清單及**可直接貼在最終回覆末尾的完整事件行**；不要手寫或截短雜湊。清單至少列一個檔案，包含本次候選版所有直接修改的交付檔。監督接收時會重算清單及每個候選檔，變動後必須另建清單並重交，不得拼接舊證據。
 
@@ -113,7 +113,7 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 
 ### 延遲收件恢復
 
-App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；該 delivery 預設不再送第二次。唯一例外是能證明遺失：目標對話在本機有紀錄檔、目前閒置、送出後已有回合結束，所有紀錄段落卻都沒有該送達標記（例如訊息排在進行中的回合後面，該回合被中斷而丟失）。這時重送一次並記入 `lostDeliveries`；重送後仍對不到，或缺任何一項證據，照舊停在 needs_reconcile。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
+App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；送達對帳時若目標對話正在跑回合（訊息排在回合後面），每 15 秒再查一次，等回合結束收進去為止，不判為無法確認、不重開監看。該 delivery 預設不再送第二次。唯一例外是能證明遺失：目標對話在本機有紀錄檔、目前閒置、送出後已有回合結束，所有紀錄段落卻都沒有該送達標記（例如訊息排在進行中的回合後面，該回合被中斷而丟失）。這時重送一次並記入 `lostDeliveries`；重送後仍對不到，或缺任何一項證據，照舊停在 needs_reconcile。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
 
 ## 原契約、使用者修訂與舊 run 接入
 
@@ -137,7 +137,7 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 以下都由背景程式不呼叫模型地查核，有問題才產生 `progress_review`；處理方式見 event-review。
 
 - `instruction_overdue`：監督送出 reply／reject 後開始計時，期限是 decision 的 `instruction.deadlineMinutes`，沒填則 30 分鐘，扣掉電腦睡眠。期限內只要有執行端的真正事件，或派工快照的 `updatedAt` 晚於送出時間，就算有動靜。逾時發第一次（`misses=1`），再過一個期限發第二次（`misses=2`），之後不再追這則。只差使用者核准期間不發逾時通知，但有動靜照樣結案，核准等待解除後不會把已完成的指示誤報為逾時。
-- `permission_review`／`permission_changed`：從執行對話紀錄的 `turn_context` 與 `thread_settings_applied` 讀權限模式，從工具輸出讀「rejected due to unacceptable risk」拒絕原文。自動審查下開工通知一次，之後每次新拒絕再通知；切成完全存取（`approval_policy=never`）後發一次 `permission_changed`。
+- `permission_review`／`permission_changed`：從執行對話紀錄的 `turn_context` 與 `thread_settings_applied` 讀權限模式，從工具輸出讀「rejected due to unacceptable risk」拒絕原文。自動審查下開工通知一次，之後只有新的工作項目被擋才再通知（同一程式與子指令，或同一工具，算同一項）；重複被擋只記在儀表板的累計次數。工具輸出只是引用到那段字（例如讀技能說明）不算被擋：真正的拒絕必附審查理由（Reason）或 Auto-review denied。介面上的權限選單要在該對話輸入框送出一則訊息才會套用到回合，只切選單不會改到背景送來的回合（2026-10-11 實測三個對話選了仍是自動審查）。切成完全存取（`approval_policy=never`）後發一次 `permission_changed`。
 - `automation_found`：啟動時及每 30 分鐘讀 `CODEX_HOME/automations/*/automation.toml`，找出 ACTIVE 且 `target_thread_id` 或 prompt 指向監督／執行對話的排程；同一排程同一版本只通知一次。
 - `login_expired`：`RUN/login-sites.json` 格式為 `{"sites":[{"name":"網站名","url":"https://…","loggedOutPattern":"登出時網址或標題會出現的正規式"}]}`。每小時用 chrome-relay 在使用者已登入的 Chrome 另開背景分頁，讀落點網址與標題後只關閉該分頁，結果寫入 `RUN/login-status.json`；每個網站每次登出只通知一次。
 - 限速換模型：讀 opencodex 的 `usage.jsonl`，以「對話 ID 的 SHA-256 前 32 碼」對應監督、執行對話與其子代理，看到 429／rate-limit 就記錄該系列的限速與恢復時間，寫入 `RUN/model-fallback.json`。背景程式（重新）啟動時回看檔尾一段：某對話最新一筆模型請求仍是被拒、且在 5 小時內，就當成現行限速；被拒後已有成功請求的不算。監督或執行對話被拒時，送一則短訊並帶 `model` 參數，讓它改用下一個模型接續；恢復時間到了，下一則送給它的訊息帶回原模型。子代理被拒時，通知執行端改用新模型重派。全部可用模型都被限速時發 `rate_limited_all`。binding 的 `modelFallback` 設為 false 可關閉。

@@ -14,7 +14,9 @@ function render({binding,state,snapshot,paced,alive,paused,now=Date.now()}){
   const hours=Math.max(0,(now-(Date.parse(binding.createdAt)||now))/3600000);
   const perHour=passed&&hours>0?passed/hours:0;
   const pending=state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無';
-  const permission=!settings?'尚未讀到':autoReview?'自動審查（Git、遠端連線等操作會被平台擋下，需在該對話切成「完全存取」）':'完全存取';
+  const refusedItems=[...new Set((state.reviewRejections||[]).map(item=>item.item).filter(Boolean))];
+  const permission=!settings?'尚未讀到':autoReview?'自動審查（Git、遠端連線等操作會被平台擋下；請在該對話選「完全存取」後，從輸入框送出一則訊息才會生效）'+
+    (state.rejectionCount?'，已被擋 '+state.rejectionCount+' 次'+(refusedItems.length?'，最近被擋：'+refusedItems.slice(-4).join('、'):''):''):'完全存取';
   const models=switched.length?switched.map(([id,item])=>who(id,binding)+' 改用 '+item.current+'，'+clock(item.until)+' 換回 '+item.original).join('；'):'無';
   const lines=['# 監督儀表板','','更新時間：'+clock(now)+'（台北）','','## 監看','',
     '- 背景監看：'+(alive?'運作中':'已停止')+'（狀態 '+(state.phase||'—')+(paused?'，使用者暫停中':'')+'）',

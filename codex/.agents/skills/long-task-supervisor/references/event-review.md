@@ -17,7 +17,7 @@
 **新事件的處理**（reasons 或 dispatch issue 的 kind）：
 
 - `instruction_overdue`：上一則指示到期仍沒有動靜。`misses=1` 時改道，用 reply 交子代理、拆小或換做法，並附新的 instruction；`misses>=2` 時監督自己接手，例如自己派子代理、自己判定或直接查證，不通知使用者。
-- `permission_review`：執行對話在「自動審查」權限下（`brief.executorPermission`），或平台審查剛拒絕了操作（`newRejections` 有拒絕原文）。這不是授權不足。向使用者說一次「請把『對話標題』切成完全存取」，不給授權文字；其他不受影響的工作照常推進。只剩這個等待時用 observe 並附 `wait:{kind:"user_approval",conditions:[]}`，等待期間不會再每小時叫醒。
+- `permission_review`：執行對話在「自動審查」權限下（`brief.executorPermission`），或平台審查剛拒絕了操作（`newRejections` 有拒絕原文）。這不是授權不足。向使用者說一次「請在『對話標題』選完全存取，並從該對話輸入框送出一則訊息（例如「繼續」）」，不給授權文字；其他不受影響的工作照常推進。只剩這個等待時用 observe 並附 `wait:{kind:"user_approval",conditions:[]}`，等待期間不會再每小時叫醒。
 - `permission_changed`：權限已切成完全存取。直接用 reply 要執行端重跑先前被擋的操作，不需要等使用者回覆。
 - `automation_found`：有排程正在操作本監督或執行對話。用 Codex App 的 automation_update 把它設成 PAUSED（不刪除），在回覆裡告訴使用者排程名稱和原因，然後 observe。
 - `login_expired`：`loggedOut` 列出已登出的網站。告訴使用者一次網站名稱和連結，請他登入；其他工作照常推進。

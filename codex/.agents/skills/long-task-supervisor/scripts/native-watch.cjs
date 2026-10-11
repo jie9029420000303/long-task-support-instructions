@@ -126,7 +126,16 @@ async function provenLost(delivery) {
   if (detail.thread?.status?.type!=='idle' || !(detail.turns||[]).some(turn=>Number(turn.completedAt)>sentAt)) return false;
   return !pace.markerIn(delivery.target,deliveryMarker(delivery.key)).found;
 }
+// A message sent while the target runs a turn waits in its queue until that turn ends; that is not an uncertain
+// delivery (2026-10-11: A's watcher restarted three times and GDB's once for messages queued behind a busy supervisor).
+async function targetBusy(target) {
+  try {
+    const detail=unpack(await rpc('read_thread',{threadId:target,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200}));
+    return detail.thread?.status?.type==='active';
+  } catch { return false; }
+}
 async function reconcile(delivery) {
+  for (;;) {
   for (let attempt = 0; attempt < 8; attempt++) {
     need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
     // The local session transcript is the smallest and most reliable receipt on
@@ -146,6 +155,10 @@ async function reconcile(delivery) {
     });
     if (confirmed) { markSent(delivery.target, delivery.key); return; }
     await sleep(Number(process.env.LONG_TASK_RECEIPT_RETRY_MS)||2000);
+  }
+  if (!(await targetBusy(delivery.target))) break;
+  if (!delivery.busySince) { delivery.busySince = now(); delivery.phase = 'queued-behind-running-turn'; checkpoint(); }
+  await sleep(Number(process.env.LONG_TASK_BUSY_RETRY_MS)||15000);
   }
   if (await provenLost(delivery)) {
     (state.lostDeliveries ||= []).push({target:delivery.target,key:delivery.key,sentAt:delivery.at,resentAt:now()});
@@ -200,8 +213,11 @@ function extractEvent(turn, message) {
   const markerAt = text.lastIndexOf(marker);
   let item;
   if (markerAt !== -1) {
-    try { item = JSON.parse(text.slice(markerAt + marker.length).trim()); }
-    catch { item = {kind:'protocol_error'}; }
+    // The event line is complete on its own; prose the executor writes after it is not part of the event
+    // (2026-10-11 GDB: a valid progress event was rejected as malformed for text following it).
+    const rest = text.slice(markerAt + marker.length);
+    try { item = JSON.parse(rest.trim()); }
+    catch { try { item = JSON.parse(rest.split('\n')[0].trim()); } catch { item = {kind:'protocol_error'}; } }
   } else item = {kind:'unmarked_final'};
   if (!item || !['submission','question','blocked','progress','waiting','unmarked_final'].includes(item.kind)) item = {kind:'protocol_error'};
   if (item.kind === 'submission' && (!/^sha256:[a-f0-9]{64}$/.test(item.revision) || typeof item.manifest !== 'string')) item = {kind:'protocol_error'};
