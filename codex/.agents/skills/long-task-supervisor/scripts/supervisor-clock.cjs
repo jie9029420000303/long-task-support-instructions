@@ -180,11 +180,13 @@ function check(run,binding,state){
     unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awakeSince(state,plan[id])))/60000)};
   }
   // A supervisor instruction not acted on by its deadline: no real event and no snapshot update since it was sent.
+  // Action closes it even while Jay's approval is awaited; only the overdue notice waits (2026-10-11 A: an instruction
+  // acted on at 23:17 stayed open behind an approval wait and would have fired as overdue the moment Jay switched).
   let instructionOverdue=null;const sent=state.instruction;
-  if(sent&&!waitingUser){
+  if(sent){
     const acted=(state.lastRealEventAt||0)>sent.sentAt||Date.parse(snapshot?.updatedAt)>sent.sentAt;
     if(acted)state.instruction=null;
-    else if(awakeSince(state,sent.sentAt)>=sent.deadlineMs*((sent.misses||0)+1)){
+    else if(!waitingUser&&awakeSince(state,sent.sentAt)>=sent.deadlineMs*((sent.misses||0)+1)){
       sent.misses=(sent.misses||0)+1;
       instructionOverdue={eventId:sent.eventId,what:sent.what,doneWhen:sent.doneWhen,minutes:Math.round(awakeSince(state,sent.sentAt)/60000),misses:sent.misses,
         handling:sent.misses>=2?'第二次逾時：監督自行處理（改派子代理、拆小或接手判定），不通知使用者':'第一次逾時：監督改道，例如交子代理、拆小或換做法'};
