@@ -266,3 +266,46 @@ test('Jay counts as online for 10 minutes after typing in the supervisor chat',(
   observeSupervisorInput(state,{turns:[{id:'t2',startedAt:startedAt+60,items:[{type:'userMessage',id:'d1',text:'LONG_TASK_DELIVERY:review-x\nevent'}]}]});
   assert.equal(state.lastUserInputAt,startedAt*1000,'a watcher delivery is not Jay typing');
 });
+
+// 2026-10-11 GDB: an event sent at 22:07 was queued behind a running supervisor turn, that turn was interrupted and
+// the message was dropped. The watcher could only say "uncertain" and restarted every 30 seconds for half an hour.
+test('a delivery proven lost is resent once; without a local rollout it stays uncertain and nothing is resent',async()=>{
+  const lost=fixture({settings:fullAccess,mock:{supervisorIdle:true}}),unknown=fixture({settings:fullAccess,mock:{supervisorIdle:true}});
+  for(const f of [lost,unknown]){
+    const state=read(f.statePath);
+    state.phase='needs_reconcile';state.inflight={target:f.binding.supervisorId,prompt:'Review event E1',key:'review-lost',at:minutesAgo(5),phase:'sent-awaiting-readback',sent:{}};
+    save(f.statePath,state);f.env.LONG_TASK_RECEIPT_RETRY_MS='20';
+  }
+  // Only the lost case has the supervisor's own rollout on this host, with later work but no marker.
+  const supervisorLog=path.join(today(lost.home),'rollout-t-supervisor-qa.jsonl');
+  line(supervisorLog,{timestamp:minutesAgo(10),type:'session_meta',payload:{id:'supervisor-qa',session_id:'supervisor-qa'}});
+  line(supervisorLog,{timestamp:minutesAgo(1),type:'event_msg',payload:{type:'task_complete'}});
+  lost.start();const unknownChild=unknown.start(),unknownExit=new Promise(resolve=>unknownChild.once('exit',resolve));
+  try{
+    await until(()=>read(lost.statePath).messages.some(item=>item.key==='review-lost'));
+    const state=read(lost.statePath);
+    assert.equal(lost.calls().length,1,'resent exactly once');
+    assert.match(lost.calls()[0].prompt,/^LONG_TASK_DELIVERY:review-lost\nReview event E1$/);
+    assert.equal(state.inflight,null);assert.equal(state.lostDeliveries[0].key,'review-lost');
+    await unknownExit;
+    assert.equal(read(unknown.statePath).phase,'needs_reconcile','no proof of loss keeps the delivery uncertain');
+    assert.equal(unknown.calls().length,0,'nothing is sent a second time without proof');
+  }finally{await lost.stop();await unknown.stop();}
+});
+
+// 2026-10-11 22:09: A's supervisor was refused on anthropic/claude-opus-5-5; the watcher restarted at 22:49 and read
+// usage from the end, so the live limit was never handled. A restart looks back; only a still-current refusal counts.
+test('a watcher restarted after a refusal still sees that limit, but not a refusal the thread already recovered from',()=>{
+  const fallback=require(path.join(scripts,'model-fallback.cjs'));
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-batch3-usage-')),usage=path.join(root,'usage.jsonl');
+  try{
+    const row=(id,status,minutes,model='anthropic/claude-opus-5-5')=>JSON.stringify({conversationId:hashId(id),timestamp:Date.now()-minutes*60000,requestedModel:model,model:model.split('/').pop(),status,
+      ...(status===429?{errorCode:'rate_limit_exceeded',upstreamError:'All Anthropic OAuth accounts are temporarily rate-limited'}:{})});
+    fs.writeFileSync(usage,[row('stuck',200,50),row('stuck',429,40),JSON.stringify({conversationId:hashId('stuck'),timestamp:Date.now()-39*60000,model:'codex-auto-review',status:200}),
+      row('recovered',429,30),row('recovered',200,20),row('old',429,6*60)].join('\n')+'\n');
+    const threads=['stuck','recovered','old'].map(id=>({role:'supervisor',threadId:id}));
+    const hits=withEnv({OPENCODEX_USAGE_FILE:usage},()=>fallback.scan({},threads));
+    assert.deepEqual(hits.map(item=>item.threadId),['stuck'],'only the thread whose latest model request is still refused');
+    assert.equal(hits[0].model,'anthropic/claude-opus-5-5');
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});

@@ -36,9 +36,10 @@ function call(name,args) {
     }
     const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);
     const activity=data.supervisorActivityGate && fs.existsSync(data.supervisorActivityGate);
-    const latest={id:activity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:0,
+    // supervisorIdle: the supervisor finished a turn just now and sits idle, as after a dropped queued message.
+    const latest={id:activity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:data.supervisorIdle?Math.floor(Date.now()/1000):0,
       items:[...(activity?[{type:'userMessage',id:'human-user-new',text:'Approval granted'}]:[]),{type:'agentMessage',id:activity?'supervisor-new-message':'supervisor-old-message',phase:'final_answer',text:'Supervisor status'}]};
-    return reply({thread:{id:data.supervisorId},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
+    return reply({thread:{id:data.supervisorId,...(data.supervisorIdle?{status:{type:'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
   }
   if (name==='send_message_to_thread') {
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
