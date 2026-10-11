@@ -5,7 +5,9 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS}=require('./guard.cjs');
+const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS}=require('./guard.cjs');
+const automations=require('./automations.cjs');
+const login=require('./login-check.cjs');
 const now=()=>new Date().toISOString();
 // The executor's own rollout holds its tool calls and command results; the App tools only show messages.
 function executorLog(state,binding){
@@ -39,6 +41,21 @@ function pollOnly(payload){
 // approach. Calls still open count from any time (a turn's end closes them); failures count from the binding on.
 function trackTools(state,row,boundAt=0){
   const payload=row.payload||{},at=row.timestamp||now();
+  // The executor's permission mode and model, as each turn applies them. Under "auto review" the platform reviewer
+  // only trusts Jay's own words in that chat, so forwarded authorization is refused (2026-10-11: A's Git and Docker
+  // 3 times, GDB's Jira read once, half a day lost). Only switching the chat to full access clears it.
+  const applied=row.type==='turn_context'?payload:row.type==='event_msg'&&payload.type==='thread_settings_applied'?payload.thread_settings||{}:null;
+  if(applied&&(applied.approval_policy||applied.model))state.executorSettings={approvalPolicy:applied.approval_policy||state.executorSettings?.approvalPolicy||null,
+    reviewer:applied.approvals_reviewer||state.executorSettings?.reviewer||null,model:applied.model||state.executorSettings?.model||null,
+    effort:applied.effort||state.executorSettings?.effort||null,at};
+  if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type)){
+    const output=typeof payload.output==='string'?payload.output:JSON.stringify(payload.output||'');
+    if(/rejected due to unacceptable risk/i.test(output)&&!(state.reviewRejections||[]).some(item=>item.callId===payload.call_id)){
+      const reason=/Reason:\s*([\s\S]{0,400}?)(?:\\n|\n|The agent must|$)/.exec(output)?.[1]||output.slice(0,300);
+      (state.reviewRejections||=[]).push({callId:payload.call_id,at,reason:reason.replace(/\\+"?/g,'').trim()});
+      if(state.reviewRejections.length>10)state.reviewRejections.splice(0,state.reviewRejections.length-10);
+    }
+  }
   if(row.type==='response_item'&&['custom_tool_call','function_call','message','reasoning'].includes(payload.type)&&!pollOnly(payload)){
     const workAt=Date.parse(at);if(Number.isFinite(workAt))state.lastExecutorWorkAt=Math.max(state.lastExecutorWorkAt||0,workAt);
   }
@@ -120,6 +137,8 @@ function check(run,binding,state){
   if(Date.now()-lastClockAt<60000)return null;
   lastClockAt=Date.now();
   readExecutor(state,binding);
+  // A watcher restarted on an existing run starts reading at its saved offset; take the current mode from the tail once.
+  if(!state.executorSettings){const found=require('./model-fallback.cjs').settingsOf(binding.executorId);if(found)state.executorSettings=found;}
   const snapshot=snapshotOf(run,binding),paced=paceNow(run,binding,state,snapshot),announced=state.clockAnnounced||={};
   if(paced.processActivityAt)state.lastProcessActivityAt=Math.max(state.lastProcessActivityAt||0,paced.processActivityAt);
   if(paced.subagentActivityAt)state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,paced.subagentActivityAt);
@@ -136,17 +155,61 @@ function check(run,binding,state){
   const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+'@'+item.used+':'+item.waiting.join(',')));
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
   for(const [,item] of repeated)item.announced=now();
+  // A checked wait on Jay's approval already says what is missing: asking again every hour only spends turns.
+  const waitingUser=state.checkedWait?.kind==='user_approval';
   const lastEvent=state.lastRealEventAt||Date.parse(binding.createdAt)||Date.now(),quietEvent=awakeSince(state,lastEvent)>=NO_EVENT_REVIEW_MS;
-  const noEventHour=quietEvent&&once('no_event_hour:'+lastEvent);
+  const noEventHour=quietEvent&&!waitingUser&&once('no_event_hour:'+lastEvent);
   // A background job running alone is still idle capacity: only the executor's own turns and its subagents count.
   const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
-  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length);
+  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser;
   const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round(awakeSince(state,idleSince)/60000),openCriteria,readyPackages}:null;
+  // An open criterion no live package names (acceptanceIds) for 10 minutes while seats sit free: the supervisor
+  // names the packages to dispatch (Jay 2026-10-11). Kept in the clock so dispatch-audit stays shared with Claude.
+  const live=['ready','inFlight','blocked','returned'].flatMap(key=>snapshot?.packages?.[key]||[]);
+  const covered=new Set(live.flatMap(item=>Array.isArray(item.acceptanceIds)?item.acceptanceIds:[]));
+  const uncovered=snapshot?openCriteria.filter(id=>!covered.has(id)).sort():[];
+  const plan=state.unplanned||={};
+  for(const id of Object.keys(plan))if(!uncovered.includes(id))delete plan[id];
+  for(const id of uncovered)plan[id]??=Date.now();
+  const longUncovered=uncovered.filter(id=>awakeSince(state,plan[id])>=UNPLANNED_MS);
+  let unplanned=null;
+  if(longUncovered.length&&!waitingUser&&once('unplanned:'+longUncovered.join(','))){
+    const seats=Number(snapshot?.capacity?.verified)||0,inFlight=(snapshot?.packages?.inFlight||[]).length;
+    unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awakeSince(state,plan[id])))/60000)};
+  }
+  // A supervisor instruction not acted on by its deadline: no real event and no snapshot update since it was sent.
+  let instructionOverdue=null;const sent=state.instruction;
+  if(sent&&!waitingUser){
+    const acted=(state.lastRealEventAt||0)>sent.sentAt||Date.parse(snapshot?.updatedAt)>sent.sentAt;
+    if(acted)state.instruction=null;
+    else if(awakeSince(state,sent.sentAt)>=sent.deadlineMs*((sent.misses||0)+1)){
+      sent.misses=(sent.misses||0)+1;
+      instructionOverdue={eventId:sent.eventId,what:sent.what,doneWhen:sent.doneWhen,minutes:Math.round(awakeSince(state,sent.sentAt)/60000),misses:sent.misses,
+        handling:sent.misses>=2?'第二次逾時：監督自行處理（改派子代理、拆小或接手判定），不通知使用者':'第一次逾時：監督改道，例如交子代理、拆小或換做法'};
+      if(sent.misses>=2)state.instruction=null;
+    }
+  }
+  // Permission mode: tell the supervisor once while the executor runs under auto review, again on each new
+  // refusal, and once more when Jay switches it to full access so blocked work resumes without anyone asking.
+  const settings=state.executorSettings,autoReview=Boolean(settings?.approvalPolicy&&settings.approvalPolicy!=='never');
+  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId));
+  let permission=null,permissionChanged=null;
+  if(autoReview&&(once('permission:'+settings.approvalPolicy+':'+settings.reviewer)||rejections.length)){
+    permission={approvalPolicy:settings.approvalPolicy,reviewer:settings.reviewer,since:settings.at,newRejections:rejections,title:state.threadTitles?.executor||null};
+    state.permissionWarned=true;
+  }else if(!autoReview&&settings&&state.permissionWarned){state.permissionWarned=false;permissionChanged={approvalPolicy:settings.approvalPolicy,at:settings.at};}
+  let automationFound=[];
+  if(Date.now()-(state.lastAutomationCheckAt||0)>=AUTOMATION_CHECK_MS){
+    state.lastAutomationCheckAt=Date.now();
+    automationFound=automations.aimedAt([binding.supervisorId,binding.executorId]).filter(item=>once('automation:'+item.id+'@'+item.updatedAt));
+  }
+  const loggedOut=login.due(state,run)||[];
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
-    ...(idleWork?['idle_with_work']:[])];
+    ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
+    ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
@@ -160,6 +223,7 @@ function check(run,binding,state){
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
-    ...(idleWork?{idleWithWork:idleWork}:{})};
+    ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
+    ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{})};
 }
-module.exports={overdueNeedsReview,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly};
+module.exports={overdueNeedsReview,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince};

@@ -103,6 +103,13 @@ function brief() {
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.decision?.disposition, at:item.event?.at}));
   return {status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
+    // Jay is online for 10 minutes after typing in this chat: then list every known and foreseeable approval at once.
+    user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < require('./guard.cjs').ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
+    threads:state.threadTitles || null, paused:fs.existsSync(path.join(run, 'PAUSED.json')) ? read(path.join(run, 'PAUSED.json')) : null,
+    executorPermission:state.executorSettings || null, reviewRejections:(state.reviewRejections || []).slice(-3),
+    instruction:state.instruction || null, modelSwitch:state.modelSwitch || null,
+    rateLimits:Object.fromEntries(Object.entries(state.rateLimits || {}).filter(([, item]) => item.until > Date.now()).map(([key, item]) => [key, {until:iso(item.until), basis:item.basis}])),
+    dashboard:path.join(run, require('./dashboard.cjs').FILE),
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, paced.subagentActivityAt || 0)),
       lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(state.executorLog || pace.sessionFile(binding.executorId))},
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
@@ -139,6 +146,21 @@ function stop() {
   load();
   fs.writeFileSync(path.join(run, 'STOP'), now() + '\n');
   return { run, stopRequested: true };
+}
+// Jay's pause: the watcher keeps delivering real executor events but wakes no model for clocks or dispatch checks.
+function pause() {
+  load();
+  need(typeof other === 'string' && other.trim(), 'Pause needs Jay\'s exact words');
+  write(path.join(run, 'PAUSED.json'), {quote:other, at:now()});
+  return { run, paused:true };
+}
+function resume() {
+  load();
+  const file = path.join(run, 'PAUSED.json');
+  if (!fs.existsSync(file)) return { run, paused:false };
+  fs.appendFileSync(path.join(run, 'pause-history.jsonl'), JSON.stringify({...read(file), resumedAt:now(), resumeQuote:other || null}) + '\n');
+  fs.unlinkSync(file);
+  return { run, paused:false, resumed:true };
 }
 function attachDispatch() {
   const {binding}=load();
@@ -192,7 +214,9 @@ try {
     : command === 'attach-dispatch' ? attachDispatch()
     : command === 'dispatch-preflight' ? dispatchPreflight()
     : command === 'stop' ? stop()
-    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, stop RUN'); })();
+    : command === 'pause' ? pause()
+    : command === 'resume' ? resume()
+    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN'); })();
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(error.message);

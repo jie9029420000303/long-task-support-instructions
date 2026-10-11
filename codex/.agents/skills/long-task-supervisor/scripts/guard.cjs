@@ -17,6 +17,11 @@ const NO_EVENT_REVIEW_MS = 60 * 60 * 1000;
 // Executor and subagents quiet for 5 minutes while criteria are open or packages are ready: work waits on nobody,
 // e.g. the main line sits on one background job (2026-10-07 GDB: 10.2 of 23.7 hours idle, no subagent).
 const IDLE_WORK_MS = 5 * 60 * 1000;
+// Every supervisor instruction carries a deadline, 30 minutes unless the decision sets one; a miss reroutes, a
+// second miss is the supervisor's to handle, never Jay's (Jay 2026-10-11). An open criterion that no package
+// covers for 10 minutes wakes the supervisor to plan it (A1/B1). Jay is online when he typed in the supervisor
+// chat within 10 minutes. Automations aimed at the bound chats are looked for every 30 minutes.
+const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 10 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000, AUTOMATION_CHECK_MS = 30 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -112,6 +117,13 @@ function validateDecision(config, contract, event, decision) {
     need(rows.size === contract.criteria.length, 'Unknown acceptance criterion');
   } else if (decision.disposition === 'reject' || decision.disposition === 'reply') {
     need(typeof decision.reply === 'string' && decision.reply.trim(), 'Missing specific reply');
+    if (decision.instruction !== undefined) {
+      const item = decision.instruction;
+      need(item && typeof item.what === 'string' && item.what.trim() && typeof item.doneWhen === 'string' && item.doneWhen.trim(),
+        'Instruction needs what and doneWhen');
+      need(item.deadlineMinutes === undefined || (Number.isFinite(item.deadlineMinutes) && item.deadlineMinutes >= 1 && item.deadlineMinutes <= 240),
+        'Instruction deadlineMinutes must be 1-240');
+    }
   } else if (decision.disposition === 'observe') {
     need(typeof decision.reason === 'string' && decision.reason.trim(), 'Missing observe reason');
     for (const field of ['reply', 'delivery', 'revision', 'results']) {
@@ -124,4 +136,5 @@ function validateDecision(config, contract, event, decision) {
   return decision;
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS, quietReview };
+  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS,
+  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, AUTOMATION_CHECK_MS, quietReview };

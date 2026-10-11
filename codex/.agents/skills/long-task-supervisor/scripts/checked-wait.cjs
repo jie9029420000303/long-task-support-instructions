@@ -45,6 +45,10 @@ function supervisorInput(state,binding){
 function observeSupervisorInput(state,detail){
   const turn=detail.turns?.[0];
   const human=turn?.items?.filter(item=>item.type==='userMessage'&&!JSON.stringify(item).includes('LONG_TASK_DELIVERY:')).at(-1);
-  if(human)state.lastSupervisorInputMarker=human.id||turn.id;
+  if(!human)return;
+  const marker=human.id||turn.id;
+  // Jay counts as online for 10 minutes after he types in the supervisor chat (Jay 2026-10-11).
+  if(marker!==state.lastSupervisorInputMarker)state.lastUserInputAt=Number(turn.startedAt)>0?Number(turn.startedAt)*1000:Date.now();
+  state.lastSupervisorInputMarker=marker;
 }
 module.exports={validateWait,remember,unchanged,supervisorInput,observeSupervisorInput};

@@ -43,6 +43,9 @@ function call(name,args) {
   if (name==='send_message_to_thread') {
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
     sends.push(args.prompt);fs.writeFileSync(sentFile+'.tmp',JSON.stringify(sends));fs.renameSync(sentFile+'.tmp',sentFile);
+    // Model overrides are recorded beside the prompts so a rate-limit switch and its restore can be checked.
+    const argsFile=sentFile+'.args.json',calls=fs.existsSync(argsFile)?JSON.parse(fs.readFileSync(argsFile,'utf8')):[];
+    calls.push({threadId:args.threadId,model:args.model||null,thinking:args.thinking||null,prompt:args.prompt});fs.writeFileSync(argsFile,JSON.stringify(calls));
     return reply({threadId:args.threadId});
   }
   throw Error('Unexpected tool '+name);

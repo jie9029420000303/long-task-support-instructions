@@ -93,6 +93,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有就緒或受阻的工作在等同一個資源；監督評估能否並行。
 - `repeat`：綁定後同一條指令連續失敗 3 次。處理過一次進度查核後重新計數。
 - `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
+- `unplanned_criteria`：未通過的驗收條件 10 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），執行端在忙也照樣觸發。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
 
 處理 `no_event_hour`：先用 brief 的 pace 以同一公式重算各在途包基準，對照執行端填的時長與實際輸出。基準明顯過長、產出與進度不符或證據不足時，reply 一則具體問題：請執行端回報目前完成到哪、剩下什麼，並以實測速度重估在途包時長、更新派工快照；只剩已核對的使用者核准或外部結果等待時用 observe。這類事件不是 silence，observe 不需 wait。
 
@@ -130,3 +131,16 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 
 
 進度節流：超過原 AI 基準 1.5 倍仍記入 clock.jsonl；有近期產出的工作包不因此喚醒模型。只有該包也達既有 15 分鐘無產出條件才發 overdue；提問、阻塞、送驗、漏派、缺基準及其他異常維持處理。這不改驗收門檻、不減少工作範圍；時鐘不是人工驗收。指令成功清除該指令失敗計數，只有未被成功打斷的三次失敗才算 repeat。
+
+## 指令期限、權限模式、排程、登入、限速、儀表板與暫停
+
+以下都由背景程式不呼叫模型地查核，有問題才產生 `progress_review`；處理方式見 event-review。
+
+- `instruction_overdue`：監督送出 reply／reject 後開始計時，期限是 decision 的 `instruction.deadlineMinutes`，沒填則 30 分鐘，扣掉電腦睡眠。期限內只要有執行端的真正事件，或派工快照的 `updatedAt` 晚於送出時間，就算有動靜。逾時發第一次（`misses=1`），再過一個期限發第二次（`misses=2`），之後不再追這則。
+- `permission_review`／`permission_changed`：從執行對話紀錄的 `turn_context` 與 `thread_settings_applied` 讀權限模式，從工具輸出讀「rejected due to unacceptable risk」拒絕原文。自動審查下開工通知一次，之後每次新拒絕再通知；切成完全存取（`approval_policy=never`）後發一次 `permission_changed`。
+- `automation_found`：啟動時及每 30 分鐘讀 `CODEX_HOME/automations/*/automation.toml`，找出 ACTIVE 且 `target_thread_id` 或 prompt 指向監督／執行對話的排程；同一排程同一版本只通知一次。
+- `login_expired`：`RUN/login-sites.json` 格式為 `{"sites":[{"name":"網站名","url":"https://…","loggedOutPattern":"登出時網址或標題會出現的正規式"}]}`。每小時用 chrome-relay 在使用者已登入的 Chrome 另開背景分頁，讀落點網址與標題後只關閉該分頁，結果寫入 `RUN/login-status.json`；每個網站每次登出只通知一次。
+- 限速換模型：讀 opencodex 的 `usage.jsonl`，以「對話 ID 的 SHA-256 前 32 碼」對應監督、執行對話與其子代理，看到 429／rate-limit 就記錄該系列的限速與恢復時間，寫入 `RUN/model-fallback.json`。監督或執行對話被拒時，送一則短訊並帶 `model` 參數，讓它改用下一個模型接續；恢復時間到了，下一則送給它的訊息帶回原模型。子代理被拒時，通知執行端改用新模型重派。全部可用模型都被限速時發 `rate_limited_all`。binding 的 `modelFallback` 設為 false 可關閉。
+- `監督儀表板.md`：每分鐘更新一次，包括監看狀態、執行對話權限、限速換模型、等待中的指示、逐條驗收、在途工作，以及用已通過條數推算的預估完成時間和算法。
+- 暫停：`supervise.cjs pause RUN "<使用者原話>"` 寫入 `PAUSED.json`。暫停期間不送時鐘與派工事件，執行對話交回的真正事件照常處理；`supervise.cjs resume RUN` 解除暫停並重新起算各時鐘。另外，只剩等使用者核准（checked wait 的 kind 為 user_approval）時，不發 `no_event_hour` 和 `idle_with_work`。
+- 線上狀態：使用者 10 分鐘內在監督對話打過字，context 的 `brief.user.online` 為 true。
