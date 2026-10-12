@@ -48,7 +48,7 @@ test('a supervisor session that missed an event gets one short prompt after thre
   await clock.advance(90 * 1000)
   expect(submitted.length).toBe(1)
   expect(submitted[0]).toContain('progress_review')
-  expect(submitted[0]).toContain('supervise.cjs brief')
+  expect(submitted[0]).toContain('supervise.cjs context')
   await clock.advance(10 * 60 * 1000)
   expect(submitted.length).toBe(1)
 })

@@ -12,11 +12,13 @@ const MIN_SAMPLES=3;
 const median=values=>{const sorted=[...values].sort((a,b)=>a-b),mid=sorted.length>>1;return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;};
 const round=value=>Math.round(value*10)/10;
 function agentRun(file){
-  const messages=new Map();let startedAt=null,lastAt=null,done=false,model=null;
+  const messages=new Map();let startedAt=null,lastAt=null,done=false,model=null,rateLimit=null;
   for(const line of fs.readFileSync(file,'utf8').split('\n')){
     let row;try{row=JSON.parse(line);}catch{continue;}
     const at=Date.parse(row.timestamp);
     if(Number.isFinite(at)){startedAt??=at;lastAt=at;}
+    // A refused subagent stops on the shared subscription limit; the executor's clock waits for the reset.
+    if(row.isApiErrorMessage){rateLimit=require('./signals.cjs').rateLimitOf(row)||rateLimit;continue;}
     if(row.type!=='assistant'||!row.message)continue;
     model=row.message.model||model;
     if(row.message.usage)messages.set(row.message.id||row.uuid,row.message.usage.output_tokens||0);
@@ -24,7 +26,7 @@ function agentRun(file){
   }
   const outputTokens=[...messages.values()].reduce((sum,value)=>sum+value,0);
   const seconds=startedAt&&lastAt?(lastAt-startedAt)/1000:0;
-  return {id:path.basename(file,'.jsonl').replace(/^agent-/,''),model,startedAt,lastAt,outputTokens,done,seconds};
+  return {id:path.basename(file,'.jsonl').replace(/^agent-/,''),model,startedAt,lastAt,outputTokens,done,seconds,rateLimit};
 }
 function subagentDir(binding){return path.join(path.dirname(binding.executorLog),binding.executorId,'subagents');}
 const agentFiles=dir=>{try{return fs.readdirSync(dir).filter(name=>/^agent-.+\.jsonl$/.test(name)).map(name=>path.join(dir,name));}catch{return [];}};
@@ -117,7 +119,9 @@ function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
   });
   // A live process counts as activity even while it writes nothing.
   const processActivityAt=Math.max(0,...packages.filter(item=>item.process&&(item.lastActivityAt||item.alive)).map(item=>item.alive?now:Date.parse(item.lastActivityAt)))||null;
-  return {speed:measured,packages,processActivityAt};
+  // Subagents refused for the subscription limit; the clock waits for the reset instead of calling them stalled.
+  const rateLimits=runs.filter(run=>run.rateLimit&&!run.done).map(run=>({id:run.id,rateLimit:run.rateLimit}));
+  return {speed:measured,packages,processActivityAt,...(rateLimits.length?{rateLimits}:{})};
 }
 // Real test resources (a host's diagnosis slots, test identities) the snapshot declares: capacity.resources
 // [{key,slots}] and per-package uses [{key,units}]. Free slots while ready or blocked work needs the same resource
