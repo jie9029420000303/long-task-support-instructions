@@ -19,7 +19,8 @@ function safePoint(run,binding){
   if(caller)need([binding.supervisorId,binding.toolSessionId].includes(caller),'Only the original supervisor may update this run');
 }
 function base(run,binding){const file=path.join(run,'contract.json');need(sha(file)===binding.contractSha256,'Locked contract changed');return read(file);}
-function validateRow(row,binding,contract){
+// known: criterion IDs already in scope, including ones added by earlier amendments.
+function validateRow(row,binding,contract,known=new Set(contract.criteria.map(item=>item.id))){
   need(row&&/^[A-Za-z0-9_-]+$/.test(row.id)&&row.contractSha256===binding.contractSha256,'Amendment needs unique ID and locked contract hash');
   const authority=row.authority;
   need(authority?.role==='user'&&text(authority.quote)&&text(authority.locator)&&Number.isFinite(Date.parse(authority.at)),'Amendment needs the human user quote, source locator and timestamp');
@@ -27,11 +28,17 @@ function validateRow(row,binding,contract){
   need(source&&path.isAbsolute(source.path)&&binding.allowedRoots.some(root=>inside(source.path,root))&&fs.existsSync(source.path)&&sha(source.path)===source.sha256,'User source missing, outside allowed roots or changed');
   need(fs.readFileSync(source.path,'utf8').includes(authority.quote),'User quote is absent from the saved source');
   need(Array.isArray(row.changes)&&row.changes.length,'Amendment has no changes');
-  const ids=new Set(contract.criteria.map(item=>item.id)),seen=new Set();
+  const seen=new Set(),added=new Set();
   for(const change of row.changes){
-    need(change&&['exclude','replace','restore','authorization'].includes(change.action)&&text(change.id)&&!seen.has(change.id),'Invalid or duplicate amendment change');seen.add(change.id);
+    need(change&&['exclude','replace','restore','authorization','add'].includes(change.action)&&text(change.id)&&!seen.has(change.id),'Invalid or duplicate amendment change');seen.add(change.id);
     if(change.action==='authorization'){need(text(change.scope)&&text(change.instruction),'Authorization needs scope and instruction');continue;}
-    need(ids.has(change.id),'Amendment references an unknown criterion');
+    // Jay may add a criterion (2026-10-11); it never rewrites the locked contract and must pass before acceptance.
+    if(change.action==='add'){
+      need(/^[A-Za-z0-9_-]+$/.test(change.id)&&!known.has(change.id),'Added criterion needs a new unique ID');
+      for(const key of ['requirement','verify'])need(text(change[key]),'Added criterion needs '+key);
+      added.add(change.id);continue;
+    }
+    need(known.has(change.id),'Amendment references an unknown criterion');
     if(change.action==='replace')for(const key of ['requirement','verify'])need(text(change[key]),'Replacement needs '+key);
   }
   return row;
@@ -43,12 +50,17 @@ function effective(run,binding){
   const rows=fs.readFileSync(file,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line));
   need(rows.length,'Amendment journal is empty');
   const criteria=new Map(contract.criteria.map(item=>[item.id,{...item}])),excluded=new Map(),authorizationUpdates=new Map(),ids=new Set();
+  const added=new Map(),known=new Set(contract.criteria.map(item=>item.id));
   let prior=binding.contractSha256;
   for(const row of rows){
-    validateRow(row,binding,contract);need(!ids.has(row.id)&&row.previousSha256===prior,'Amendment journal order or ID is invalid');ids.add(row.id);prior=digest(row);
+    validateRow(row,binding,contract,known);need(!ids.has(row.id)&&row.previousSha256===prior,'Amendment journal order or ID is invalid');ids.add(row.id);prior=digest(row);
     for(const change of row.changes){
-      const original=contract.criteria.find(item=>item.id===change.id);
+      const original=contract.criteria.find(item=>item.id===change.id)||added.get(change.id);
       if(change.action==='authorization'){authorizationUpdates.set(change.id,{...change,authority:row.authority});continue;}
+      if(change.action==='add'){
+        const item={id:change.id,requirement:change.requirement,verify:change.verify,source:row.authority.locator,amendmentId:row.id,authority:row.authority,added:true};
+        added.set(change.id,item);known.add(change.id);criteria.set(change.id,{...item});continue;
+      }
       if(change.action==='exclude'){excluded.set(change.id,{...(criteria.get(change.id)||excluded.get(change.id)||original),amendmentId:row.id,authority:row.authority});criteria.delete(change.id);}
       else if(change.action==='restore'){criteria.set(change.id,{...original});excluded.delete(change.id);}
       else {criteria.set(change.id,{...original,requirement:change.requirement,verify:change.verify,source:row.authority.locator,amendmentId:row.id,authority:row.authority});excluded.delete(change.id);}
@@ -64,7 +76,8 @@ function append(run,binding,input){
   const rows=fs.existsSync(file)?fs.readFileSync(file,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)):[];
   const prior=rows.find(row=>row.id===input.id);
   if(prior){const {previousSha256,...saved}=prior;need(JSON.stringify(saved)===JSON.stringify(input),'Recorded amendment is immutable');return {recorded:true,alreadyRecorded:true};}
-  validateRow(input,binding,contract);
+  const current=effective(run,binding);
+  validateRow(input,binding,contract,new Set([...current.criteria,...(current.excluded||[])].map(item=>item.id)));
   const row={...input,previousSha256:rows.length?digest(rows.at(-1)):binding.contractSha256};
   // Validate the proposed complete scope before committing its immutable journal entry.
   const allExcluded=new Set(effective(run,binding).excluded?.map(item=>item.id)||[]);

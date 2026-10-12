@@ -14,6 +14,15 @@ const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
 // The executor and every subagent quiet for 5 minutes while acceptance work remains: dispatch what can run in parallel
 // instead of waiting on one background job (2026-10-07 GDB: 10.2 of 23.7 hours had the executor idle, no subagent).
 const IDLE_WORK_MS = 5 * 60 * 1000;
+// An unreasonably long baseline would keep a package from ever counting as overdue (Jay 2026-10-11): one
+// question when an hour passes with no real executor event, counted again from each new event.
+const NO_EVENT_REVIEW_MS = 60 * 60 * 1000;
+// Every supervisor instruction carries a deadline, 30 minutes unless the decision sets one; a miss reroutes, a
+// second miss is the supervisor's to handle, never Jay's (Jay 2026-10-11). An open criterion no package covers for
+// 10 minutes wakes the supervisor to plan it. Jay is online when he typed in the supervisor chat within 10 minutes.
+const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 10 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000;
+// A rate-limit notice that names no reset time: the subscription's five-hour window.
+const RATE_LIMIT_FALLBACK_MS = 5 * 60 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -21,7 +30,24 @@ function inside(file, root) {
   const relative = path.relative(root, file);
   return relative === '' || (relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
 }
-function validateContract(contract) {
+// An archived locked source may move only with its exact hash, registered by relocate-sources.
+function relocatedSource(run, binding, source) {
+  if (!run || !binding) return false;
+  const file = path.join(run, 'source-relocations.json');
+  if (!fs.existsSync(file)) return false;
+  const manifest = read(file);
+  need(manifest?.schema === 1 && manifest.contractSha256 === binding.contractSha256 && Array.isArray(manifest.entries), 'Invalid source relocation manifest');
+  const matches = manifest.entries.filter(entry => entry?.originalPath === source.path);
+  need(matches.length <= 1, 'Duplicate source relocation');
+  if (!matches.length) return false;
+  const entry = matches[0];
+  need(entry.sha256 === source.sha256 && path.isAbsolute(entry.relocatedPath) &&
+    binding.allowedRoots.some(root => inside(entry.relocatedPath, root)) &&
+    fs.existsSync(entry.relocatedPath) && hash(entry.relocatedPath) === source.sha256,
+    'Relocated acceptance source missing, outside allowed roots or changed');
+  return true;
+}
+function validateContract(contract, context = {}) {
   need(contract && typeof contract === 'object', 'Missing acceptance contract');
   need(typeof contract.goal === 'string' && contract.goal.trim(), 'Missing original goal');
   need(typeof contract.authorization === 'string' && contract.authorization.trim(), 'Missing original authorization');
@@ -36,7 +62,9 @@ function validateContract(contract) {
   }
   need(Array.isArray(contract.sources) && contract.sources.length > 0, 'Missing locked source');
   for (const source of contract.sources) {
-    need(path.isAbsolute(source.path) && fs.existsSync(source.path) && hash(source.path) === source.sha256, 'Acceptance source missing or changed');
+    need(path.isAbsolute(source.path), 'Acceptance source path must be absolute');
+    const originalMatches = fs.existsSync(source.path) && hash(source.path) === source.sha256;
+    need(originalMatches || relocatedSource(context.run, context.binding, source), 'Acceptance source missing or changed');
   }
   return contract;
 }
@@ -91,6 +119,13 @@ function validateDecision(config, contract, event, decision) {
     need(rows.size === contract.criteria.length, 'Unknown acceptance criterion');
   } else if (decision.disposition === 'reject' || decision.disposition === 'reply') {
     need(typeof decision.reply === 'string' && decision.reply.trim(), 'Missing specific reply');
+    if (decision.instruction !== undefined) {
+      const item = decision.instruction;
+      need(item && typeof item.what === 'string' && item.what.trim() && typeof item.doneWhen === 'string' && item.doneWhen.trim(),
+        'Instruction needs what and doneWhen');
+      need(item.deadlineMinutes === undefined || (Number.isFinite(item.deadlineMinutes) && item.deadlineMinutes >= 1 && item.deadlineMinutes <= 240),
+        'Instruction deadlineMinutes must be 1-240');
+    }
   } else if (decision.disposition === 'observe') {
     need(typeof decision.reason === 'string' && decision.reason.trim(), 'Missing observe reason');
     for (const field of ['reply', 'delivery', 'revision', 'results']) {
@@ -107,8 +142,11 @@ function validateDecision(config, contract, event, decision) {
 }
 // A cross-session message lands as a user turn, or as a queued_command attachment or queue row when it
 // arrives mid-turn. The model's own replies are never delivery evidence.
+// A compaction summary replays older conversation, delivery markers included: it is history, never a receipt or
+// new input (2026-10-12: 8 Claude summaries carried LONG_TASK_DELIVERY markers).
+const replayed = row => Boolean(row?.isCompactSummary || row?.isVisibleInTranscriptOnly);
 function deliveredText(row) {
-  if (!row || row.type === 'assistant') return '';
+  if (!row || row.type === 'assistant' || replayed(row)) return '';
   const content = row.message?.content, parts = [];
   if (typeof content === 'string') parts.push(content);
   else if (Array.isArray(content)) for (const block of content) if (block?.type === 'text') parts.push(block.text);
@@ -121,6 +159,28 @@ function deliveryRecorded(file, requires) {
     try { const text = deliveredText(JSON.parse(line)); return requires.every(item => text.includes(item)); } catch { return false; }
   });
 }
+// Who wrote a user row: 'human' typed in this chat, 'peer' forwarded by another desktop chat, 'scheduled' sent by an
+// automation; null for tool results, notifications and replayed summaries. Older transcripts carry no origin, so a
+// plain text row without one is the person.
+function inputSource(row) {
+  if (!row || row.type !== 'user' || row.isSidechain || replayed(row)) return null;
+  if (row.turnOrigin === 'scheduled') return 'scheduled';
+  const kind = row.origin?.kind, content = row.message?.content;
+  if (kind === 'human' || kind === 'peer') return kind;
+  if (kind || row.isMeta) return null;
+  return typeof content === 'string' || (Array.isArray(content) && content.some(block => block?.type === 'text')) ? 'human' : null;
+}
+// Overdue wakes only when the package is past 1.5x its baseline, has produced nothing for the silence window and
+// has no process still running it (Jay 2026-10-11); a slow but working package is recorded, not interrupted.
+function overdueNeedsReview(item, nowMs = Date.now()) {
+  const last = Date.parse(item.lastActivityAt);
+  return item.ratio >= OVERDUE_RATIO && item.alive !== true && (!Number.isFinite(last) || last > nowMs || nowMs - last >= PROGRESS_REVIEW_MS);
+}
+// Machine sleep does not count toward an awake-time window, as it does not count toward a package's elapsed time.
+function awakeSince(sleeps, from, nowMs = Date.now()) {
+  const slept = (sleeps || []).reduce((sum, item) => sum + Math.max(0, Math.min(nowMs, Date.parse(item.to)) - Math.max(from, Date.parse(item.from))), 0);
+  return nowMs - from - slept;
+}
 // Background subagents write their own transcripts beside the executor's; their growth is executor work.
 // Subagents of the executor, including the agents its dynamic workflows start one level down in workflows/<runId>/.
 function subagentActivityAt(binding) {
@@ -132,5 +192,6 @@ function subagentActivityAt(binding) {
   return Math.min(latest, Date.now());
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, quietReview,
-  deliveredText, deliveryRecorded, subagentActivityAt };
+  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
+  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, RATE_LIMIT_FALLBACK_MS, quietReview, replayed, inputSource,
+  overdueNeedsReview, awakeSince, deliveredText, deliveryRecorded, subagentActivityAt };

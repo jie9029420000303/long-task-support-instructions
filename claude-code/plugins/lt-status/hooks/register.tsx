@@ -52,7 +52,7 @@ async function refresh($: any): Promise<void> {
   if (pendingId && nudgeDue({ isSupervisor, pendingId, seenAt: seenAt.get(pendingId) ?? null, lastTurnAt, turnRunning, nudged: nudged.has(pendingId), now: nowMs })) {
     nudged.add(pendingId)
     const waited = Math.round((nowMs - (seenAt.get(pendingId) || nowMs)) / 60000)
-    void $.prompt.submit({ text: `監督備援喚醒：待決事件 ${state.pending.kind}（${pendingId}）已等 ${waited} 分鐘，背景通知可能沒有喚醒模型。請依 long-task-supervisor runtime 處理，先執行 node ~/.claude/skills/long-task-supervisor/scripts/supervise.cjs brief "${run}"。` })
+    void $.prompt.submit({ text: `監督備援喚醒：待決事件 ${state.pending.kind}（${pendingId}）已等 ${waited} 分鐘，背景通知可能沒有喚醒模型。請依 long-task-supervisor runtime 處理，先執行 node ~/.claude/skills/long-task-supervisor/scripts/supervise.cjs context "${run}" "${pendingId}"。` })
   }
   const resolved = Object.entries(state.resolved || {}) as [string, any][]
   const withApprovals = resolved.map(([, item]) => item.decision?.pendingApprovals).filter(Boolean).pop()

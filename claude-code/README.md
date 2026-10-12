@@ -251,3 +251,32 @@ Claude Code 的落地方式：
 - `workflow/` 流程圖尚未加入收尾步驟。
 
 已知限制：Browser pane 截圖只存在子代理的對話中，主線看不到；要讓主線目視，子代理需用 `scripts/screenshot.js` 落檔（agent 定義已寫明）。 套件安裝被 hook 一律擋下（含工作包授權的情況）——真需要安裝由主線自己做。Browser pane／playwright MCP／chrome-devtools MCP 各是 session 級共用瀏覽器，同一工具同時只能有一個介面代理。使用者自己的全域 PreToolUse hook 訊息（分支確認提示）會被子代理讀到並當作可疑注入回報，無害但會多一段文字。
+
+## 對齊 Codex v0.22.0–v0.24.4 的監督修正（2026-10-13）
+
+Codex adapter 在 v0.22.0–v0.24.4 依 2026-10-11 定案加了一批監督行為，Claude 側原本只跟到 v0.21.0。Claude 的背景監看抓到一個事件就結束、由監督重掛，也不能自己發訊（只有面板 mod 能在監督對話裡送一句話），所以凡是 Codex 由背景程式直接送訊的地方，Claude 改成「背景程式偵測、監督或 mod 代送」。訊號全部取自 Claude transcript，2026-10-12 掃描實際紀錄確認：
+
+| 訊號 | transcript 欄位 | 實測 |
+|---|---|---|
+| 執行對話權限模式 | 使用者列 `permissionMode` | bypassPermissions 1185、auto 334 列 |
+| 自動模式擋下操作 | 工具結果「denied by the Claude Code auto mode classifier」 | 82 筆 |
+| 額度限速 | assistant 列 `isApiErrorMessage`、`error=rate_limit`，以 `stop_sequence` 結束 | 36 筆，文字含「resets 3:40am (Asia/Taipei)」 |
+| 訊息來源 | `origin.kind` human／peer、`turnOrigin=scheduled` | — |
+| 壓縮 | 同一檔的 `compact_boundary` 與 `isCompactSummary` 摘要列 | 8 份摘要內含 `LONG_TASK_DELIVERY` 標記 |
+
+落地內容：
+
+- **規格**：`references/spec.md` 同步不變量 11、25。`overdue` 只在超過基準 1.5 倍、該包 15 分鐘沒有產出、也沒有程序在跑時叫醒，progress-preflight 對已恢復產出的包作廢；新增 `no_event_hour`。
+- **減噪與推進**：`idle_with_work` 不把輪詢背景（`TaskOutput`、`BashOutput`、只有 sleep 的 Bash）算成工作；新增 `unplanned_criteria`、`instruction_overdue`（decision 可附 `instruction` 期限）；等監督裁決的 progress／waiting 改當 question；同一指令成功就清除失敗計數；喚醒輸出只帶事件摘要與 `supervise.cjs context` 指令。
+- **打擾與狀態**：`pause`／`resume`，`pause`／`stop` 必須附本回合真人（human）或跨對話（peer）送來的原話；`brief.user.online`；每分鐘更新的 `監督儀表板.md`；`relocate-sources` 與 amend 的 `add`。
+- **平台訊號**：`permission_review`／`permission_changed`、`automation_found`、`login_expired`（chrome-relay，與 Codex 共用 `login-check.cjs`）、`rate_limit_reset`、`executor_model`。限速時不換模型也不換帳號：桌面版是同一帳號，監督也被限，所以限速期間不叫醒任何模型，到重置時間才叫醒監督續接。執行端不是 Opus、或推理低於 high 時，監督用桌面工具 `set_session_model`／`set_session_effort` 切換。
+- **同類缺陷一併修正**：壓縮摘要不再被當成送達證據（`deliveredText`），也不再被當成使用者新輸入。`checked-wait` 原本以「沒有 origin」判斷真人輸入，但現行 transcript 的真人列都帶 `origin.kind=human`，所以使用者打字從來解除不了等待；改成共用的 `inputSource`。
+- **執行端**：`execution.md` 新增「受監督時另外做到」，包括標 `acceptanceIds`、準備工作開工即可派、重做 2 次凍結、限速等重置、自動模式擋下照實交監督、等裁決用 question。
+- **不移植（Codex 專屬）**：read_thread 重試、wait_threads 退回輪詢、MCP 分頁、rollout 壓縮分段、忙碌目標排隊對帳（Claude 已有 queued 對帳）、證明遺失重送（Claude 背景程式不能發訊）、model-route／opencodex 限速換模型。
+- **已揭露差距**：保持載入（Codex App 閒置約 3 小時會卸載對話）在 Claude 桌面版是否發生尚未實測，未實作，列為下一場長任務的實測項；對話內 `/loop`／cron 沒有停用選項，監督只告知使用者；面板 mod 的 TypeScript 測試在本機沒有執行器，只改了期望字樣，未實跑。
+
+| 驗證項 | 做法 | 結果 |
+|---|---|---|
+| 新增行為測試 | `node --test tests/test_claude_parity.cjs`（以假的 sysctl 隔離機器真實睡眠紀錄） | 19/19 |
+| 既有回歸 | `python3 -m unittest discover -s tests`；全部 17 個 `tests/test_*.cjs` | Python 109 OK；Node 208/208 |
+| 面板 mod | `plugins/lt-status/tests` | 本機無 TypeScript 測試執行器，未實跑 |

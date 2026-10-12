@@ -36,9 +36,10 @@ function supervisorInput(state,binding){
   try{fs.readSync(fd,buffer,0,buffer.length,start);}finally{fs.closeSync(fd);}
   const complete=buffer.lastIndexOf(10);if(complete<0)return;
   wait.supervisorOffset=start+complete+1;
+  // Only the person's own words lift the wait: current transcripts mark them origin.kind "human"; a forwarded chat,
+  // a notification or a replayed compaction summary is not an answer.
   const human=buffer.subarray(0,complete).toString('utf8').split('\n').some(line=>{
-    try{const row=JSON.parse(line),content=row.message?.content;return row.type==='user'&&!row.isSidechain&&!row.origin&&
-      (typeof content==='string'||Array.isArray(content)&&content.some(block=>block.type==='text'));}catch{return false;}
+    try{return require('./guard.cjs').inputSource(JSON.parse(line))==='human';}catch{return false;}
   });
   if(human){delete state.checkedWait;state.lastProgressReviewAt=0;}
 }

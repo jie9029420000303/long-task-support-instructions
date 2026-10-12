@@ -165,11 +165,13 @@ test('ten quiet minutes inside the interval and baselines do not wake the superv
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('a package past 1.5x its baseline is checked at once and only once',async()=>{
+// Jay 2026-10-11 narrowed this: past 1.5x alone is a diagnostic; the package must also have gone quiet for 15 minutes
+// with no process still running it (test_claude_parity covers the producing case that is only recorded).
+test('a package past 1.5x its baseline that went quiet is checked once and only once',async()=>{
   const f=fixture();
-  agent(f.subagents,'slow',{minutes:19,tokens:30000,done:false});
+  agent(f.subagents,'slow',{minutes:19,tokens:30000,done:false,endedMinutesAgo:16});
   save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-SLOW',handle:'agent:slow',evidence:['wp/WP-SLOW.md'],
-    baseline:{minutes:12,startedAt:minutesAgo(19),basis:'47118 tokens / 66.9 tok/s'}}]}});
+    baseline:{minutes:12,startedAt:minutesAgo(35),basis:'47118 tokens / 66.9 tok/s'}}]}});
   let child=start(f);
   try{
     await until(()=>pending(f)?.kind==='progress_review');
