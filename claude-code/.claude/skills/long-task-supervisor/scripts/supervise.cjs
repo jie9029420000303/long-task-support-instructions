@@ -36,8 +36,15 @@ function sessionCwd(file, fallback) {
   } finally {fs.closeSync(fd);}
   return fallback;
 }
-function visibleSupervisor(toolSessionId, projectRoot) {
+const desktopLog=file=>fs.readFileSync(file,'utf8').split('\n').some(line=>{
+  try{const row=JSON.parse(line);return row.type==='user'&&row.entrypoint==='claude-desktop';}catch{return false;}
+});
+// Auto mode may run tools in a temporary session; only then find the visible chat that refers to it. Any chat can
+// quote the ID by reading run files (2026-10-13 the GDB executor read a decision file naming its supervisor), so a
+// desktop tool session is already the supervisor and the executor is never a candidate.
+function visibleSupervisor(toolSessionId, projectRoot, executorId) {
   const toolLog=transcript(toolSessionId);
+  if (desktopLog(toolLog)) return {id:toolSessionId,log:toolLog,toolSessionId};
   const projects=path.join(process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME,'.claude'),'projects');
   const born=fs.statSync(toolLog).birthtimeMs;
   const matches=[];
@@ -46,7 +53,7 @@ function visibleSupervisor(toolSessionId, projectRoot) {
     for (const entry of fs.readdirSync(path.join(projects,project.name),{withFileTypes:true})) {
       if (!entry.isFile() || !/^[a-f0-9-]{36}\.jsonl$/.test(entry.name)) continue;
       const file=path.join(projects,project.name,entry.name);
-      if (file===toolLog || fs.statSync(file).mtimeMs<born) continue;
+      if (file===toolLog || entry.name===executorId+'.jsonl' || fs.statSync(file).mtimeMs<born) continue;
       const found=fs.readFileSync(file,'utf8').includes(toolSessionId);
       if (found) {
         const cwd=sessionCwd(file,projectRoot);
@@ -82,11 +89,9 @@ function init() {
   need(input.executorPrompt.includes(input.executorMarker), 'Executor prompt must contain its bind marker');
   need(Array.isArray(input.allowedRoots) && input.allowedRoots.includes(input.projectRoot) && input.allowedRoots.every(root => path.isAbsolute(root) && fs.existsSync(root)), 'Invalid allowed roots');
   validateContract(input.contract);
-  const visible = visibleSupervisor(input.supervisorId,input.projectRoot);
+  const visible = visibleSupervisor(input.supervisorId,input.projectRoot,input.executorId);
   const supervisorLog = visible.log;
-  need(fs.readFileSync(supervisorLog,'utf8').split('\n').some(line=>{
-    try{const row=JSON.parse(line);return row.type==='user'&&row.entrypoint==='claude-desktop';}catch{return false;}
-  }),'Supervisor is not a Claude Desktop conversation');
+  need(desktopLog(supervisorLog),'Supervisor is not a Claude Desktop conversation');
   const executorId = input.executorId;
   need(executorId !== visible.id && /^[a-f0-9-]{36}$/.test(executorId), 'Invalid executor session ID');
   const existingLog = transcript(executorId);
