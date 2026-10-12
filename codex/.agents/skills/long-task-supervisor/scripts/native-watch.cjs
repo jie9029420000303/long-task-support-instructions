@@ -24,6 +24,12 @@ const SUPERVISOR_WAKE_MS = Number(process.env.CODEX_SUPERVISOR_WAKE_MS) || 45000
 const DECISION_POLL_MS = Number(process.env.CODEX_SUPERVISOR_DECISION_POLL_MS) || 15000;
 const WATCH_IDLE_SLEEP_MS = Number(process.env.CODEX_WATCH_IDLE_SLEEP_MS) || 15000;
 const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
+// The App unloads a chat idle for about three hours and ends the processes it started, this watcher included
+// (2026-10-12: research chat idle 02:16→05:33, both watchers gone; every chat in the log unloaded after ~3h idle).
+// After 150 idle minutes the watcher sends its host, the supervisor chat, one short turn to stay loaded.
+const KEEPALIVE_MS = Number(process.env.CODEX_KEEPALIVE_MS) || 150 * 60000;
+const KEEPALIVE_TEXT = 'LONG_TASK_KEEPALIVE：背景監看掛在本對話，閒置約 3 小時 App 會卸載本對話並終止監看。這則只為保持載入：不讀資料、不做處理、不回覆使用者，用一句話結束回合即可。';
+const watchStartedAt = Date.now();
 const now = () => new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function save(file, object) {
@@ -224,6 +230,11 @@ function extractEvent(turn, message) {
   if (['progress','waiting'].includes(item.kind) && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
   return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,
     waitMinutes:Number.isFinite(item.waitMinutes)?item.waitMinutes:null,text,at:now()};
+}
+// Waiting on the supervisor's own ruling is a question for the supervisor, whatever kind the executor marked it
+// (2026-10-12 05:59 GDB: K1 sent as progress + waitMinutes 60 "Waiting for the supervisor's K1 ruling").
+function asksSupervisor(text) {
+  return /(?:等待?|待|需要?|請).{0,10}監督.{0,20}(?:裁決|裁定|決定|決策|核准|判定|回覆|指示)|(?:waiting for|awaiting|needs?|requires?).{0,30}supervisor/i.test(text || '');
 }
 function waitingHasBlocker(text) {
   const body=text.split('\n').filter(line=>!line.trim().startsWith('LONG_TASK_EVENT ')).join('\n');
@@ -445,6 +456,12 @@ async function watch() {
     const auditEvent=paused?null:dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const started = Date.now();
+    const hostIdle = Date.now() - Math.max(state.lastSupervisorActivityAt || 0, state.lastKeepaliveAt || 0, watchStartedAt);
+    if (hostIdle >= KEEPALIVE_MS && !state.inflight) {
+      state.lastKeepaliveAt = Date.now(); state.keepalives = (state.keepalives || 0) + 1; checkpoint();
+      await sendAndRead(binding.supervisorId, KEEPALIVE_TEXT, 'keepalive-' + state.keepalives);
+      continue;
+    }
     const response = await waitExecutor(45000);
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
@@ -461,6 +478,7 @@ async function watch() {
       state.lastRealEventAt=Date.now();
       if(state.progressWait)state.progressWait=null;
       const event = extractEvent(turn,await exactFinal(turn.id));
+      if(['waiting','progress'].includes(event.kind)&&asksSupervisor(event.text))event.kind='question';
       if(event.kind==='waiting'){
         if(waitingHasBlocker(event.text))event.kind='blocked';
         else if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';

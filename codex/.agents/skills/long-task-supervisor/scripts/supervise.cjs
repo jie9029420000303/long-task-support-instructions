@@ -143,14 +143,41 @@ function decision() {
   return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: Boolean(resolved) };
 }
 function stop() {
-  load();
+  const {binding} = load();
+  freshQuote(binding, 'Stop');
   fs.writeFileSync(path.join(run, 'STOP'), now() + '\n');
-  return { run, stopRequested: true };
+  return { run, stopRequested: true, quote: other };
+}
+// A pause or stop must come from words that reached the supervisor in this turn: typed by Jay, or forwarded to it
+// by another chat. Codex compaction replays older user messages verbatim with no time and drops forwarded ones;
+// on 2026-10-12 04:01 A's supervisor acted on Jay's 10/11 15:12 pause, lifted at 18:15, and stopped work for 5 hours.
+function freshQuote(binding, action) {
+  need(typeof other === 'string' && other.trim(), action + ' needs Jay\'s exact words');
+  const files = pace.sessionFiles(binding.supervisorId);
+  if (!files.length) return; // no local transcript to check against
+  const file = files.at(-1), size = fs.statSync(file).size, length = Math.min(size, 32 * 1024 * 1024);
+  const buffer = Buffer.alloc(length), fd = fs.openSync(file, 'r');
+  try { fs.readSync(fd, buffer, 0, length, size - length); } finally { fs.closeSync(fd); }
+  const lines = buffer.toString('utf8').split('\n');
+  const start = lines.findLastIndex(line => line.includes('"task_started"'));
+  const squash = text => String(text).replace(/\\[nrt]/g, '').replace(/\s+/g, '');
+  const wanted = squash(other);
+  const found = lines.slice(Math.max(0, start)).some(line => {
+    if (!line.includes('"response_item"')) return false;
+    try {
+      const payload = JSON.parse(line).payload || {};
+      const user = payload.type === 'message' && payload.role === 'user';
+      const forwarded = ['function_call_output', 'custom_tool_call_output'].includes(payload.type);
+      return (user || forwarded) && squash(JSON.stringify(payload.content ?? payload.output ?? '')).includes(wanted);
+    } catch { return false; }
+  });
+  need(start >= 0 && found, action + ' quote did not reach the supervisor in this turn; it may be an old message replayed after ' +
+    'compaction. Check the decision ledger and pause-history.jsonl before acting（這句不是本回合收到的話，可能是壓縮後重現的舊訊息；先查決策帳與暫停紀錄）');
 }
 // Jay's pause: the watcher keeps delivering real executor events but wakes no model for clocks or dispatch checks.
 function pause() {
-  load();
-  need(typeof other === 'string' && other.trim(), 'Pause needs Jay\'s exact words');
+  const {binding} = load();
+  freshQuote(binding, 'Pause');
   write(path.join(run, 'PAUSED.json'), {quote:other, at:now()});
   return { run, paused:true };
 }

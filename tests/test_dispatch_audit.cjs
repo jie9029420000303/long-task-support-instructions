@@ -119,7 +119,7 @@ test('Claude watcher routes missing attached snapshot and preflight cancels obso
   const log=path.join(f.root,'executor.jsonl'),prompt=path.join(f.run,'executor-prompt.txt');fs.writeFileSync(prompt,'prompt');
   // The executor already received the binding message that names the run, so its snapshot is due.
   fs.writeFileSync(log,JSON.stringify({type:'user',message:{content:'監督綁定完成：RUN＝'+f.run}})+'\n');
-  Object.assign(f.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:log,promptSha256:sha(prompt)});save(path.join(f.run,'binding.json'),f.binding);
+  Object.assign(f.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:log,promptSha256:sha(prompt),createdAt:new Date().toISOString()});save(path.join(f.run,'binding.json'),f.binding);
   save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:fs.statSync(log).size,turnText:[],seen:[],pending:null,reads:0});
   const child=spawn(process.execPath,[path.join(claude,'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',b=>output+=b);
   try{
@@ -153,7 +153,7 @@ test('a fresh binding does not ask for the first snapshot before the executor ha
 
 test('runtime attach is observed by an already-running Claude watcher, malformed snapshot is actionable, and STOP suppresses audit',async()=>{
   const f=fixture('dispatch-attach-','claude-code'),log=path.join(f.root,'executor.jsonl'),prompt=path.join(f.run,'executor-prompt.txt');fs.writeFileSync(log,'');fs.writeFileSync(prompt,'prompt');
-  f.binding.dispatchAudit.enabled=false;Object.assign(f.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:log,promptSha256:sha(prompt)});save(path.join(f.run,'binding.json'),f.binding);
+  f.binding.dispatchAudit.enabled=false;Object.assign(f.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:log,promptSha256:sha(prompt),createdAt:new Date().toISOString()});save(path.join(f.run,'binding.json'),f.binding);
   save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:0,turnText:[],seen:[],pending:null,reads:0});save(path.join(f.run,'dispatch.json'),{bad:true});
   const child=spawn(process.execPath,[path.join(claude,'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});
   try{
@@ -162,7 +162,7 @@ test('runtime attach is observed by an already-running Claude watcher, malformed
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.issues?.[0]?.kind==='snapshot_invalid');
   }finally{child.kill('SIGTERM');}
   const stopped=fixture('dispatch-stop-','claude-code'),stoppedLog=path.join(stopped.root,'executor.jsonl'),stoppedPrompt=path.join(stopped.run,'executor-prompt.txt');fs.writeFileSync(stoppedLog,'');fs.writeFileSync(stoppedPrompt,'prompt');
-  Object.assign(stopped.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:stoppedLog,promptSha256:sha(stoppedPrompt)});save(path.join(stopped.run,'binding.json'),stopped.binding);save(path.join(stopped.run,'daemon-state.json'),{phase:'idle',executorOffset:0,seen:[],pending:null,reads:0});fs.writeFileSync(path.join(stopped.run,'STOP'),'stop\n');
+  Object.assign(stopped.binding,{executorDesktopId:'local_'+crypto.randomUUID(),executorLog:stoppedLog,promptSha256:sha(stoppedPrompt),createdAt:new Date().toISOString()});save(path.join(stopped.run,'binding.json'),stopped.binding);save(path.join(stopped.run,'daemon-state.json'),{phase:'idle',executorOffset:0,seen:[],pending:null,reads:0});fs.writeFileSync(path.join(stopped.run,'STOP'),'stop\n');
   execFileSync(process.execPath,[path.join(claude,'claude-watch.cjs'),stopped.run]);assert.equal(JSON.parse(fs.readFileSync(path.join(stopped.run,'daemon-state.json'))).phase,'stopped');assert.equal(JSON.parse(fs.readFileSync(path.join(stopped.run,'daemon-state.json'))).pending,null);
   fs.rmSync(f.root,{recursive:true,force:true});fs.rmSync(stopped.root,{recursive:true,force:true});
 });

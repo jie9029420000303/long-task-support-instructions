@@ -22,7 +22,7 @@ function setup(final,extraEnv={}){
     criteria:[{id:'A1',requirement:'Route exactly once',source:'source.txt:1',verify:'Inspect watcher state'}],sources:[{path:source,sha256:sha(source)}]});
   const supervisorId='supervisor-qa',executorId='executor-qa';
   save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,
-    callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json')),dispatchAudit:{enabled:false}});
+    callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json')),dispatchAudit:{enabled:false},createdAt:new Date().toISOString()});
   save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
   const fixture=path.join(root,'mock.json'),sent=path.join(root,'sent.json');save(fixture,{supervisorId,executorId,final});
   const child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env:{...process.env,

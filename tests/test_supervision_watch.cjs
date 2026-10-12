@@ -24,7 +24,7 @@ test('resident Codex watcher reads exact final, confirms one delivery, and accep
   save(path.join(run,'contract.json'),contract);
   const supervisorId='supervisor-qa',executorId='executor-qa';
   save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],
-    supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json'))});
+    supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json')),createdAt:new Date().toISOString()});
   save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
   const final='QA result submitted.\nLONG_TASK_EVENT '+JSON.stringify({kind:'submission',revision:'sha256:'+sha(manifest),manifest});
   const fixture=path.join(root,'mock.json'),sentFile=path.join(root,'sent.json');
@@ -66,7 +66,7 @@ test('Codex observe sends no executor reply, preserves approval, and continues t
   const run=path.join(root,'run');fs.mkdirSync(run);
   save(path.join(run,'contract.json'),contract);
   const supervisorId='supervisor-qa',executorId='executor-qa';
-  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json'))});
+  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json')),createdAt:new Date().toISOString()});
   save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
   const finals=[
     'PR #26 is still waiting for Jay approval.\nLONG_TASK_EVENT {"kind":"blocked"}',
@@ -105,7 +105,7 @@ test('Codex observe honors an existing STOP and does not restart watching',async
   const contract={goal:'Stop after recording a known block',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Remain stopped',source:'source.txt:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]};
   const run=path.join(root,'run');fs.mkdirSync(run);save(path.join(run,'contract.json'),contract);
   const supervisorId='supervisor-qa',executorId='executor-qa';
-  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json'))});
+  save(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId,executorId,callerTurnId:'supervisor-turn',contractSha256:sha(path.join(run,'contract.json')),createdAt:new Date().toISOString()});
   save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
   const fixture=path.join(root,'mock.json'),sentFile=path.join(root,'sent.json');
   save(fixture,{supervisorId,executorId,final:'Known approval remains pending.\nLONG_TASK_EVENT {"kind":"blocked"}'});

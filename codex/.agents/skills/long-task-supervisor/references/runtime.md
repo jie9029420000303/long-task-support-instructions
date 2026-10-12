@@ -32,7 +32,7 @@ node <installed-skill>/scripts/supervise.cjs init RUN INPUT.json
 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node <installed-skill>/scripts/run-watch.cjs RUN
 node <installed-skill>/scripts/supervise.cjs status RUN
 node <installed-skill>/scripts/supervise.cjs decision RUN DECISION.json
-node <installed-skill>/scripts/supervise.cjs stop RUN
+node <installed-skill>/scripts/supervise.cjs stop RUN "<使用者原話>"
 ```
 
 `run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。等待期間是本機程式而非模型。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
@@ -142,5 +142,7 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 - `login_expired`：`RUN/login-sites.json` 格式為 `{"sites":[{"name":"網站名","url":"https://…","loggedOutPattern":"登出時網址或標題會出現的正規式"}]}`。每小時用 chrome-relay 在使用者已登入的 Chrome 另開背景分頁，讀落點網址與標題後只關閉該分頁，結果寫入 `RUN/login-status.json`；每個網站每次登出只通知一次。
 - 限速換模型：讀 opencodex 的 `usage.jsonl`，以「對話 ID 的 SHA-256 前 32 碼」對應監督、執行對話與其子代理，看到 429／rate-limit 就記錄該系列的限速與恢復時間，寫入 `RUN/model-fallback.json`。背景程式（重新）啟動時回看檔尾一段：某對話最新一筆模型請求仍是被拒、且在 5 小時內，就當成現行限速；被拒後已有成功請求的不算。監督或執行對話被拒時，送一則短訊並帶 `model` 參數，讓它改用下一個模型接續；恢復時間到了，下一則送給它的訊息帶回原模型。子代理被拒時，通知執行端改用新模型重派。全部可用模型都被限速時發 `rate_limited_all`。binding 的 `modelFallback` 設為 false 可關閉。
 - `監督儀表板.md`：每分鐘更新一次，包括監看狀態、執行對話權限、限速換模型、等待中的指示、逐條驗收、在途工作，以及用已通過條數推算的預估完成時間和算法。
-- 暫停：`supervise.cjs pause RUN "<使用者原話>"` 寫入 `PAUSED.json`。暫停期間不送時鐘與派工事件，執行對話交回的真正事件照常處理；`supervise.cjs resume RUN` 解除暫停並重新起算各時鐘。另外，只剩等使用者核准（checked wait 的 kind 為 user_approval）時，不發 `no_event_hour` 和 `idle_with_work`。
+- 暫停：`supervise.cjs pause RUN "<使用者原話>"` 寫入 `PAUSED.json`。暫停期間不送時鐘與派工事件，執行對話交回的真正事件照常處理；`supervise.cjs resume RUN "<使用者原話>"` 解除暫停並重新起算各時鐘。pause 與 stop 都要附使用者原話，程式在監督對話紀錄中核對這句話是本回合收到的（使用者輸入或別的對話轉來）；壓縮後重現的舊訊息會被拒絕。
+- 保持載入：App 會卸載閒置約 3 小時的對話並終止它啟動的程序。監看必須在監督對話自己的工作階段啟動；監督連續閒置 150 分鐘（`CODEX_KEEPALIVE_MS`）時，監看送一則 `LONG_TASK_KEEPALIVE` 短訊讓監督對話保持載入，每段閒置一則。
+- 等監督裁決：執行端回報即使標成 `progress` 或 `waiting`，內容在等監督裁決、決定或回覆時，改當 `question` 立即交給監督。另外，只剩等使用者核准（checked wait 的 kind 為 user_approval）時，不發 `no_event_hour` 和 `idle_with_work`。
 - 線上狀態：使用者 10 分鐘內在監督對話打過字，context 的 `brief.user.online` 為 true。
