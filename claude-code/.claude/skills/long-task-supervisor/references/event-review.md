@@ -1,6 +1,6 @@
 # 單次事件處理
 
-只處理 context 指定的事件。STOP、已處理或事件已換就結束；不重建 run、不重讀整段聊天。`supervise.cjs context RUN EVENT_ID` 已含事件、brief、授權來源、本頁規則與 decisionPath；只有實際遇到授權問題才執行 `supervise.cjs authorization RUN`，問題與送驗事件直接附有效授權及來源；一般進度只補缺少的直接證據，不重讀 SKILL、全部驗收或自己的歷史。送驗才讀完整有效契約，逐條獨立驗證同版候選，不能採信自報 PASS。
+只處理 context 指定的事件。STOP、已處理或事件已換就結束；context 回 `queued:true` 時，該事件還排在別的事件後面：照 `next` 先處理目前事件（沒有待決事件而接收器沒在跑時才重掛，不掛第二個），排隊事件決策後依序送到。不重建 run、不重讀整段聊天。`supervise.cjs context RUN EVENT_ID` 已含事件、brief、授權來源、本頁規則與 decisionPath；只有實際遇到授權問題才執行 `supervise.cjs authorization RUN`，問題與送驗事件直接附有效授權及來源；一般進度只補缺少的直接證據，不重讀 SKILL、全部驗收或自己的歷史。送驗才讀完整有效契約，逐條獨立驗證同版候選，不能採信自報 PASS。
 
 進度正常或指示已被執行：observe，不傳「收到」、不催促。有可行下一步或證據不足：reply，指出具體工作／問題。派工事件送出前跑 dispatch-preflight，進度事件跑 progress-preflight，過期不送。silence／wait_changed 若只剩已核對等待，observe 另附 wait；不能把等待當驗收通過。阻塞只停該動作，其餘已授權工作繼續。
 
@@ -8,26 +8,28 @@
 
 **每則回覆都先過三關**（給執行對話或使用者都一樣；使用者已授權監督依驗收目標代答時尤其如此）：
 
-1. 分類：怎麼測、用哪個身分／環境／資料／工具、先後順序與證據做法屬執行細節，由監督依原驗收條文決定並代答。只有不可逆或付費操作、對外發送、新建或取得憑證、推翻使用者明示的禁令，以及改寫驗收條文（縮窄、列例外、換證據或對照基準）才是使用者決定。
+1. 分類：怎麼測、用哪個身分／環境／資料／工具、先後順序與證據做法屬執行細節，由監督依原驗收條文決定並代答。只有不可逆或付費操作、對外發送、新建或取得憑證、推翻使用者明示的禁令，以及改寫驗收條文（縮窄、列例外、換證據或對照基準）才是使用者決定。本任務自己產生的測試中間產物（暫存容器與資料卷、測試票與紀錄、草稿、已被取代的中間輸出）必要時刪除已有使用者預設授權，不算使用者決定：由產生它的執行端照做（監督只刪自己建的驗證副本），刪前記入刪除清冊；決策帳、驗收證據、測試結果、清冊、版本控制歷史與證據引用到的測試物件不刪；「不准刪東西」這類泛用禁令只保護非本任務建立的資源，點名特定資源或明說包含測試中間產物的禁令才優先（[authorization.md](authorization.md#測試中間產物的刪除)）。
 2. 找路：即使屬使用者決定的範圍，先找能滿足原條文又不越界的可逆做法，例如已授權類別內的暫時調整（先備份、測完逐位元組還原並驗證）、隔離環境、測試資料或既有已授權身分。找到就直接交辦執行端，記下依據與還原方法；每條路都越界時，才把該具體動作記為待核准，並寫明各路為何不可行。
-3. 時機：還有其他可做工作時，待核准只寫進 pendingApprovals 並指示執行端續做其他項，不在回合結尾向使用者提問；只剩待核准事項時才一次集中提出。
+3. 時機：屬使用者決定且找不到可逆路的事，用 `supervise.cjs pending` 登記到待決帳（先對 `brief.pendingDecisions`：同一件事更新原 key，已答或已撤下的不重問），並指示執行端續做其他項。只在使用者在線（`brief.user.online`，開工當下也算），或執行端除了待決事項已沒有可做的工作時才問：跑 `supervise.cjs ask RUN`，把回傳的全部未決項放進同一張選擇卡（`mcp__visualize__show_widget`），出卡後 `supervise.cjs shown RUN <全部未決 key>`；回 `repeat:true` 就不再出卡。不用 `AskUserQuestion` 等會停住回合的提問工具（`gates.py` 會擋）。回答使用者提問的那一則先答問題，待決帳只用一句話帶過。`brief.pendingDecisions` 有 `legacy`（v0.25.1 前開的 run 還沒有待決帳）時，先依決策帳把舊決策裡仍待決的待核准事項登記一次，都已解決就送 `{"raise":[]}`。
 
-技能規定的做法直接做，不當成問題問使用者：平行派工、逐條驗收、兩份以上送驗時派子代理平行驗收、同一工作包重做 2 次仍未送驗就凍結並換方法、開工即把準備工作（部署腳本、回退步驟、規格草稿）列為可派。`brief.user.online` 為 true 時，把所有已知和可預見要使用者核准的事一次列完；請他到別的對話操作時，附桌面對話清單（或 `mcp__ccd_session_mgmt__get_session`）讀到的對話標題與可直接貼上的文字。
+技能規定的做法直接做，不當成問題問使用者：平行派工、逐條驗收、兩份以上送驗時派子代理平行驗收、同一工作包重做 2 次仍未送驗就凍結並換方法、開工即把準備工作（部署腳本、回退步驟、規格草稿）列為可派。要使用者本人做的事（在權限選單切換、重新登入、按只有本人能按的確認框、決定是否停掉他自己的 `/loop`）也登記待決帳（`user_action`），和其他未決項依第 3 關一起列出，不在事件當下另外告知；程式事件顯示已處理（例如 `permission_changed`）時用 `withdraw` 寫明事件 ID 結案。不請使用者到執行對話打字或轉貼文字，要給執行對話的話由監督用原生跨對話傳訊送；請他到別的對話按確認時附桌面對話清單（或 `mcp__ccd_session_mgmt__get_session`）讀到的對話標題與要按的按鈕。
 
 **新事件的處理**（reasons 或 dispatch issue 的 kind）：
 
 - `instruction_overdue`：上一則指示到期仍沒有動靜。`misses=1` 時改道，用 reply 交子代理、拆小或換做法，並附新的 instruction；`misses>=2` 時監督自己接手，例如自己派子代理、自己判定或直接查證，不通知使用者。
-- `permission_review`：執行對話在自動模式（`brief.executor.settings.permissionMode` 為 `auto`），或自動模式分類器剛拒絕了新的工作項目（`permission.newRejections` 有拒絕原文）。這不是授權不足。向使用者說一次「請把『對話標題』的權限模式切成『略過權限（Bypass permissions）』，並在該對話輸入框送出一則訊息（例如「繼續」）」，不給授權文字；其他不受影響的工作照常推進。權限模式是使用者的安全設定，監督不得自行切換。只剩這個等待時用 observe 並附 `wait:{kind:"user_approval",conditions:[]}`。
-- `permission_changed`：權限已切成略過權限。直接用 reply 要執行端重跑先前被擋的操作，不需要等使用者回覆。
-- `automation_found`：監督或執行對話出現排程送進來的回合（`turnOrigin=scheduled`）。scheduled-tasks 排程用工具（`list_scheduled_tasks` 找、`update_scheduled_task` 設 `enabled:false`）停用、不刪除；對話內的 `/loop` 或 cron 沒有停用選項，只在回覆裡告訴使用者名稱和原因，由他決定，監督不自行刪除。然後 observe。
-- `login_expired`：`loggedOut` 列出已登出的網站。告訴使用者一次網站名稱和連結，請他登入；其他工作照常推進。
+- `permission_review`：執行對話在自動模式（`brief.executor.settings.permissionMode` 為 `auto`），或自動模式分類器剛拒絕了新的工作項目（`permission.newRejections` 有拒絕原文）。這不是授權不足，依 [authorization.md](authorization.md#平台自動模式擋下操作時) 處理：把「請在『對話標題』的權限選單切成『略過權限（Bypass permissions）』，不必在該對話打字」登記待決帳（`user_action`，同一件事已在帳上就不重登），依第 3 關的時機列出；不給授權文字，監督不自行切換。其他不受影響的工作照常推進；只剩這個等待時用 observe 並附 `wait:{kind:"user_approval",conditions:[]}`。使用者說切好後，監督用 reply 送續接，請執行端重跑被擋的操作。
+- `permission_changed`：權限已切成略過權限。用 `withdraw` 結掉待決帳的切換項（寫明本事件 ID）；切換後的續接已要執行端重跑被擋操作時用 observe，否則用 reply 要它重跑，不需要等使用者回覆。
+- `automation_found`：監督或執行對話出現排程送進來的回合（`turnOrigin=scheduled`）。scheduled-tasks 排程用工具（`list_scheduled_tasks` 找、`update_scheduled_task` 設 `enabled:false`）停用、不刪除；對話內的 `/loop` 或 cron 沒有停用選項，把名稱和原因登記待決帳（`user_action`），由他決定，監督不自行刪除。然後 observe。
+- `login_expired`：`loggedOut` 列出要處理的登入，`status` 分兩種。`logged_out`（已失效）：開工時使用者給的總括重登授權（有效契約的授權）或[先實際使用已授權的登入](authorization.md#先實際使用已授權的登入)涵蓋、不需本人輸入密碼或驗證碼者，用 reply 請執行端依該筆 `login` 自行恢復，恢復後監督跑 `login-check.cjs RUN` 確認；需要本人時登記待決帳（`user_action`，寫名稱與 `url` 或 `login` 的處理方式），依第 3 關的時機問。`error`（檢查本身跑不起來，例如 chrome-relay 沒連上、指令找不到或逾時）不是登出：監督自己重跑 `login-check.cjs RUN` 找原因、修好 `RUN/login-sites.json` 裡的檢查，修不好才登記。其他工作照常推進。
 - `rate_limit_reset`：限速重置時間已到（`rateLimit.until`）。限速期間背景程式不叫醒模型；收到後用 reply 請執行端從中斷處接續，不重做已完成部分。不換模型、不換帳號，也不改用 API key（會另外計費）。
+- `platform_error`：執行對話的回合被平台錯誤中斷，2 分鐘沒有恢復（`platformError.text` 是錯誤原文，`kind` 是錯誤種類）。brief 的執行端最後幾段話在錯誤之後已有新回合就 observe。否則用 reply 請執行端從中斷處接續，不重做已完成部分；監督這一回合跑得起來，通常代表同一帳號的登入與連線已恢復，所以登入過期（`authentication_failed`）也先續接。續接後同一錯誤又出現（brief 的最近決策已有同一種錯誤的 platform_error），或錯誤本身要本人處理（API key 無效、額度上限要調整、平台要求換模型）時，才把要使用者做的具體動作記進待決帳（`supervise.cjs pending`），例如「請在 Claude App 重新登入，登入後在這裡回一句『好了』」，依第 3 關的時機和其他未決項一起列出（執行端整個停住時就是當下），並 observe 附 `wait:{kind:"user_approval",conditions:[]}`；不請使用者到執行對話打字，不換模型、不換帳號。
 - `executor_model`：執行對話實際模型不是 Opus，或推理低於 high（low、medium）；使用者自己調高的不改回。用 `mcp__ccd_session_mgmt__set_session_model`（session_id＝executorDesktopId，model 用 App 選單列出的 Opus id）與 `set_session_effort`（high）切換，從執行端下一回合生效、不打斷在途回合；工具要求使用者核准時照實等待。使用者明確指定的模型（契約 authorization 或使用者原話）優先，不覆寫。處理完 observe。
+- `overdue`、`no_event_hour`（進度查核原因）：`overdue` 列出的包已達基準 1.5 倍或 3 倍（看 pace 的 ratio；同一基準最多叫醒這兩次），`no_event_hour` 是距上一次真正執行事件已滿 1 小時。先用 pace 以同一公式重算基準，對照執行端填的時長、子代理實際輸出與測試或程序紀錄，判斷四件事：仍在跑、只是估短；卡關（等權限、工具呼叫沒有回傳、程序已停）；可否加速（拆包並行、只跑受影響測試、換做法）；範圍是否擴大（例如同一包接著做下一階段，卻沿用前一階段的基準）。重估過的包看 basis 的重估原因與次數，對照子代理紀錄的實際開始時間判斷累計是否失控。卡關或可加速時 reply 具體指示；範圍擴大、基準明顯估短或過長、產出與進度不符或證據不足時，reply 請執行端回報完成到哪、剩下什麼，用 `pace.cjs estimate` 重估並更新派工快照（能獨立的新範圍拆成新工作包）；只是估短而仍正常產出，或只剩已核對的使用者核准或外部結果等待時用 observe 並寫明理由。這類事件不是 silence，observe 不需 wait。
 - `unplanned_criteria`（進度查核原因）：這些未通過的條件已 10 分鐘沒有任何工作包負責（`unplannedCriteria.criteria`；`unplannedCriteria.freeCapacity` 是空著的子代理席位）。用 reply 逐條點名要派的工作包，寫明範圍、產出、隔離資源和可解鎖的條件；真的只能等核准或外部結果的，請執行端把它列進 blocked 並標 acceptanceIds。
 - `recurring_rework`：同一包重做 2 次仍沒送驗，用 reply 凍結它，指定新做法或改派其他子代理。
 
-將 eventId、disposition 寫入 context 的 decisionPath。observe 填非空 reason，可附 pendingApprovals，不含 reply。reply／reject 填具體 reply，並盡量附 `instruction:{what,doneWhen,deadlineMinutes}`（期限 1～240 分鐘，預設 30，可依工作包預估時長調整）；progress_review 另填 progressCheck:{evidence:[實際查核來源],finding:判斷,guidance:具體下一步}，reply 中須有 guidance 原文。silence／wait_changed 的 observe 必須有 wait:{kind:user_approval/external_result,conditions:[{path,sha256}],resumeAt:僅有既定期限才填}。使用者明示整案暫停時執行 `supervise.cjs pause RUN "<原話>"`；needs_user 只在仍須凍結當前事件時使用。
+將 eventId、disposition 寫入 context 的 decisionPath。observe 填非空 reason，不含 reply；待決事項只登記在待決帳，任何決策都不帶 pendingApprovals（程式會拒絕）。reply／reject 填具體 reply，並盡量附 `instruction:{what,doneWhen,deadlineMinutes}`（期限 1～240 分鐘，預設 30，可依工作包預估時長調整）；progress_review 另填 progressCheck:{evidence:[實際查核來源],finding:判斷,guidance:具體下一步}，reply 中須有 guidance 原文。silence／wait_changed 的 observe 必須有 wait:{kind:user_approval/external_result,conditions:[{path,sha256}],resumeAt:僅有既定期限才填}。使用者明示整案暫停時執行 `supervise.cjs pause RUN "<原話>"`；needs_user 只在仍須凍結當前事件時使用。
 
 reply／reject 由監督自己送，沒有背景程式代送：訊息首行 `LONG_TASK_DELIVERY:<eventId>`，用會排隊的桌面原生跨對話傳訊 `mcp__ccd_session_mgmt__send_message`（session_id 填 executorDesktopId）送一次；不用 `SendMessage`，它會中斷執行端正在跑的工具呼叫（2026-10-07 實測），把回報的 `delivered`／`queued` 與 messageId 存進 `decision.delivery`，再執行 decision。送達不明先對帳，不重送。
 
-accept 填同版 revision、contractStateSha256（有效契約有此欄時）及逐條 results:[{id,status:"PASS",method,expected,actual,evidence:[{path,sha256}]}]。完成後執行 `supervise.cjs decision RUN DECISION_PATH`，通過才可宣稱接受。最後重掛唯一背景 `claude-watch.cjs RUN`，正常結束回合。
+accept 填同版 revision、contractStateSha256（有效契約有此欄時）及逐條 results:[{id,status:"PASS",method,expected,actual,evidence:[{path,sha256}]}]。context 的 `queue` 裡有較新的送驗時不 accept（`decision` 會拒絕）：目前送驗記 observe，reason 寫「被排隊中的送驗 <id> 取代」，再處理那份；只有提問或阻塞排隊時照常驗收，讀完它們的原文，接受後把 `decision` 回傳的 `closedWithAcceptance` 列進給使用者的收尾清單。完成後執行 `supervise.cjs decision RUN DECISION_PATH`，通過才可宣稱接受。最後重掛唯一背景 `claude-watch.cjs RUN`（brief 的 `status.hold` 為 false 時，同一則回覆加掛背景 `claude-hold.cjs RUN`，即 context 的 `holdArgv`），正常結束回合。

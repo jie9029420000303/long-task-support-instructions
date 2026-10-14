@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS}=require('./guard.cjs');
+const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS}=require('./guard.cjs');
 const automations=require('./automations.cjs');
 const login=require('./login-check.cjs');
 const now=()=>new Date().toISOString();
@@ -73,6 +73,9 @@ function trackTools(state,row,boundAt=0){
   }
   if(row.type==='response_item'&&['custom_tool_call','function_call','message','reasoning'].includes(payload.type)&&!pollOnly(payload)){
     const workAt=Date.parse(at);if(Number.isFinite(workAt))state.lastExecutorWorkAt=Math.max(state.lastExecutorWorkAt||0,workAt);
+    // Work in the executor's own rollout after a platform error ends it: a model switch, a queued message or a
+    // background notice resumed it, so nobody is woken. Only these rows count; unpausing resets lastExecutorWorkAt.
+    if(state.platformError&&workAt>state.platformError.since){state.platformErrorHandledSince=state.platformError.since;state.platformError=null;}
   }
   if(row.type==='response_item'&&['custom_tool_call','function_call'].includes(payload.type)){
     const items=state.callItems||={};items[payload.call_id]=workItem(payload);
@@ -80,7 +83,17 @@ function trackTools(state,row,boundAt=0){
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
     if(commands.length)(state.openTools||={})[payload.call_id]={commands,at};
   }else if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type))delete state.openTools?.[payload.call_id];
-  else if(row.type==='event_msg'&&['task_complete','turn_aborted'].includes(payload.type))state.openTools={};
+  else if(row.type==='event_msg'&&['task_complete','turn_aborted'].includes(payload.type)){
+    state.openTools={};
+    // A turn the platform ended: task_complete carries error {message, codex_error_info}, and the App reports the thread
+    // as systemError with the turn failed, which is not a completed turn the watcher reads as an event.
+    const error=payload.type==='task_complete'&&payload.error,since=Date.parse(at);
+    if(error&&since>=boundAt&&since>(state.platformErrorHandledSince||0)){
+      const info=error.codex_error_info,detail=info&&typeof info==='object'?Object.values(info)[0]:null;
+      state.platformError={who:'executor',since,kind:typeof info==='string'?info:info?Object.keys(info)[0]:'unknown',
+        status:detail?.http_status_code??null,text:String(error.message||'').slice(0,300)};
+    }
+  }
   else if(row.type==='event_msg'&&payload.type==='item_completed'&&payload.item?.type==='CommandExecution'){
     const item=payload.item,command=(Array.isArray(item.command)?item.command.at(-1):String(item.command||'')).replace(/\s+/g,' ').trim().slice(0,300);
     // A command that ran while a call was open means that call is not frozen behind a prompt.
@@ -138,12 +151,9 @@ function kernelSleep(state,binding){
 }
 function snapshotOf(run,binding){try{return JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{return null;}}
 function paceNow(run,binding,state,snapshot=snapshotOf(run,binding)){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps);}
-// Overdue wakes only when the package is past 1.5x its baseline, has produced nothing for the silence window and
-// has no process still running it (Jay 2026-10-11); a slow but working package is recorded, not interrupted.
-function overdueNeedsReview(item,nowMs=Date.now()){
-  const last=Date.parse(item.lastActivityAt);
-  return item.ratio>=OVERDUE_RATIO && item.alive!==true && (!Number.isFinite(last) || last>nowMs || nowMs-last>=PROGRESS_REVIEW_MS);
-}
+// Rule A (Jay 2026-10-13): the highest overdue tier, 1.5x or 3x, a package has reached, or null. Whether it still
+// produces does not matter; a finished package has no ratio and never counts.
+function overdueTier(item){return [...OVERDUE_TIERS].reverse().find(tier=>item.ratio>=tier)??null;}
 // Sleep does not count toward the hour without an event, as it does not count toward a package's elapsed time.
 function awakeSince(state,from,nowMs=Date.now()){
   const slept=(state.sleeps||[]).reduce((sum,item)=>sum+Math.max(0,Math.min(nowMs,Date.parse(item.to))-Math.max(from,Date.parse(item.from))),0);
@@ -160,10 +170,12 @@ function check(run,binding,state){
   if(paced.processActivityAt)state.lastProcessActivityAt=Math.max(state.lastProcessActivityAt||0,paced.processActivityAt);
   if(paced.subagentActivityAt)state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,paced.subagentActivityAt);
   const once=key=>announced[key]?false:(announced[key]=now(),true);
-  // A baseline overrun is a diagnostic, not evidence of a stalled worker. Reuse the existing
-  // silence window: keep recording overruns while this package produces, wake if it goes quiet.
-  const overdue=paced.packages.filter(item=>overdueNeedsReview(item) &&
-    once('overdue:'+item.id+'@'+item.startedAt));
+  // Rule A (Jay 2026-10-13): each baseline wakes the supervisor once at 1.5x and once more at 3x, whether or not the
+  // package still produces, to judge whether it runs, is stuck, can go faster or grew in scope. A re-estimated
+  // baseline, a new startedAt or minutes, gets its own two wakes (GDB C13-RELOGIN-EXEC: a second phase on the
+  // first phase's 17.5 minutes).
+  const overdue=paced.packages.filter(item=>{const tier=overdueTier(item);
+    return Boolean(tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);});
   const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
@@ -227,24 +239,29 @@ function check(run,binding,state){
     automationFound=automations.aimedAt([binding.supervisorId,binding.executorId]).filter(item=>once('automation:'+item.id+'@'+item.updatedAt));
   }
   const loggedOut=login.due(state,run)||[];
+  // A turn the platform ended (Jay 2026-10-14) stays open until the executor's own rows show work after it
+  // (trackTools); 2 minutes awake without that wakes the supervisor once with the error text, to resume the executor
+  // or tell Jay what to do. While Jay's approval is the checked wait, another failing turn behind it is not news.
+  const failed=state.platformError;
+  const platformError=failed&&!waitingUser&&awakeSince(state,failed.since)>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?{...failed,since:new Date(failed.since).toISOString()}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
     ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
-    ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[])];
+    ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(platformError?['platform_error']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
     fs.appendFileSync(path.join(run,'clock.jsonl'),JSON.stringify({at:now(),executorAt:iso(state.lastExecutorActivityAt),subagentAt:iso(state.lastSubagentActivityAt),
       processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
-      problems:reasons,open:[...paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
+      problems:reasons,open:[...paced.packages.filter(item=>overdueTier(item)).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
         ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
-        ...stuck.map(item=>'executor_blocked:'+item.command.slice(0,60)),...(quietEvent?['no_event_hour']:[]),...(idle?['idle_with_work']:[])]})+'\n');
+        ...stuck.map(item=>'executor_blocked:'+item.command.slice(0,60)),...(quietEvent?['no_event_hour']:[]),...(idle?['idle_with_work']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
     ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
-    ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{})};
+    ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{})};
 }
-module.exports={overdueNeedsReview,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince};
+module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince};

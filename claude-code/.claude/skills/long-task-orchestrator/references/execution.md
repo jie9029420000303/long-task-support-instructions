@@ -29,7 +29,7 @@
 - **並行派工閘**：同一批要並行的包，連同所有在途包，先跑
   `python3 <技能目錄>/scripts/scope-overlap.py <狀態目錄>/wp/<本批>.md … --in-flight <狀態目錄>/wp/<在途>.md …`
   exit 0＝無交集，把輸出貼進狀態檔「並行批次」後才在同一則回覆內並行派出；exit 1＝列出交集項與涉及的包，B 技術包先改用隔離 worktree 與獨立測試資源，仍無法隔離才把後派的加依賴改依序或把共用項切給唯一一包（另一包 prompt 明寫「不改該項，需要時寫進回報待決」），改完重跑；exit 2＝prompt 檔缺 `[工作區]`、`[可修改範圍]` 或 `[共用資源]` 段，或 `[工作區]` 缺 path／worktree／base、path 不是絕對路徑、base 不是 commit／SHA-256——補上再跑，舊工作包不猜測隔離狀態。script 比對：`[工作區]` 的 path 與 worktree（相同即交集，base 相同可並行）＋路徑（以空白與標點切成完整 token，`.worktrees` 等含點目錄不截斷；含 `**`／`*` 前綴涵蓋與無目錄前綴的檔名）＋ `[共用資源]` 裡的 `鍵:值` 正值（同名即交集；`瀏覽器:playwright` 兩包同寫就擋，C 研究包的 `議題:<slug>` 同名也擋；`不使用`、`不安裝`、`無` 等否定值忽略）。
-- **B 技術包 worktree 隔離**：多個 B 技術包要並行修改 git 專案時，主線在派工前自己跑 `git worktree add <repo>.worktrees/<wp-id> <base>`（同一批用同一個 base commit；非 git 專案複製出獨立資料夾並記交付檔 SHA-256），把 `path`／`worktree`／`base` 寫進 wp 檔 `[工作區]` 與狀態檔「工作包」表，登記在「主線自做」。`[可修改範圍]` 仍寫相對於 repo 根的路徑，讓兩包改同一檔在整合時會撞的情況照樣被閘擋下。子代理只在 `[工作區] path` 內讀寫與跑定向測試，仍不得 Git；它回報的 `git status --short`／`git diff --stat` 只是該 worktree 的草稿。主線收回後核對實際變更檔 ⊆ 授權範圍、base 未漂移、定向測試輸出，只把授權檔案整合進 canonical worktree 形成單一候選版，再在該候選版跑完整回歸後判定；草稿各自的 PASS 不得拼成候選版 PASS。commit、merge、cherry-pick、刪除 worktree 或對外操作仍依上層 Git 授權。只讀或只寫 evidence 的包（A 查核、介面操作、C 研究）以自己的 `<狀態目錄>/evidence/<id>` 絕對路徑當 `[工作區] path`、`worktree:evidence-<id>`、`base:` 寫待驗候選版的 commit／SHA-256。
+- **B 技術包 worktree 隔離**：多個 B 技術包要並行修改 git 專案時，主線在派工前自己跑 `git worktree add <repo>.worktrees/<wp-id> <base>`（同一批用同一個 base commit；非 git 專案複製出獨立資料夾並記交付檔 SHA-256），把 `path`／`worktree`／`base` 寫進 wp 檔 `[工作區]` 與狀態檔「工作包」表，登記在「主線自做」。`[可修改範圍]` 仍寫相對於 repo 根的路徑，讓兩包改同一檔在整合時會撞的情況照樣被閘擋下。子代理只在 `[工作區] path` 內讀寫與跑定向測試，仍不得 Git；它回報的 `git status --short`／`git diff --stat` 只是該 worktree 的草稿。主線收回後核對實際變更檔 ⊆ 授權範圍、base 未漂移、定向測試輸出，只把授權檔案整合進 canonical worktree 形成單一候選版，再在該候選版跑完整回歸後判定；草稿各自的 PASS 不得拼成候選版 PASS。commit、merge、cherry-pick 或對外操作仍依上層 Git 授權；變更已整合（或確定不採用）的 worktree 屬測試中間產物，依[測試中間產物的刪除](../../long-task-supervisor/references/authorization.md#測試中間產物的刪除)：要清時先把 `git status --short` 與 `git diff` 存進 evidence/、記入刪除清冊。只讀或只寫 evidence 的包（A 查核、介面操作、C 研究）以自己的 `<狀態目錄>/evidence/<id>` 絕對路徑當 `[工作區] path`、`worktree:evidence-<id>`、`base:` 寫待驗候選版的 commit／SHA-256。
 - **介面代理序列化**：Browser pane、playwright MCP、chrome-devtools MCP 都是 session 級共用瀏覽器，cookies／登入狀態在同一工具的所有子代理間共享。同一工具同一時間只派一個介面代理；要並行就分配不同工具（最多三個）且登入帳號不重複。實跑數據：三個介面代理共用 playwright 造成互相干擾與一次全域登出，可歸因的重跑 5 批＝125 分鐘、1.39M tokens。
 - 補問或補充同一檔次的資訊：`SendMessage(to="<agent 名或 id>")` 續用同一子代理（保留它的上下文）。重派（升檔）一律新開 Agent，prompt 附上主線指正、更新後的來源／期望與可復用成果，不把整段對話貼進去。
 - 子代理一律背景跑（互動 session 預設的 fork 模式本來就強制背景）；完成通知以新回合送達，一到就依 SKILL「積極派工」第 5 步收回、更新狀態檔並補派。回合結束時仍有子代理或背景 shell 在跑，`/goal` 跳過該回合評估，等背景工作全部結束的回合才評估；背景工作讓 goal 等滿 30 分鐘會插入 check-in（之後間隔加倍），屆時讀輸出、還在進展就繼續等、卡住的就停掉並診斷，不放置。
@@ -45,7 +45,8 @@
 [可修改範圍] 檔案／目錄清單（相對於 repo 根）
 [共用資源] 實際會讀取、鎖定或改動的正值：套件:安裝（預設不准）、migration:<主線配發的編號>、worktree:<id>、測試套件:<id>、服務:<port 或名稱>、DB:<名稱>、資料:<測試資料集>、帳號:<登入帳號>、瀏覽器:pane|playwright|devtools（介面包必填）、議題:<slug>（C 研究包必填）；沒有就寫「無」；「不使用／不安裝」寫進 [禁止事項]
 [常駐資源] 本包會啟動、交回後還活著的 dev server／預覽／容器：一律 `resource-ledger.py start|register --wp <id>`（主線在本段寫明 `resource-ledger.py` 與狀態檔的絕對路徑）；交回前 `stop`，要留給後續包或使用者驗收時寫明理由並在回報列 resource id；沒有就寫「無」
-[資料副作用]；[禁止事項]；[隔離／還原方式]
+[資料副作用] 本包要刪的、別人建立的測試中間產物逐項列明，主線派工前已記入刪除清冊；沒列的不刪（自己在本包建立、位於 [工作區] path 或自己暫存目錄內的檔案可刪並在回報列出）。授權依據：監督技能 authorization.md#測試中間產物的刪除，使用者 2026-10-13 原話
+[禁止事項]；[隔離／還原方式]
 [回報格式] 結論（PASS／FAIL／BLOCKED）、實際覆蓋、發現與影響、證據位置（evidence/ 下的檔名）、未查項目及原因
 ```
 
@@ -88,7 +89,7 @@
 `scripts/gates.py` 把三條自律規則改成事件當下的檢查，只會放行（可附一行備註）或 exit 2 把原因交回模型，不跳確認框：
 
 - **G4 壓縮後重載**（SessionStart，`compact`）：本對話載入過本技能時，壓縮後直接印出狀態檔重點：還沒通過的驗收條、還沒結的工作包、待決清單，並提醒派工或判定前讀完整狀態檔；對話裡沒有附回技能內容時，先 `Skill(long-task-orchestrator, "續接")`。
-- **G3 不用提問框卡主線**（PreToolUse，`AskUserQuestion`）：本對話載入過本技能且任務未完成時擋下；受監督（有 `LONG_TASK_BIND` 綁定訊息）提示改交監督代答，未受監督提示採推薦並記已採預設。狀態檔「逐項確認模式」記有使用者原話、或最終判定為 PASS 時放行。
+- **G3 不用提問框卡主線**（PreToolUse，`AskUserQuestion`）：本對話載入過本技能且任務未完成時擋下；受監督（有 `LONG_TASK_BIND` 綁定訊息）提示改交監督（本對話唯一的讀者是監督，逐項確認模式也不放行），未受監督提示採推薦並記已採預設，狀態檔「逐項確認模式」記有使用者原話時放行；最終判定為 PASS 時放行。正在監督 run 的監督對話（run 綁定檔記的監督就是本對話、run 未驗收未停止，且有待處理事件或接收器／保持載入在跑）不必載入本技能也同樣擋下，提示改用 `supervise.cjs ask` 取全部未決項、以不會停住回合的選擇卡一次列出；run 驗收、停止或停掉保持載入後放行（2026-10-13 A 開發監督在提問框裡等了 9 小時 57 分，期間送驗沒人處理）。
 - **G1＋G2 派工前檢查**（PreToolUse，`Agent`）：只看 `lt-*`。工作包（派工提示加上它引用的 `wp/<id>.md`）缺 `[工作區]`／`[可修改範圍]`／`[共用資源]` 擋；錯誤次數（狀態檔工作包表優先，其次派工表頭「目前錯誤次數」）已滿 3 擋；派的檔次高於錯誤次數允許的檔次擋，訊息寫明狀態檔與派工表頭各記幾次；查不到錯誤次數放行加備註。同一套檢查也套用到 PreToolUse(`Workflow`)：長任務中只放行技能附的 `long-task-batch`，`args.packages` 逐包檢查（任一包不合格整批擋下），其他工作流程擋下，因為它們派出的代理不經過這兩道閘。
 
 三道閘的狀態檔不假設在目前工作目錄（主線常在 git worktree 裡，或沿用舊版 `.codex/long-task`）：依序取派工引用的 wp 檔所在任務、本對話工具呼叫最近碰過的 `state.md`，最後才是目前工作目錄的 `.claude/long-task/`；工作包表的錯誤次數欄依表頭含「錯誤」的那欄定位。
@@ -122,6 +123,4 @@
 - 派工快照的 ready、inFlight、blocked、returned 工作包都標 `acceptanceIds`，讓每條未通過的驗收條件都看得出有誰在做。某條 10 分鐘沒人負責，監督會被叫醒來點名派工。
 - 開工拆包就把部署腳本、回退步驟、規格草稿、發布說明等準備工作列為就緒包，和測試並行。
 - 同一包重做 2 次仍沒送驗，在 recurringRework 標出並停止原樣重跑，等監督指定新做法。
-- 撞到限速（例如「You've hit your session limit · resets 3:40am (Asia/Taipei)」）時不換模型、不換帳號；記下重置時間，先做不受影響的工作，重置後從中斷處接續，不重做已完成的部分。
-- 自動模式擋下操作時，照實把拒絕原文交監督，不要求使用者到本對話貼授權；權限模式切成略過權限後，監督會讓你重跑。
-- 需要監督裁決、決定或回覆才能往下做時，用 `LONG_TASK_EVENT {"kind":"question"}`，不要標成 progress 或 waiting；同時把不受影響的工作先派出去。
+- 回合或子代理被平台錯誤中斷（限速、登入過期、連線失敗、伺服器錯誤）屬執行阻塞，不計品質錯誤；子代理的非限速平台錯誤自己重派；收到監督的續接訊息就從中斷處接續，不重做已完成的部分。限速（例如「You've hit your session limit · resets 3:40am (Asia/Taipei)」）不換模型、不換帳號；記下重置時間，先做不受影響的工作，重置後接續。

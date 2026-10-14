@@ -1,17 +1,19 @@
 #!/usr/bin/env node
-// Watch one desktop executor until its next completed turn; App background Bash wakes the supervisor.
+// Watch one desktop executor until its next completed turn; App background Bash wakes the supervisor. claude-hold.cjs
+// keeps the supervisor chat loaded at the moment this exits.
 const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
-const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_RATIO,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,IDLE_WORK_MS,
-  NO_EVENT_REVIEW_MS,UNPLANNED_MS,overdueNeedsReview,awakeSince,inputSource,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,IDLE_WORK_MS,
+  NO_EVENT_REVIEW_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,overdueTier,awakeSince,inputSource,deliveredText,subagentActivityAt}=require('./guard.cjs');
+const {holdAlive}=require('./claude-hold.cjs');
 const signals=require('./signals.cjs');
 const login=require('./login-check.cjs');
 const dashboard=require('./dashboard.cjs');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
-const {digest,persist,ownerAlive}=require('./handoff-lib.cjs');
+const {digest,promoteNext,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
 const statePath=path.join(run,'daemon-state.json');
@@ -35,17 +37,9 @@ function wake(event){
 function asksSupervisor(text){
   return /(?:等待?|待|需要?|請).{0,10}監督.{0,20}(?:裁決|裁定|決定|決策|核准|判定|回覆|指示)|(?:waiting for|awaiting|needs?|requires?).{0,30}supervisor/i.test(text||'');
 }
-function handoffRequest(){
-  const names=fs.readdirSync(run).filter(name=>/^handoff-request-[a-f0-9-]{36}\.json$/.test(name)).sort();
-  if(!names.length)return false;
-  const request=read(path.join(run,names[0])),event=read(request.eventFile);
-  need(digest(event)===request.eventHash,'Handoff event changed after request');
-  const result=persist(run,state,event);state=read(statePath);state.lastRealEventAt=Date.now();
-  need(!result.alreadyProcessed,'Processed handoff cannot be pending again');
-  save(path.join(run,'handoff-ack-'+event.id+'.json'),{pending:true,...result,at:now()});
-  fs.unlinkSync(path.join(run,names[0]));
-  return true;
-}
+// Executor handoffs wait in the run's queue in the order sent; the oldest becomes pending on this watcher's state, so
+// what the last tick measured (a sleep, Jay's latest input) is saved with it.
+function handoffRequest(){return Boolean(promoteNext(run,state));}
 function logMentions(file,text){
   const needle=Buffer.from(text),chunk=Buffer.alloc(1<<20),fd=fs.openSync(file,'r');
   let carry=Buffer.alloc(0),position=0;
@@ -88,8 +82,11 @@ function eventOf(text,id){
   if(['progress','waiting'].includes(value.kind)&&!(typeof value.nextAction==='string'&&value.nextAction.trim()))value={kind:'protocol_error'};
   if(value.kind==='submission'&&(!/^sha256:[a-f0-9]{64}$/.test(value.revision||'')||typeof value.manifest!=='string'))value={kind:'protocol_error'};
   if(value.id!==undefined){
-    need(typeof value.id==='string'&&/^[a-f0-9-]{36}$/.test(value.id),'Invalid explicit event ID');
-    need(Boolean(state.handoffEvents?.[value.id]),'Explicit event ID has no persisted handoff');
+    // An explicit ID names a handoff: persisted, this final mirrors it; still queued, it arrives in its turn. Anything
+    // else reaches the supervisor as a protocol error instead of stopping the watcher (2026-10-13 15:56Z IA).
+    const known=typeof value.id==='string'&&/^[a-f0-9-]{36}$/.test(value.id);
+    if(!known||!state.handoffEvents?.[value.id])
+      value=known&&fs.existsSync(path.join(run,'handoff-request-'+value.id+'.json'))?{...value,kind:'queued_mirror'}:{kind:'protocol_error'};
   }
   return {id:value.id||id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
     nextAction:value.nextAction||null,waitMinutes:Number.isFinite(value.waitMinutes)?value.waitMinutes:null,
@@ -128,13 +125,13 @@ function trackTools(row){
   }
 }
 // What each executor row says beyond its text: who sent a user turn and under which permission mode, the model and
-// effort an assistant turn ran on, real work versus polling one background job, and a rate-limit refusal.
+// effort an assistant turn ran on, real work versus polling one background job, and a turn the platform ended.
 function trackExecutor(row){
   const source=inputSource(row),at=Date.parse(row.timestamp)||Date.now();
   if(source&&row.permissionMode)state.executorSettings={...state.executorSettings,permissionMode:row.permissionMode,at:row.timestamp||now()};
   if(source==='scheduled')noteAutomation('executor',row,at);
-  const limit=signals.rateLimitOf(row);
-  if(limit&&!row.isSidechain)noteRateLimit({who:'executor',...limit});
+  const error=signals.platformErrorOf(row);
+  if(error&&!row.isSidechain)notePlatformError({who:'executor',...error});
   if(row.type!=='assistant'||row.isSidechain||!row.message||row.isApiErrorMessage)return;
   if(row.message.model&&row.message.model!=='<synthetic>')state.executorSettings={...state.executorSettings,model:row.message.model,effort:row.effort||state.executorSettings?.effort||null};
   const content=Array.isArray(row.message.content)?row.message.content:[];
@@ -146,13 +143,28 @@ function noteAutomation(chat,row,at){
   list.push({key,chat,at:new Date(at).toISOString(),text:deliveredText({...row,turnOrigin:null})?.slice(0,200)||null});
   if(list.length>20)list.splice(0,list.length-20);
 }
-// One limit at a time: a later refusal with a later reset replaces it; the reset wakes the supervisor once.
-function noteRateLimit(limit){
-  if(limit.since<=(state.rateLimitHandledSince||0)||limit.since<(Date.parse(binding.createdAt)||0))return;
-  // Work after the limit means it already lifted and the executor went on.
-  if((state.lastRealEventAt||0)>limit.since||(state.lastExecutorWorkAt||0)>limit.since){state.rateLimitHandledSince=Math.max(state.rateLimitHandledSince||0,limit.since);return;}
+// A turn the platform ended (Jay 2026-10-14). A rate limit that names its reset is a known wait: one at a time, a later
+// refusal with a later reset replaces it, and the reset wakes the supervisor once. Any other error is kept until the
+// executor resumes; 2 minutes without that wakes the supervisor once with the error text.
+// Resumed means the executor's own rows show work after the error (row time, not the time this watcher read them).
+// That also ends a known wait: on 2026-10-03 the executor worked again 4 to 23 minutes after each weekly notice that
+// named a reset two days away. An unpause restarts the work clock, so it re-arms what is still open (rearmedAt).
+const resumedSince=since=>(state.lastExecutorWorkAt||0)>since;
+const handledUpTo=since=>{state.platformErrorHandledSince=Math.max(state.platformErrorHandledSince||0,since);};
+function settlePlatformErrors(){
+  for(const key of ['rateLimit','platformError']){
+    const item=state[key];
+    if(item&&resumedSince(Math.max(item.since,item.rearmedAt||0))){handledUpTo(item.since);state[key]=null;}
+  }
+}
+function notePlatformError(error){
+  // rateLimitHandledSince is the cursor's name in runs started before v0.25.1.
+  if(error.since<=Math.max(state.platformErrorHandledSince||0,state.rateLimitHandledSince||0)||error.since<(Date.parse(binding.createdAt)||0))return;
+  settlePlatformErrors();
+  if(resumedSince(error.since)){handledUpTo(error.since);return;}
+  if(!error.until){state.platformError=error;return;}
   const known=state.rateLimit;
-  if(!known||limit.until>known.until)state.rateLimit={...limit,since:Math.min(limit.since,known?.since||limit.since)};
+  if(!known||error.until>known.until)state.rateLimit={...error,since:Math.min(error.since,known?.since||error.since),...(known?.rearmedAt?{rearmedAt:known.rearmedAt}:{})};
 }
 // Jay's latest words in the supervisor chat (online for 10 minutes after typing) and automations aimed at it.
 function scanSupervisor(){
@@ -220,23 +232,35 @@ function supervisorClock(){
   lastClockAt=Date.now();
   const snapshot=snapshotNow(),paced=paceNow(snapshot),announced=state.clockAnnounced||={};
   if(paced.processActivityAt)state.lastProcessActivityAt=Math.max(state.lastProcessActivityAt||0,paced.processActivityAt);
-  for(const item of paced.rateLimits||[])noteRateLimit({who:'subagent '+item.id,...item.rateLimit});
+  for(const item of paced.rateLimits||[])notePlatformError({who:'subagent '+item.id,...item.rateLimit});
+  settlePlatformErrors();
   const once=key=>announced[key]?false:(announced[key]=now(),true);
   const awake=from=>awakeSince(state.sleeps,from);
-  // A baseline overrun is a diagnostic, not evidence of a stalled worker: keep recording it while the package
-  // produces, wake once it has also gone quiet for the silence window (Jay 2026-10-11).
-  const overdue=paced.packages.filter(item=>overdueNeedsReview(item)&&once('overdue:'+item.id+'@'+item.startedAt));
+  // A checked wait on Jay's approval already says what is missing, and a rate limit is a known wait: asking again only spends turns.
+  const waitingUser=state.checkedWait?.kind==='user_approval',limited=rateLimited();
+  // Rule A (Jay 2026-10-13): each baseline wakes the supervisor once at 1.5x and once more at 3x, whether or not the
+  // package still produces, to judge whether it runs, is stuck, can go faster or grew in scope (GDB and IA: 12
+  // packages past 1.5x, 3 analysed). A re-estimated baseline, a new startedAt or minutes, gets its own two wakes:
+  // GDB C13-RELOGIN-EXEC ran a second phase on the first phase's 17.5 minutes. A rate-limited supervisor cannot act,
+  // so the tier waits for the reset.
+  const overdue=limited?[]:paced.packages.filter(item=>{const tier=overdueTier(item);
+    return Boolean(tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);});
   const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
   const blocked=blockedTools().filter(item=>once('blocked:'+item.id));
   const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
   const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+'@'+item.used+':'+item.waiting.join(',')));
-  // A checked wait on Jay's approval already says what is missing, and a rate limit is a known wait: asking again only spends turns.
-  const waitingUser=state.checkedWait?.kind==='user_approval',limited=rateLimited();
   let rateReset=null;
-  if(state.rateLimit&&!limited){rateReset={...state.rateLimit,since:new Date(state.rateLimit.since).toISOString(),until:new Date(state.rateLimit.until).toISOString()};
-    state.rateLimitHandledSince=state.rateLimit.since;state.rateLimit=null;state.lastRealEventAt=Date.now();}
+  // Every refusal row of a limit that reset is old news, so the cursor moves to the reset itself: a subagent's
+  // transcript is read again on every tick.
+  if(state.rateLimit&&!limited){const {rearmedAt:_rearmed,...limit}=state.rateLimit;rateReset={...limit,since:new Date(limit.since).toISOString(),until:new Date(limit.until).toISOString()};
+    handledUpTo(limit.until);state.rateLimit=null;state.lastRealEventAt=Date.now();}
+  // A platform error the executor has not left for 2 minutes, while no rate limit runs and Jay's approval is not
+  // what the run waits on: once per error, with the error text.
+  const failed=state.platformError;
+  const platformError=failed&&!limited&&!waitingUser&&awake(Math.max(failed.since,failed.rearmedAt||0))>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?
+    {who:failed.who,since:new Date(failed.since).toISOString(),kind:failed.kind,status:failed.status,text:failed.text}:null;
   const lastEvent=state.lastRealEventAt||Date.parse(binding.createdAt)||Date.now(),quietEvent=awake(lastEvent)>=NO_EVENT_REVIEW_MS;
   const noEventHour=quietEvent&&!waitingUser&&!limited&&once('no_event_hour:'+lastEvent);
   // A background job running alone is still idle capacity: only the executor's own work and its subagents count;
@@ -292,29 +316,29 @@ function supervisorClock(){
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(idleWork?['idle_with_work']:[]),
     ...(noEventHour?['no_event_hour']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automations.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(rateReset?['rate_limit_reset']:[]),
-    ...(executorModel?['executor_model']:[])];
+    ...(platformError?['platform_error']:[]),...(executorModel?['executor_model']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
     fs.appendFileSync(path.join(run,'clock.jsonl'),JSON.stringify({at:now(),executorAt:iso(state.lastExecutorActivityAt),executorWorkAt:iso(state.lastExecutorWorkAt),subagentAt:iso(state.lastSubagentActivityAt),
       processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
-      problems:reasons,open:[...paced.packages.filter(item=>item.ratio>=OVERDUE_RATIO).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
+      problems:reasons,open:[...paced.packages.filter(item=>overdueTier(item)).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
         ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
         ...blockedTools().map(item=>'executor_blocked:'+item.command.slice(0,60)),...(idle?['idle_with_work']:[]),...(quietEvent&&!limited?['no_event_hour']:[]),
-        ...(limited?['rate_limited']:[])]})+'\n');
+        ...(limited?['rate_limited']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awake(lastEvent)/60000)}}:{}),
     ...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
-    ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(executorModel?{executorModel}:{})};
+    ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(platformError?{platformError}:{}),...(executorModel?{executorModel}:{})};
 }
 let lastDashboardAt=0;
 function writeDashboard(){
   if(Date.now()-lastDashboardAt<60000)return;
   lastDashboardAt=Date.now();
-  try{const snapshot=snapshotNow();dashboard.write(run,{binding,state,snapshot,paced:paceNow(snapshot),alive:true,paused:paused()});}
+  try{const snapshot=snapshotNow();dashboard.write(run,{binding,state,snapshot,paced:paceNow(snapshot),alive:true,hold:holdAlive(run),paused:paused()});}
   catch(error){state.dashboardError={message:error.message,at:now()};}
 }
 async function waitChange(){
@@ -338,7 +362,7 @@ async function watch(){
   if(state.pending||state.phase==='accepted')return;
   need(binding.platform==='claude-code'&&binding.executorDesktopId,'Desktop executor binding required');
   need(hash(contractPath)===binding.contractSha256,'Locked contract changed');
-  validateContract(read(contractPath));
+  validateContract(read(contractPath),{run,binding});
   need(hash(path.join(run,'executor-prompt.txt'))===binding.promptSha256,'Executor prompt changed');
   if(stopped()){state.phase='stopped';checkpoint();return;}
   state.pid=process.pid;state.phase='watching';checkpoint();
@@ -355,6 +379,8 @@ async function watch(){
     state.executorOffset=final.finalEnd;
     const event=eventOf(final.texts.join('\n'),final.finalId);
     state.lastRealEventAt=Date.now();
+    // Not marked seen: the queued handoff it mirrors must still become pending when its turn comes.
+    if(event.kind==='queued_mirror'){checkpoint();return false;}
     if(['waiting','progress'].includes(event.kind)&&asksSupervisor(event.text.split('\n').filter(line=>!line.trim().startsWith('LONG_TASK_EVENT ')).join('\n')))event.kind='question';
     const writtenAt=Date.parse(final.finalAt)||Date.now();
     const recorded=state.handoffEvents?.[event.id];
@@ -435,7 +461,9 @@ async function watch(){
     // for nothing (2026-10-07: the first event of the GDB run); the snapshot is due once the executor knows the run.
     // Jay's pause stops every model wake; a real executor event still reaches the supervisor.
     const isPaused=paused();
-    if(state.pausedSeen&&!isPaused){state.lastRealEventAt=Date.now();state.lastExecutorWorkAt=Date.now();state.lastProgressReviewAt=Date.now();state.unplanned={};}
+    // Unpausing restarts the work clock; a platform error or rate limit still open keeps its own clock from now on.
+    if(state.pausedSeen&&!isPaused){const at=Date.now();settlePlatformErrors();for(const item of [state.rateLimit,state.platformError])if(item)item.rearmedAt=at;
+      state.lastRealEventAt=at;state.lastExecutorWorkAt=at;state.lastProgressReviewAt=at;state.unplanned={};}
     state.pausedSeen=isPaused;
     writeDashboard();
     if(!isPaused&&!state.pending&&!state.message?.finalId){const audit=inspectDispatch(run,binding,state);
@@ -473,7 +501,7 @@ async function watch(){
         baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
         machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,
-        ...Object.fromEntries(['noEventHour','unplannedCriteria','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','executorModel']
+        ...Object.fromEntries(['noEventHour','unplannedCriteria','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel']
           .filter(key=>clock?.[key]).map(key=>[key,clock[key]])),at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       wake(event);

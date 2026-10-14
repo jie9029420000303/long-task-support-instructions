@@ -6,8 +6,9 @@ const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).d
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const PROGRESS_REVIEW_MS = 15 * 60 * 1000;
 // The supervisor's own clock (Jay 2026-10-07): a progress check at least every 30 minutes, and at once when a
-// package runs past 1.5x its AI-speed baseline or the same failing command repeats three times.
-const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_RATIO = 1.5, REPEAT_FAILURES = 3;
+// package runs past its AI-speed baseline or the same failing command repeats three times. Rule A (Jay 2026-10-13):
+// each baseline wakes the supervisor at 1.5x and once more at 3x, whether or not the package still produces.
+const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_TIERS = [1.5, 3], REPEAT_FAILURES = 3;
 // A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
 // a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
 const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
@@ -22,6 +23,10 @@ const IDLE_WORK_MS = 5 * 60 * 1000;
 // covers for 10 minutes wakes the supervisor to plan it (A1/B1). Jay is online when he typed in the supervisor
 // chat within 10 minutes. Automations aimed at the bound chats are looked for every 30 minutes.
 const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 10 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000, AUTOMATION_CHECK_MS = 30 * 60 * 1000;
+// A turn the platform ended with an error (Jay 2026-10-14): 2 minutes without the executor resuming wakes the
+// supervisor. A rate-limit model switch or a queued message resumes it first; with nothing to resume it, two
+// "stream disconnected" turns on the GDB run (2026-10-10 20:30Z, 20:38Z) waited for a 10-minute heartbeat to notice.
+const PLATFORM_ERROR_MS = 2 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -66,9 +71,12 @@ function validateContract(contract, context = {}) {
   }
   return contract;
 }
-function validateDecision(config, contract, event, decision) {
+// queue: executor events waiting behind this one (native-watch eventQueue); empty for a decision already processed.
+function validateDecision(config, contract, event, decision, queue = []) {
   need(decision && decision.eventId === event.id, 'Decision belongs to another event');
   need(['accept', 'reject', 'reply', 'needs_user', 'observe'].includes(decision.disposition), 'Unknown disposition');
+  // Pending decisions moved to the run ledger (pending-decisions.cjs); a decision that still carries them would lose them.
+  need(!Object.prototype.hasOwnProperty.call(decision, 'pendingApprovals'), 'pendingApprovals moved to the run ledger: register with supervise.cjs pending RUN FILE');
   if (event.kind === 'progress_review') {
     need(['reply','observe'].includes(decision.disposition), 'Progress review requires reply or checked observe');
     const check = decision.progressCheck;
@@ -85,6 +93,10 @@ function validateDecision(config, contract, event, decision) {
   if (decision.disposition === 'accept') {
     if(contract.contractStateSha256)need(decision.contractStateSha256===contract.contractStateSha256,'Acceptance must bind the current effective contract');
     need(event.kind === 'submission', 'Only a submitted candidate can be accepted');
+    // A later submission waiting in the queue may replace this candidate (Jay's ruling 2026-10-14); queued questions
+    // and blocks do not stop acceptance and close with it.
+    const newer = (queue || []).find(item => item?.kind === 'submission');
+    need(!newer, 'A newer submission ' + (newer && newer.id) + ' is queued; observe this one as superseded by it, then handle the queued one');
     need(typeof event.revision === 'string' && /^sha256:[a-f0-9]{64}$/.test(event.revision) && decision.revision === event.revision, 'Decision version differs from submission');
     need(typeof event.manifest === 'string' && path.isAbsolute(event.manifest) && config.allowedRoots.some(root => inside(event.manifest, root)), 'Candidate manifest outside allowed roots');
     need(fs.existsSync(event.manifest) && hash(event.manifest) === event.revision.slice(7), 'Candidate manifest missing or changed');
@@ -129,12 +141,9 @@ function validateDecision(config, contract, event, decision) {
     for (const field of ['reply', 'delivery', 'revision', 'results']) {
       need(!Object.prototype.hasOwnProperty.call(decision, field), 'Observe cannot include ' + field);
     }
-    if (Object.prototype.hasOwnProperty.call(decision, 'pendingApprovals')) {
-      need(Array.isArray(decision.pendingApprovals) && decision.pendingApprovals.length > 0 && decision.pendingApprovals.every(item => typeof item === 'string' && item.trim()), 'Invalid pending approvals');
-    }
   }
   return decision;
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS,
-  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, AUTOMATION_CHECK_MS, quietReview };
+  REVIEW_INTERVAL_MS, OVERDUE_TIERS, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS,
+  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, AUTOMATION_CHECK_MS, PLATFORM_ERROR_MS, quietReview };
