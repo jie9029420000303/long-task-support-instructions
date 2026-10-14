@@ -18,7 +18,8 @@ function summary(event){
   return {...rest,...(typeof text==='string'?{textChars:text.length}:{} )};
 }
 function authorization(contract,binding){
-  return {original:contract.authorization,supervisorId:binding.supervisorId,executorId:binding.executorId,
+  // inheritedFrom: the run this one continues (init inheritFrom), where the old decision ledger and snapshots stay.
+  return {original:contract.authorization,supervisorId:binding.supervisorId,executorId:binding.executorId,inheritedFrom:binding.inheritedFrom||null,
     sources:contract.sources,updates:contract.authorizationUpdates||[],
     contractSha256:binding.contractSha256,contractStateSha256:contract.contractStateSha256||null};
 }

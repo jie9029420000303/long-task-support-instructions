@@ -1,6 +1,6 @@
-// Claude Desktop signals the supervisor's clock reads from transcripts: rate limits, auto-mode refusals, polling
-// turns and the executor's model, effort and permission mode. Each was confirmed in real transcripts on 2026-10-12.
-const {RATE_LIMIT_FALLBACK_MS}=require('./guard.cjs');
+// Claude Desktop signals the supervisor's clock reads from transcripts: platform error turns (rate limits among
+// them), auto-mode refusals, polling turns and the executor's model, effort and permission mode. Each was confirmed
+// in real transcripts on 2026-10-12 and 2026-10-14.
 const MONTHS=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
 const textOf=row=>(row?.message?.content||[]).filter(block=>block?.type==='text').map(block=>block.text).join('\n');
 // Minutes east of UTC for a time zone at one instant.
@@ -9,10 +9,11 @@ function offsetMinutes(zone,ms){
     .formatToParts(new Date(ms)).filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));
   return Math.round((Date.UTC(parts.year,parts.month-1,parts.day,parts.hour%24,parts.minute,parts.second)-ms)/60000);
 }
-// "You've hit your session limit · resets 3:40am (Asia/Taipei)" (36 rows) or "resets 8pm (Asia/Taipei)": the first
-// matching wall time after the notice. A notice naming no time falls back to the five-hour window.
+// "You've hit your session limit · resets 3:40am (Asia/Taipei)", "resets 8pm (Asia/Taipei)" or the weekly
+// "resets Oct 5 at 8pm (Asia/Taipei)" (6 of the 7 rate-limit rows of 2026-09-23..10-14): the first matching wall time
+// after the notice. A notice naming no time (a spend limit, "Server is temporarily limiting requests") has no reset.
 function resetAfter(text,at){
-  const match=/resets\s+(?:([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i.exec(text||'');
+  const match=/resets\s+(?:([A-Za-z]{3})[a-z]*\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)/i.exec(text||'');
   if(match){
     const [,mon,day,hour,minute,half,zone]=match;
     let h=Number(hour)%12+(half.toLowerCase()==='pm'?12:0);const m=Number(minute||0);
@@ -26,15 +27,19 @@ function resetAfter(text,at){
       }
     }catch{}
   }
-  return {until:at+RATE_LIMIT_FALLBACK_MS,basis:'限速訊息沒有可讀的重置時間，用 5 小時'};
+  return null;
 }
-// A rate-limit row is a synthetic assistant row with isApiErrorMessage and error "rate_limit"; it ends the turn
-// with stop_sequence, not end_turn, so without this the executor only looks silent.
-function rateLimitOf(row){
-  if(row?.type!=='assistant'||!row.isApiErrorMessage||row.error!=='rate_limit')return null;
-  const at=Date.parse(row.timestamp)||Date.now(),text=textOf(row).slice(0,200);
-  return {since:at,text,...resetAfter(text,at)};
+// A platform error turn: once Claude's own retries (system api_error rows) run out, it ends the turn with a synthetic
+// assistant row (isApiErrorMessage, model <synthetic>, stop_sequence, not end_turn), so without this the executor
+// only looks silent. 2026-09-23..10-14, 55 rows: authentication_failed 34, server_error 11, rate_limit 7, unknown 3.
+function platformErrorOf(row){
+  if(row?.type!=='assistant'||!row.isApiErrorMessage)return null;
+  const at=Date.parse(row.timestamp)||Date.now(),text=textOf(row).slice(0,300);
+  const reset=row.error==='rate_limit'?resetAfter(text,at):null;
+  return {since:at,kind:row.error||'unknown',status:row.apiErrorStatus??null,text,...(reset||{})};
 }
+// A rate limit that names its reset is a known wait (Jay 2026-10-13: no model or account switch, wait for the reset).
+function rateLimitOf(row){const error=platformErrorOf(row);return error?.until?error:null;}
 // Polling a background job or sleeping is not work: a main line that only polls one background job is idle.
 const POLL_TOOLS=new Set(['TaskOutput','BashOutput']);
 function pollOnly(block){
@@ -63,4 +68,4 @@ function refusalOf(block){
   return (/Reason:\s*([^\n]{0,300})/.exec(content)?.[1]||content.slice(0,300)).trim();
 }
 const isOpus=model=>/claude-opus/i.test(model||'');
-module.exports={offsetMinutes,resetAfter,rateLimitOf,pollOnly,workItem,refusalOf,isOpus,textOf};
+module.exports={offsetMinutes,resetAfter,platformErrorOf,rateLimitOf,pollOnly,workItem,refusalOf,isOpus,textOf};

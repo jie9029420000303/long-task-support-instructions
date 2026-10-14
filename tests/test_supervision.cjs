@@ -182,6 +182,27 @@ test('Claude auto tool session resolves back to the visible supervisor session',
   fs.rmSync(f.root,{recursive:true,force:true});
 });
 
+// 2026-10-13 GDB migration: the executor read a decision file naming its supervisor, and init took the executor for
+// the visible supervisor and refused to bind. Quoting an ID must not turn a chat into the supervisor.
+test('Claude binds when the executor transcript quotes the desktop supervisor ID',()=>{
+  const f=fixture(),run=path.join(f.root,'run'),input=path.join(f.root,'input.json');
+  const config=path.join(f.root,'claude-config'),project=path.join(config,'projects','qa');
+  fs.mkdirSync(project,{recursive:true});
+  const supervisorId=crypto.randomUUID(),executorId=crypto.randomUUID(),marker='LONG_TASK_BIND:'+crypto.randomUUID();
+  fs.writeFileSync(path.join(project,supervisorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:supervisorId,entrypoint:'claude-desktop'})+'\n');
+  fs.writeFileSync(path.join(project,executorId+'.jsonl'),[{type:'user',cwd:f.root,sessionId:executorId,entrypoint:'claude-desktop',
+    message:{content:[{type:'text',text:marker}]}},{type:'user',cwd:f.root,sessionId:executorId,
+    message:{content:[{type:'tool_result',content:'decision file: supervisor session '+supervisorId}]}}].map(row=>JSON.stringify(row)).join('\n')+'\n');
+  fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId,
+    supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
+    executorPrompt:marker+' QA',contract:f.contract}));
+  const initialized=JSON.parse(execFileSync(process.execPath,[versions[1][1]+'/supervise.cjs','init',run,input],
+    {env:{...process.env,CLAUDE_CONFIG_DIR:config,CLAUDE_SESSION_ID:supervisorId}}).toString());
+  assert.equal(initialized.supervisorId,supervisorId);
+  assert.equal(initialized.executorId,executorId);
+  fs.rmSync(f.root,{recursive:true,force:true});
+});
+
 test('Claude rejects a CLI-created executor as a desktop mainline',()=>{
   const f=fixture(),run=path.join(f.root,'run'),input=path.join(f.root,'input.json');
   const config=path.join(f.root,'claude-config'),project=path.join(config,'projects','qa');

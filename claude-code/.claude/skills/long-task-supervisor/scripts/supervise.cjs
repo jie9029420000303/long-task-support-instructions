@@ -4,10 +4,14 @@ const contractState = require('./contract-state.cjs');
 const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
 const { hash, read, need, inside, validateContract, validateDecision, PROGRESS_REVIEW_MS, ONLINE_MS, INSTRUCTION_DEADLINE_MS, quietReview, deliveryRecorded,
-  deliveredText, inputSource, replayed, overdueNeedsReview, subagentActivityAt } = require('./guard.cjs');
+  deliveredText, inputSource, replayed, subagentActivityAt } = require('./guard.cjs');
+const { holdAlive } = require('./claude-hold.cjs');
 const review = require('./review-context.cjs');
 const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const pace = require('./pace.cjs');
+const pending = require('./pending-decisions.cjs');
+const login = require('./login-check.cjs');
+const { queued: handoffQueue } = require('./handoff-lib.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
 const now = () => new Date().toISOString();
@@ -36,8 +40,15 @@ function sessionCwd(file, fallback) {
   } finally {fs.closeSync(fd);}
   return fallback;
 }
-function visibleSupervisor(toolSessionId, projectRoot) {
+const desktopLog=file=>fs.readFileSync(file,'utf8').split('\n').some(line=>{
+  try{const row=JSON.parse(line);return row.type==='user'&&row.entrypoint==='claude-desktop';}catch{return false;}
+});
+// Auto mode may run tools in a temporary session; only then find the visible chat that refers to it. Any chat can
+// quote the ID by reading run files (2026-10-13 the GDB executor read a decision file naming its supervisor), so a
+// desktop tool session is already the supervisor and the executor is never a candidate.
+function visibleSupervisor(toolSessionId, projectRoot, executorId) {
   const toolLog=transcript(toolSessionId);
+  if (desktopLog(toolLog)) return {id:toolSessionId,log:toolLog,toolSessionId};
   const projects=path.join(process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME,'.claude'),'projects');
   const born=fs.statSync(toolLog).birthtimeMs;
   const matches=[];
@@ -46,7 +57,7 @@ function visibleSupervisor(toolSessionId, projectRoot) {
     for (const entry of fs.readdirSync(path.join(projects,project.name),{withFileTypes:true})) {
       if (!entry.isFile() || !/^[a-f0-9-]{36}\.jsonl$/.test(entry.name)) continue;
       const file=path.join(projects,project.name,entry.name);
-      if (file===toolLog || fs.statSync(file).mtimeMs<born) continue;
+      if (file===toolLog || entry.name===executorId+'.jsonl' || fs.statSync(file).mtimeMs<born) continue;
       const found=fs.readFileSync(file,'utf8').includes(toolSessionId);
       if (found) {
         const cwd=sessionCwd(file,projectRoot);
@@ -81,12 +92,17 @@ function init() {
   need(typeof input.executorMarker === 'string' && /^LONG_TASK_BIND:[a-f0-9-]{36}$/.test(input.executorMarker), 'Missing unique executor marker');
   need(input.executorPrompt.includes(input.executorMarker), 'Executor prompt must contain its bind marker');
   need(Array.isArray(input.allowedRoots) && input.allowedRoots.includes(input.projectRoot) && input.allowedRoots.every(root => path.isAbsolute(root) && fs.existsSync(root)), 'Invalid allowed roots');
-  validateContract(input.contract);
-  const visible = visibleSupervisor(input.supervisorId,input.projectRoot);
+  // Every login the task uses was checked before Jay was asked anything (start step 1); the same list goes into the
+  // run here, so the hourly check never starts empty (the 2026-10-13 v117 run had no login list at all).
+  need(Array.isArray(input.loginSites), 'loginSites is required: the login list checked at start step 1 with login-check.cjs, or [] when the task uses no login');
+  login.validate(input.loginSites);
+  // A new task brings its own contract; the same task continued from another run (another platform, supervisor or
+  // executor chat) takes that run's locked contract, amendment journal and pending ledger byte for byte (inheritFrom).
+  const {contract, inherited} = contractState.startContract(input);
+  validateContract(contract, inherited ? {run:inherited.run, binding:inherited.binding} : {});
+  const visible = visibleSupervisor(input.supervisorId,input.projectRoot,input.executorId);
   const supervisorLog = visible.log;
-  need(fs.readFileSync(supervisorLog,'utf8').split('\n').some(line=>{
-    try{const row=JSON.parse(line);return row.type==='user'&&row.entrypoint==='claude-desktop';}catch{return false;}
-  }),'Supervisor is not a Claude Desktop conversation');
+  need(desktopLog(supervisorLog),'Supervisor is not a Claude Desktop conversation');
   const executorId = input.executorId;
   need(executorId !== visible.id && /^[a-f0-9-]{36}$/.test(executorId), 'Invalid executor session ID');
   const existingLog = transcript(executorId);
@@ -100,7 +116,9 @@ function init() {
   need(markerOffset>=0,'Executor prompt was not sent from Claude Desktop');
   fs.mkdirSync(path.dirname(run), {recursive:true});
   fs.mkdirSync(run);
-  save(path.join(run, 'contract.json'), input.contract);
+  if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
+  else save(path.join(run, 'contract.json'), contract);
+  login.write(run, input.loginSites);
   fs.writeFileSync(path.join(run, 'executor-prompt.txt'),
     input.executorPrompt.replaceAll(input.supervisorId,visible.id).replaceAll('{{SUPERVISOR_ID}}',visible.id));
   save(path.join(run, 'binding.json'), {
@@ -109,12 +127,15 @@ function init() {
     executorId, executorDesktopId:input.executorDesktopId,
     executorMarker:input.executorMarker, executorLog:existingLog, supervisorLog,
     contractSha256:hash(path.join(run,'contract.json')), promptSha256:hash(path.join(run,'executor-prompt.txt')),
+    ...(inherited ? {contractStateSha256:inherited.contractStateSha256 || undefined,
+      inheritedFrom:{...inherited.summary, contractStateSha256:inherited.contractStateSha256, at:now()}} : {}),
     dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json',acceptance:true},
     createdAt:now()
   });
   save(path.join(run, 'daemon-state.json'), {phase:'idle',executorOffset:markerOffset,turnText:[],seen:[],pending:null,reads:0,
     lastExecutorActivityAt:Date.now()});
-  return {run,supervisorId:visible.id,toolSessionId:visible.toolSessionId,executorId,executorDesktopId:input.executorDesktopId,criteria:input.contract.criteria.length};
+  return {run,supervisorId:visible.id,toolSessionId:visible.toolSessionId,executorId,executorDesktopId:input.executorDesktopId,criteria:contract.criteria.length,
+    logins:input.loginSites.length,...(inherited ? {inherited:inherited.summary} : {})};
 }
 function status() {
   const {binding} = load();
@@ -123,10 +144,12 @@ function status() {
   const ready = fs.existsSync(readyFile) ? read(readyFile) : null;
   let alive = false;
   if (ready && ready.pid === state.pid) {try {process.kill(ready.pid,0);alive=true;} catch {}}
+  // Watching means the supervisor can be woken: the watcher reads, and the hold keeps the chat loaded when it hands off.
+  const hold = holdAlive(run);
   return {run,supervisorId:binding.supervisorId,executorId:binding.executorId,
-    phase:state.phase,active:alive && ready?.readVerified === true && state.phase==='watching',
+    phase:state.phase,active:alive && ready?.readVerified === true && state.phase==='watching' && hold,hold,
     readVerified:ready?.readVerified === true,reads:state.reads,acceptedAt:state.acceptedAt || null,error:state.error || null,
-    unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{})};
+    unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{}), queued:handoffQueue(run).length};
 }
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
 // The last assistant texts of the executor, read from the transcript's tail only.
@@ -141,6 +164,11 @@ function executorTail(file, count = 3) {
   }
   return texts.slice(-count);
 }
+// Executor handoffs waiting behind the pending event, oldest first, with their event bodies.
+function executorQueue() {
+  return handoffQueue(run).map(item => {let event = null; try {event = read(item.eventFile);} catch {}
+    return {id:item.id, kind:event?.kind || null, at:item.at || null, eventHash:item.eventHash || null, file:item.file, event};});
+}
 // Everything one wake needs, in one call: the event, whether the watcher runs, pace against baselines, the
 // executor's latest words and the dispatch picture. A wake that reads this instead of probing file by file
 // re-reads its long conversation context fewer times (Jay 2026-10-07: about 3M cached tokens per check).
@@ -148,21 +176,24 @@ function brief() {
   const {binding} = load(), state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
   const iso = value => value ? new Date(value).toISOString() : null;
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
-    disposition:item.obsolete ? 'obsolete' : item.decision?.disposition, at:item.event?.at}));
+    disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
   const pausedFile = path.join(run, 'PAUSED.json');
   return {status:status(), pending:review.summary(state.pending), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps),
     sleeps:(state.sleeps || []).slice(-5),
-    // Jay is online for 10 minutes after typing in the supervisor chat: then list every known and foreseeable approval at once.
+    // Jay is online for 10 minutes after typing in the supervisor chat: then ask every open ledger item at once.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
     paused:fs.existsSync(pausedFile) ? read(pausedFile) : null, reviewRejections:(state.reviewRejections || []).slice(-3),
     instruction:state.instruction || null, rateLimit:state.rateLimit ? {...state.rateLimit, since:iso(state.rateLimit.since), until:iso(state.rateLimit.until)} : null,
+    platformError:state.platformError ? {...state.platformError, since:iso(state.platformError.since)} : null,
     automations:(state.automations || []).slice(-3), dashboard:path.join(run, require('./dashboard.cjs').FILE),
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, subagentActivityAt(binding))),
       lastProcessActivityAt:iso(state.lastProcessActivityAt), lastWorkAt:iso(state.lastExecutorWorkAt), lastRealEventAt:iso(state.lastRealEventAt),
       settings:state.executorSettings || null, executorDesktopId:binding.executorDesktopId, tail:executorTail(binding.executorLog)},
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
-    recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};
+    eventQueue:executorQueue().map(({id, kind, at}) => ({id, kind, at})),
+    // The whole pending-decision ledger on every wake, so compaction never loses what waits on Jay.
+    pendingDecisions:pending.view(run, state), recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};
 }
 // After starting the watcher in the background, wait briefly until it reports a verified read.
 function waitActive(seconds) {
@@ -175,17 +206,28 @@ function waitActive(seconds) {
 // carries the effective contract; progress and dispatch checks point to the authorization command instead.
 function context() {
   const {binding,contract} = load(), state = read(path.join(run,'daemon-state.json')), event = state.pending;
-  need(event && event.id === inputArgument, 'No matching pending event; do not replay an old review');
-  const saved = review.persist(run, event), operational = ['progress_review','dispatch_review','continue'].includes(event.kind);
   const node = process.execPath, script = path.join(__dirname,'supervise.cjs');
+  if (!(event && event.id === inputArgument)) {
+    // A handoff that arrived while another event was pending waits in the queue and comes after that one.
+    const position = handoffQueue(run).findIndex(item => item.id === inputArgument) + 1;
+    need(position > 0, 'No matching pending event; do not replay an old review');
+    return {eventId:inputArgument, queued:true, position, current:event ? {id:event.id, kind:event.kind} : null,
+      next:event ? 'Handle the current event first (context RUN ' + event.id + '); after its decision re-arm the watcher and this event arrives in order.'
+        : 'No event is pending: if status shows no live watcher, re-arm it (watchArgv) and it promotes this event at once; never start a second watcher.',
+      watchArgv:[node,path.join(__dirname,'claude-watch.cjs'),run]};
+  }
+  const saved = review.persist(run, event), operational = ['progress_review','dispatch_review','continue'].includes(event.kind);
+  // Reviewing a submission, the supervisor reads what the executor queued behind it: a newer submission is reviewed
+  // first, and questions or blocks close with an acceptance and go on Jay's closing list.
+  const queue = event.kind === 'submission' ? executorQueue().map(({id, kind, at, event:body}) => ({id, kind, at, text:body?.text ?? null})) : [];
   return {eventId:event.id, stopped:fs.existsSync(path.join(run,'STOP')), event:saved, brief:brief(), ...(!operational ? {detail:event} : {}),
     authorization:operational ? {command:'supervise.cjs authorization RUN', contractSha256:binding.contractSha256, contractStateSha256:contract.contractStateSha256 || null} : review.authorization(contract,binding),
-    ...(event.kind === 'submission' ? {contract} : {}),
+    ...(event.kind === 'submission' ? {contract, ...(queue.length ? {queue} : {})} : {}),
     ...(event.kind === 'progress_review' ? {preflightArgv:[node,script,'progress-preflight',run,event.id]} : {}),
     ...(event.kind === 'dispatch_review' ? {preflightArgv:event.preflightArgv || [node,script,'dispatch-preflight',run,event.id]} : {}),
     instructions:fs.readFileSync(path.join(__dirname,'../references/event-review.md'),'utf8'),
     decisionPath:path.join(run,'decision-' + event.id + '.json'),
-    watchArgv:[node,path.join(__dirname,'claude-watch.cjs'),run]};
+    watchArgv:[node,path.join(__dirname,'claude-watch.cjs'),run], holdArgv:[node,path.join(__dirname,'claude-hold.cjs'),run]};
 }
 function decision() {
   need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute decision path');
@@ -195,9 +237,14 @@ function decision() {
   const event=state.pending?.id===input.eventId?state.pending:resolved?.event;
   need(event,'No matching pending or processed event');
   if (resolved) need(hash(inputArgument)===resolved.decisionSha256,'Processed decision changed');
-  const value=validateDecision(binding,contract,event,input);
+  // A decision processed before v0.25.1 may carry pendingApprovals; it stays valid as recorded.
+  const {pendingApprovals:_legacy, ...current} = input;
+  const value=validateDecision(binding,contract,event,resolved ? current : input);
   if (resolved) return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true};
   if (event.kind==='progress_review') need(state.progressReviewPreflight===event.id,'Progress review requires current preflight before delivery');
+  const queue = value.disposition==='accept' ? executorQueue() : [];
+  const newer = queue.filter(item => item.kind==='submission').map(item => item.id);
+  need(!newer.length, 'A newer submission is queued (' + newer.join(', ') + '): record this event as observe, reason "superseded by queued submission <id>", then review that submission');
   if (value.disposition==='needs_user') return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:false};
   if (value.disposition==='observe' && fs.existsSync(path.join(run,'STOP'))) {
     state.phase='stopped';save(path.join(run,'daemon-state.json'),state);
@@ -227,14 +274,22 @@ function decision() {
   if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();state.failedCommands={};}
   state.phase=value.disposition==='accept'?'accepted':'idle';
   if (state.phase==='accepted') state.acceptedAt=now();
+  // Questions and blocks queued behind an accepted submission close with it; the supervisor lists them for Jay.
+  for (const item of queue) {
+    state.resolved[item.id]={event:item.event || {id:item.id, kind:item.kind}, closedWithAcceptance:event.id};
+    state.seen.push(item.id);
+    if (item.eventHash) (state.handoffEvents ||= {})[item.id]=item.eventHash;
+  }
   save(path.join(run,'daemon-state.json'),state);
-  return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true};
+  for (const item of queue) fs.rmSync(item.file, {force:true});
+  return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true,
+    ...(queue.length ? {closedWithAcceptance:queue.map(({id, kind}) => ({id, kind}))} : {})};
 }
 // A pause or stop must come from words that reached the supervisor in this turn: typed by Jay (origin human) or
 // forwarded by another desktop chat (origin peer). A compaction summary replays older messages with no time; on
 // 2026-10-12 a Codex supervisor acted on a pause lifted the day before and stopped work for 5 hours.
-function freshQuote(binding, action) {
-  need(typeof inputArgument === 'string' && inputArgument.trim(), action + " needs Jay's exact words");
+function freshQuote(binding, action, quote = inputArgument) {
+  need(typeof quote === 'string' && quote.trim(), action + " needs Jay's exact words");
   const file = binding.supervisorLog;
   if (!file || !fs.existsSync(file)) return;
   const size = fs.statSync(file).size, length = Math.min(size, 32 * 1024 * 1024), buffer = Buffer.alloc(length), fd = fs.openSync(file, 'r');
@@ -242,7 +297,7 @@ function freshQuote(binding, action) {
   const rows = buffer.toString('utf8').split('\n').map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   const start = rows.findLastIndex(row => row.type === 'assistant' && !row.isSidechain && (row.message?.stop_reason === 'end_turn' || row.isApiErrorMessage));
   const squash = text => String(text).replace(/\s+/g, '');
-  const wanted = squash(inputArgument);
+  const wanted = squash(quote);
   const found = rows.slice(start + 1).some(row => !replayed(row) &&
     (['human','peer'].includes(inputSource(row)) || row.type === 'attachment') && squash(deliveredText(row)).includes(wanted));
   need(found, action + ' quote did not reach the supervisor in this turn; it may be an old message replayed after ' +
@@ -263,6 +318,13 @@ function resume() {
   fs.appendFileSync(path.join(run, 'pause-history.jsonl'), JSON.stringify({...read(file), resumedAt:now(), resumeQuote:inputArgument || null}) + '\n');
   fs.unlinkSync(file);
   return {run, paused:false, resumed:true};
+}
+// Decisions waiting on Jay (runtime 待決帳): raise, reopen, withdraw or answer items in the run's ledger. An answer is
+// Jay's words received this turn (the pause rule), kept in a saved snapshot, or an amendment already recorded.
+function pendingChange() {
+  need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute pending change path');
+  const {binding} = load();
+  return pending.apply(run, read(inputArgument), {binding, checkQuote:quote => freshQuote(binding, 'Answer', quote)});
 }
 // A locked source archived to a new place: only an exact hash match at an allowed path is registered.
 function relocateSources() {
@@ -289,11 +351,10 @@ function relocateSources() {
 }
 function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
 function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
-function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const processAt=pace.inFlight(binding,snapshotOf(binding),Date.now(),state.sleeps).processActivityAt||0;const event=state.pending;
-  // A pure overdue check is moot once its packages produce again or finish; other packages' activity does not end it.
-  const recoveredOverdue=event.reasons?.length===1&&event.reasons[0]==='overdue'&&
-    !pace.inFlight(binding,snapshotOf(binding),Date.now(),state.sleeps).packages.some(item=>event.overdue?.includes(item.id)&&overdueNeedsReview(item));
-  const current=!fs.existsSync(path.join(run,'STOP'))&&!recoveredOverdue&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
+function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const processAt=pace.inFlight(binding,snapshotOf(binding),Date.now(),state.sleeps).processActivityAt||0;
+  // Only silence and a changed wait end with new activity; overdue, like the other clock reasons, asks about the
+  // baseline and scope of a package that is still busy (rule A, Jay 2026-10-13).
+  const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
     const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))
@@ -304,9 +365,11 @@ function progressPreflight(){const {binding}=load(),state=read(path.join(run,'da
       :command==='authorization'?(()=>{const {binding,contract}=load();return review.authorization(contract,binding);})()
       :command==='pause'?pause():command==='resume'?resume():command==='relocate-sources'?relocateSources()
       :command==='decision'?decision():command==='stop'?stop()
+      :command==='pending'?pendingChange():command==='ask'?(load(),pending.ask(run))
+      :command==='shown'?pending.shown(run,process.argv.slice(4),{binding:load().binding})
       :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()
-      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
+      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));
   } catch(error) {console.error(error.message);process.exitCode=1;}
 })();

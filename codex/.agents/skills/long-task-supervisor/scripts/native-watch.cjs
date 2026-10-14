@@ -252,6 +252,28 @@ async function exactFinal(turnId) {
   }
   throw Error('Completed executor turn has no exact readable final message: '+turnId);
 }
+// wait_threads reports only the latest turn, so a turn that completed while another event was pending, or between two
+// reads, was never reviewed (GDB 2026-10-10T19:55Z and 10-11T14:12Z: two submissions never accepted). Read back to the
+// last handled turn and queue what the supervisor must see, oldest first; a progress or wait that a later turn
+// superseded, or a turn with no final answer, is only marked handled.
+async function queueSkipped(latestId){
+  const detail=unpack(await rpc('read_thread',{threadId:binding.executorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
+  const turns=detail.turns||[],start=turns.findIndex(item=>item.id===latestId),queue=state.eventQueue||=[],older=[];
+  if(start===-1)return;
+  for(const turn of turns.slice(start+1)){
+    if(state.seen.includes(turn.id))break;
+    if(turn.status==='completed'&&!queue.some(item=>item.id===turn.id))older.unshift(turn);
+  }
+  for(const turn of older){
+    const final=(turn.items||[]).filter(item=>item.type==='agentMessage'&&item.phase==='final_answer').at(-1);
+    if(!(typeof final?.text==='string'&&final.text.trim())){state.seen.push(turn.id);continue;}
+    const event=extractEvent(turn,final);
+    if(['waiting','progress'].includes(event.kind)&&asksSupervisor(event.text))event.kind='question';
+    if(event.kind==='waiting'&&waitingHasBlocker(event.text))event.kind='blocked';
+    if(['waiting','progress'].includes(event.kind))state.seen.push(turn.id);else queue.push(event);
+  }
+  checkpoint();
+}
 function reviewPrompt(event) {
   // Preserve an unresolved old delivery byte-for-byte across upgrades.
   if(state.inflight?.key==='review-'+event.id && state.inflight.target===binding.supervisorId)return state.inflight.prompt;
@@ -275,6 +297,25 @@ async function changed(directory, alreadyChanged = () => false) {
     } catch {}
     if (alreadyChanged()) done();
   });
+}
+// A decision file that fails its checks stays where the supervisor wrote it and the watcher keeps running; the event
+// stays pending. Before, any invalid decision ended the watcher, and a decision still carrying the old pendingApprovals
+// field would have stopped a live run after the upgrade. The supervisor usually checks its file with supervise.cjs
+// decision in the same turn and fixes it, so the watcher wakes it only when the same version still stands after the
+// backup-wake delay, once per written version, with the original event and the error text.
+async function refuseDecision(event,file,error){
+  let sha256;try{sha256=hash(file);}catch{return;} // removed meanwhile: the next pass waits for a new file
+  const errors=state.decisionErrors||={};
+  if(errors[event.id]?.sha256!==sha256){errors[event.id]={sha256,message:error.message,at:Date.now(),notifiedAt:null};checkpoint();}
+  const known=errors[event.id];
+  if(!known.notifiedAt&&Date.now()-known.at>=SUPERVISOR_WAKE_MS&&!fs.existsSync(path.join(run,'STOP'))){
+    await sendAndRead(binding.supervisorId,
+      `決策未套用 ${event.id}：${file} 沒通過檢查，背景監看沒有套用它、照常監看，這個事件仍待決（原檔保留）。錯誤原文：${known.message}\n`+
+      `修正後覆寫同一個決策檔，先用 supervise.cjs decision 檢查通過再結束回合；不要重建或重送業務事件。原事件：\n`+require('./review-context.cjs').prompt(run,event),
+      'decision-error-'+event.id+'-'+sha256.slice(0,12));
+    known.notifiedAt=Date.now();checkpoint();return;
+  }
+  await changed(run,()=>!fs.existsSync(file)||hash(file)!==sha256);
 }
 async function pendingDecision() {
   const event = state.pending;
@@ -300,7 +341,10 @@ async function pendingDecision() {
     }
     return;
   }
-  const decision = validateDecision(binding,checkSources(),event,read(file));
+  const contract = checkSources();
+  let decision;
+  try { decision = validateDecision(binding,contract,event,read(file),state.eventQueue); }
+  catch (error) { await refuseDecision(event,file,error); return; }
   if(event.kind==='dispatch_review'){
     const preflight=stillCurrent(run,binding,state,event);checkpoint();
     if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
@@ -309,10 +353,9 @@ async function pendingDecision() {
     const fresh=await waitExecutor(0);
     const poll=fresh.polls?.find(item=>item.thread?.id===binding.executorId);
     need(poll,'Bound executor missing from progress preflight');
-    // Silence ends with new activity; overdue, blocked and the other clock reasons are meant for a busy executor.
-    const recoveredOverdue=event.reasons?.length===1 && event.reasons[0]==='overdue' &&
-      !clock.paceNow(run,binding,state).packages.some(item=>event.overdue?.includes(item.id)&&clock.overdueNeedsReview(item));
-    if(fs.existsSync(path.join(run,'STOP'))||recoveredOverdue||quietReview(event)&&activityMarker(poll)!==event.activityMarker){
+    // Silence ends with new activity; overdue, blocked and the other clock reasons are meant for a busy executor
+    // (rule A, Jay 2026-10-13: an overdue check asks about the baseline and scope, so fresh output does not void it).
+    if(fs.existsSync(path.join(run,'STOP'))||quietReview(event)&&activityMarker(poll)!==event.activityMarker){
       observeActivity(state,poll,binding);
       (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};
       state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;
@@ -338,6 +381,11 @@ async function pendingDecision() {
     state.phase = 'watching'; checkpoint(); return;
   }
   if (decision.disposition === 'accept') {
+    // Questions and blocks queued behind the accepted submission close with it: context gave the supervisor their full
+    // text for its closing list to Jay (Jay's ruling 2026-10-14). The executor is not read while an event is pending,
+    // so the queue is the one the supervisor saw.
+    for (const item of state.eventQueue || []) { (state.resolved ||= {})[item.id] = {event:item,closedWithAcceptance:event.id}; state.seen.push(item.id); }
+    state.eventQueue = [];
     (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
     state.seen.push(event.id); state.pending = null;
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
@@ -442,6 +490,13 @@ async function watch() {
       if (state.phase === 'accepted') break;
       continue;
     }
+    // Executor events reach the supervisor one at a time, oldest first, ahead of dispatch checks and clocks.
+    if (state.eventQueue?.length) {
+      const event = state.eventQueue.shift();
+      state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
+      await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
+      continue;
+    }
     clock.tickSleep(state);
     // Jay's pause stops every model wake; a real executor event still reaches the supervisor. Resuming restarts the clocks.
     const paused = isPaused();
@@ -474,7 +529,8 @@ async function watch() {
     observeActivity(state,supervisorPoll,binding,Date.now(),'supervisor');
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
-    if (turn?.status === 'completed' && !state.seen.includes(turn.id)) {
+    if (turn?.status === 'completed' && !state.seen.includes(turn.id) && !(state.eventQueue || []).some(item => item.id === turn.id)) {
+      await queueSkipped(turn.id);
       state.lastRealEventAt=Date.now();
       if(state.progressWait)state.progressWait=null;
       const event = extractEvent(turn,await exactFinal(turn.id));
@@ -505,10 +561,9 @@ async function watch() {
         }
         if(event.kind==='progress')event.kind = 'stalled';
       }
-      state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
-      state.pending = event;
-      state.cursor=nextCursor;state.phase = 'awaiting_decision';checkpoint();
-      await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
+      // Behind any older skipped turn; the loop head hands it to the supervisor in order.
+      (state.eventQueue ||= []).push(event);
+      state.cursor=nextCursor;checkpoint();
     } else {
       state.cursor=nextCursor;
       if(state.progressWait&&Date.now()>=state.progressWait.deadline){

@@ -7,9 +7,12 @@ exit 2 把原因交回模型自行修正。絕不用 ask 跳確認框（長任�
 - G4 SessionStart(compact)：本對話載入過 long-task-orchestrator 時，壓縮後補一段「先重載技能、再讀狀態檔」。
   根因：壓縮後技能內容大多會附回，但狀態檔只有少數會（2026-09-28 稽核 14/15 對 2/15）；
   v0.2 那場 125 分鐘重跑、41 包從 high 起跳、並行閘 0 次執行都來自沒重載。
-- G3 PreToolUse(AskUserQuestion)：進行中的長任務不得用提問框卡住主線。受監督的執行對話改走監督代答
-  （question 事件／原生事件交接），完成驗收時由監督把代答整理給使用者確認；未受監督時採推薦選項並記
-  「已採預設」，完成時一次列給使用者確認。狀態檔「逐項確認模式」記有使用者原話時放行。
+- G3 PreToolUse(AskUserQuestion)：進行中的長任務不得用提問框卡住主線或監督。受監督的執行對話唯一的讀者是監督，
+  改走監督代答（question／blocked 事件、原生事件交接），逐項確認模式也不放行；未受監督時採推薦選項並記
+  「已採預設」，完成時一次列給使用者確認，狀態檔「逐項確認模式」記有使用者原話時放行。監督對話（本對話就是
+  run 綁定檔記的監督，run 未驗收、未停止，且還有待處理事件或接收器／保持載入在跑）同樣擋下，不必載入協作技能：
+  改用 supervise.cjs ask 取全部未決項、以不會停住回合的選擇卡一次列出（2026-10-13 A 開發監督在提問框裡等了
+  9 小時 57 分，期間送驗沒人處理）。
 - G1＋G2 PreToolUse(Agent)：派 lt-* 子代理時，工作包要有 [工作區]／[可修改範圍]／[共用資源]；
   新包從基準檔起跳、升一檔＝錯一次；錯 3 停止子代理鏈由主線接手。工作包＝派工提示加上它引用的 wp 檔
   （技能規定 prompt 先存成 <狀態目錄>/wp/<id>.md，派工訊息常只引用該檔）。錯誤次數以狀態檔工作包表為準，
@@ -23,6 +26,7 @@ state.md，最後才是目前工作目錄的 .claude/long-task（技能預設位
 """
 import functools
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -37,6 +41,8 @@ STATE_TAIL = r"/long-task/[^/\s\"'`]+/state\.md"
 WP_TAIL = r"/wp/[^/\s\"'`]+\.md"
 ITEMIZED = re.compile(r"^-\s*逐項確認模式[:：]\s*(?!關閉|<)(\S.*)$", re.M)
 BATCH = "long-task-batch"
+# 監督自己指令裡的 run：claude-watch.cjs RUN、claude-hold.cjs RUN、supervise.cjs <指令> RUN（同 lt-status 面板）。
+RUN_ARG = re.compile(r"""(?:claude-(?:watch|hold)\.cjs["']?|supervise\.cjs["']?\s+[a-z-]+)\s+(?:"([^"]+)"|'([^']+)'|(\S+))""")
 
 
 def file_refs(text, tail):
@@ -60,15 +66,16 @@ def strings(value):
 
 @functools.lru_cache(maxsize=1)
 def transcript(path):
-    """本對話 user 列的文字（不含工具結果），與本對話自己的工具呼叫碰過的狀態檔（舊到新）。
+    """本對話 user 列的文字（不含工具結果）、本對話自己的工具呼叫碰過的狀態檔，與本對話 Bash 指令點名的監督 run（皆舊到新）。
 
     文字只認真的技能載入與真的綁定訊息，不認工具輸出裡剛好印出的字串；狀態檔只看本對話自己的工具呼叫，
-    監督對話讀執行端狀態檔不影響（閘只在載入協作技能的對話作用）。"""
+    監督對話讀執行端狀態檔不影響（G1／G2／G4 只在載入協作技能的對話作用）。run 只供 G3 認出監督對話，
+    還要 run 綁定檔記的監督就是本對話才算，執行端讀 run 檔不算。"""
     try:
         lines = Path(path or "").read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return [], []
-    texts, touched = [], []
+        return [], [], []
+    texts, touched, runs = [], [], []
     for line in lines:
         try:
             row = json.loads(line)
@@ -87,12 +94,62 @@ def transcript(path):
             for block in content if isinstance(content, list) else []:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     touched.extend(ref for text in strings(block.get("input")) for ref in file_refs(text, STATE_TAIL))
+                    if block.get("name") == "Bash":
+                        run = run_path(str((block.get("input") or {}).get("command", "")))
+                        if run:
+                            runs.append(run)
             continue
         if row.get("type") != "user":
             continue
         blocks = [content] if isinstance(content, str) else [b.get("text", "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text"]
         texts.extend(blocks)
-    return texts, touched
+    return texts, touched, runs
+
+
+def run_path(command):
+    """指令裡的 run 絕對路徑；RUN 可為同一指令裡賦值的變數。"""
+    match = RUN_ARG.search(command)
+    run = next((group for group in match.groups() if group), None) if match else None
+    var = run and re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", run)
+    if var:
+        assigned = re.search(r"(?:^|[\s;&])" + var.group(1) + r"""=(?:"([^"]+)"|'([^']+)'|([^\s;&]+))""", command)
+        run = next((group for group in assigned.groups() if group), None) if assigned else None
+    return run if run and run.startswith("/") else None
+
+
+def alive(path):
+    """鎖檔記的程序還活著（watcher.lock、hold.json）。"""
+    try:
+        os.kill(int(json.loads(path.read_text(encoding="utf-8")).get("pid")), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def supervised_run(data):
+    """本對話正在監督的 run：綁定檔記的監督就是本對話，run 未驗收、未停止，且有待處理事件或接收器／保持載入在跑。
+    已放棄的 run 由監督 stop 或停掉保持載入後就不再擋。"""
+    me = {data.get("session_id"), Path(data.get("transcript_path") or "").stem} - {None, ""}
+    seen = set()
+    for run in reversed(transcript(data.get("transcript_path"))[2]):
+        if run in seen:
+            continue
+        seen.add(run)
+        folder = Path(run)
+        try:
+            binding = json.loads((folder / "binding.json").read_text(encoding="utf-8"))
+            state = json.loads((folder / "daemon-state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not me & {binding.get("supervisorId"), binding.get("toolSessionId")}:
+            continue
+        if state.get("phase") in ("accepted", "stopped") or (folder / "STOP").exists():
+            continue
+        if state.get("pending") or alive(folder / "watcher.lock") or alive(folder / "hold.json"):
+            return run
+    return None
 
 
 def user_texts(data):
@@ -190,18 +247,29 @@ def compact(data):
 
 
 def ask(data):
+    run = supervised_run(data)
+    if run:
+        return block("監督不用提問框：等回答時整個監督回合停住，執行端的提問、送驗與背景事件都沒人處理（2026-10-13 A 開發監督在提問框裡"
+                     "等了 9 小時 57 分，期間送驗沒人處理）。要使用者決定的事用 supervise.cjs pending 登記到待決帳；要問時先執行 "
+                     f"supervise.cjs ask \"{run}\"，把回傳的全部未決項放進同一張選擇卡（mcp__visualize__show_widget，不會停住回合），"
+                     "出卡後用 supervise.cjs shown 記下列過的 key，回合照常結束。此 run 已不再監督時，依使用者原話 supervise.cjs stop，"
+                     "或用 TaskStop 停掉它的接收器與保持載入。")
     texts = user_texts(data)
     if not long_task(texts):
         return 0
     found = next(states(data), None)
     text = found.read_text(encoding="utf-8") if found else ""
-    if text and (finished(text) or ITEMIZED.search(text)):
+    if text and finished(text):
         return 0
     if any("LONG_TASK_BIND:" in t for t in texts):
-        return block("長任務受監督中，不向使用者提問：把問題寫成 LONG_TASK_EVENT question，依 long-task-supervisor "
-                     "runtime「原生事件交接」交監督依契約代答，其餘工作續行。監督完成驗收時會把代答整理給使用者確認。")
+        return block("長任務受監督中，本對話唯一的讀者是監督，不向使用者提問：把問題寫成 LONG_TASK_EVENT question（只剩未授權動作或"
+                     "被權限擋下用 blocked，附拒絕原文），依 long-task-supervisor runtime「原生事件交接」交監督，由監督依契約代答或"
+                     "登記待決帳再決定何時問使用者；其餘工作續行。")
+    if text and ITEMIZED.search(text):
+        return 0
     return block("長任務期間不用提問框卡住主線：可逆且有推薦選項的事項直接採推薦，在狀態檔待決清單記「已採預設」與改回方式；"
-                 "不可逆、付費、刪除、憑證或對外動作只暫停該動作，其餘工作續行。完成時在最終回覆一次列出全部已採預設，交使用者確認。"
+                 "不可逆、付費、刪除、憑證或對外動作只暫停該動作，其餘工作續行；本任務自己的測試中間產物有使用者預設授權，"
+                 "記入刪除清冊（狀態目錄 deletions.md）後直接刪，不必問。完成時在最終回覆一次列出全部已採預設，交使用者確認。"
                  "使用者明說要逐項確認時，先在狀態檔記「- 逐項確認模式：<使用者原話＋時間>」再問。")
 
 

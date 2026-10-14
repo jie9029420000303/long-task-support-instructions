@@ -3,7 +3,7 @@ const roots=process.env.SUPERVISOR_TEST_ROOTS?JSON.parse(process.env.SUPERVISOR_
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
 for(const skill of roots){
- const scripts=path.join(skill,'scripts'),{effective,append,attachAcceptance}=require(path.join(scripts,'contract-state.cjs')),{validateDecision}=require(path.join(scripts,'guard.cjs'));
+ const scripts=path.join(skill,'scripts'),{effective,append,attachAcceptance,inherit,startContract}=require(path.join(scripts,'contract-state.cjs')),{validateDecision}=require(path.join(scripts,'guard.cjs'));
  function fixture(){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'contract-state-')),source=path.join(root,'source.md'),run=path.join(root,'run');fs.mkdirSync(run);
   fs.writeFileSync(source,'User message 1: Delegate visual judgment until completion.\nUser message 2: Exclude the human UAT from this goal; retain the notification requirement.\nUser message 3: Evaluate the revised answer by its correct next step.\n');
@@ -64,6 +64,49 @@ for(const skill of roots){
    assert.equal(JSON.parse(fs.readFileSync(path.join(f.run,'binding.json'))).dispatchAudit.acceptance,true);
    assert.equal(require(path.join(scripts,'acceptance-audit.cjs')).summarize(f.run,progress).items.filter(c=>c.status==='PASS').length,0);
    assert.throws(()=>attachAcceptance(f.run,f.binding,{...progress,items:progress.items.map(c=>({...c,status:'EXCLUDED'}))}),/invalid acceptance status/);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+ });
+ // 2026-10-13 the GDB task moved from Codex to Claude with a contract rebuilt from the effective view: Jay's grants
+ // (among them「代我回答所有執行對話」) stayed behind and the new supervisor sent Jay five decision cards in 7.5 hours.
+ // A continuing run carries every registered grant with its quote, locator and source hash, and Jay's open questions,
+ // or refuses to start and names every broken source at once.
+ test(skill+' carries the locked contract, every user grant and the open questions to a continuing run, or names every broken source',()=>{
+  const f=fixture();try{
+   append(f.run,f.binding,f.row('delegation',[{action:'authorization',id:'visual',scope:'visual selection',instruction:'Delegate visual judgment until completion.'}],'Delegate visual judgment until completion.'));
+   append(f.run,f.binding,f.row('scope',[{action:'exclude',id:'A2'}]));
+   save(path.join(f.run,'pending-decisions.json'),{schema:1,items:[{key:'r24',kind:'credential',status:'open',ask:'Re-login uat2 and uat3?'}]});
+   const before=effective(f.run,f.binding),saved=fs.readdirSync(f.run).map(name=>[name,sha(path.join(f.run,name))]);
+   const carried=inherit(f.run,[f.root]);
+   assert.deepEqual(carried.summary.amendments,['delegation','scope']);assert.deepEqual(carried.summary.authorizationUpdates,['visual']);
+   assert.ok(carried.files.includes('pending-decisions.json'),'an unanswered question moves with the task instead of being asked again');
+   const next=path.join(f.root,'next');fs.mkdirSync(next);for(const name of carried.files)fs.copyFileSync(path.join(f.run,name),path.join(next,name));
+   const binding={...f.binding,allowedRoots:[f.root],contractSha256:sha(path.join(next,'contract.json')),contractStateSha256:carried.contractStateSha256};
+   save(path.join(next,'binding.json'),binding);save(path.join(next,'daemon-state.json'),{phase:'idle',pending:null,inflight:null});
+   const after=effective(next,binding);
+   assert.equal(after.contractStateSha256,before.contractStateSha256);assert.deepEqual(after.authorizationUpdates,before.authorizationUpdates);
+   assert.deepEqual(after.excluded.map(c=>c.id),['A2']);
+   // A new grant in the continuing run chains after the carried journal and keeps the carried one.
+   append(next,binding,f.row('later',[{action:'authorization',id:'judge',scope:'answers',instruction:'Evaluate the revised answer by its correct next step.'}],'Evaluate the revised answer by its correct next step.'));
+   assert.deepEqual(effective(next,binding).authorizationUpdates.map(u=>u.id),['visual','judge']);
+   assert.deepEqual(fs.readdirSync(f.run).map(name=>[name,sha(path.join(f.run,name))]),saved,'the old run is left as it was');
+   assert.throws(()=>inherit(f.run,[next]),error=>/delegation user source outside allowed roots/.test(error.message)&&/scope user source outside allowed roots/.test(error.message));
+   fs.appendFileSync(f.source,'edited after the grant\n');
+   assert.throws(()=>inherit(f.run,[f.root]),error=>/locked source missing or changed/.test(error.message)&&/delegation user source missing or changed/.test(error.message)&&/scope user source missing or changed/.test(error.message));
+   save(path.join(f.run,'watcher.lock'),{pid:process.pid});assert.throws(()=>inherit(f.run,[f.root]),/writer is active: watcher.lock/);fs.unlinkSync(path.join(f.run,'watcher.lock'));
+   // The Codex run-watch parent would relaunch the old watcher after the copy.
+   save(path.join(f.run,'runtime-state.json'),{pid:process.pid,launches:[]});assert.throws(()=>inherit(f.run,[f.root]),/writer is active: runtime-state.json/);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+ });
+ test(skill+' starts a run from a new contract or from the run it continues, never from a rebuilt contract',()=>{
+  const f=fixture();try{
+   append(f.run,f.binding,f.row('delegation',[{action:'authorization',id:'visual',scope:'visual selection',instruction:'Delegate visual judgment until completion.'}],'Delegate visual judgment until completion.'));
+   // effective-contract output carries the grants without their journal; the next amendment would drop them.
+   assert.throws(()=>startContract({contract:effective(f.run,f.binding),allowedRoots:[f.root]}),/rebuilt from effective-contract \(authorizationUpdates, excluded, contractStateSha256\); continue the old run with inheritFrom/);
+   assert.throws(()=>startContract({contract:f.contract,inheritFrom:f.run,allowedRoots:[f.root]}),/either a new contract or inheritFrom/);
+   assert.throws(()=>startContract({allowedRoots:[f.root]}),/either a new contract or inheritFrom/);
+   assert.deepEqual(startContract({contract:f.contract,allowedRoots:[f.root]}),{contract:f.contract,inherited:null});
+   const started=startContract({inheritFrom:f.run,allowedRoots:[f.root]});
+   assert.deepEqual(started.contract,f.contract);assert.deepEqual(started.inherited.summary.authorizationUpdates,['visual']);
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
  });
 }

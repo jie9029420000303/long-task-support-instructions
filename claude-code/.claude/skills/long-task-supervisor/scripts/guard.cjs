@@ -6,8 +6,9 @@ const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).d
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const PROGRESS_REVIEW_MS = 15 * 60 * 1000;
 // The supervisor's own clock (Jay 2026-10-07): a progress check at least every 30 minutes, and at once when a
-// package runs past 1.5x its AI-speed baseline or the same failing command repeats three times.
-const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_RATIO = 1.5, REPEAT_FAILURES = 3;
+// package runs past its AI-speed baseline or the same failing command repeats three times. Rule A (Jay 2026-10-13):
+// each baseline wakes the supervisor at 1.5x and once more at 3x, whether or not the package still produces.
+const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_TIERS = [1.5, 3], REPEAT_FAILURES = 3;
 // A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
 // a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
 const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
@@ -21,8 +22,11 @@ const NO_EVENT_REVIEW_MS = 60 * 60 * 1000;
 // second miss is the supervisor's to handle, never Jay's (Jay 2026-10-11). An open criterion no package covers for
 // 10 minutes wakes the supervisor to plan it. Jay is online when he typed in the supervisor chat within 10 minutes.
 const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 10 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000;
-// A rate-limit notice that names no reset time: the subscription's five-hour window.
-const RATE_LIMIT_FALLBACK_MS = 5 * 60 * 60 * 1000;
+// A turn the platform ended with an error that is not a rate limit naming its reset (Jay 2026-10-14): 2 minutes
+// without the executor resuming wakes the supervisor. A background job's notice or a queued message often resumes it
+// first (2026-10-02 GDB: 0 minutes); with nothing to resume it, a 401 sat 62 minutes (IA 2026-10-12) and a failed
+// DNS lookup 190 (GDB 2026-10-02).
+const PLATFORM_ERROR_MS = 2 * 60 * 1000;
 // Silence and a changed checked wait keep their original meaning; clock reviews fire while the executor is busy.
 const quietReview = event => (event.reasons || ['silence']).every(reason => ['silence', 'wait_changed'].includes(reason));
 function need(ok, message) { if (!ok) throw Error(message); }
@@ -71,6 +75,9 @@ function validateContract(contract, context = {}) {
 function validateDecision(config, contract, event, decision) {
   need(decision && decision.eventId === event.id, 'Decision belongs to another event');
   need(['accept', 'reject', 'reply', 'needs_user', 'observe'].includes(decision.disposition), 'Unknown disposition');
+  // What waits on Jay lives in the run's pending-decision ledger (pending-decisions.cjs); a decision carrying the old
+  // free-text list would lose it, as the 2026-10-13 GDB status pane kept 2 decided items for 22 more decisions.
+  need(!Object.prototype.hasOwnProperty.call(decision, 'pendingApprovals'), 'pendingApprovals moved to the pending-decision ledger: register them with supervise.cjs pending RUN CHANGE.json');
   if (event.kind === 'progress_review') {
     need(['reply','observe'].includes(decision.disposition), 'Progress review requires reply or checked observe');
     const check = decision.progressCheck;
@@ -131,9 +138,6 @@ function validateDecision(config, contract, event, decision) {
     for (const field of ['reply', 'delivery', 'revision', 'results']) {
       need(!Object.prototype.hasOwnProperty.call(decision, field), 'Observe cannot include ' + field);
     }
-    if (Object.prototype.hasOwnProperty.call(decision, 'pendingApprovals')) {
-      need(Array.isArray(decision.pendingApprovals) && decision.pendingApprovals.length > 0 && decision.pendingApprovals.every(item => typeof item === 'string' && item.trim()), 'Invalid pending approvals');
-    }
   } else if (decision.disposition === 'needs_user') {
     need(typeof decision.wholeRunPauseSource === 'string' && decision.wholeRunPauseSource.trim(),
       'Whole-run pause requires an explicit user instruction source; use reply or observe for one blocked action');
@@ -170,12 +174,9 @@ function inputSource(row) {
   if (kind || row.isMeta) return null;
   return typeof content === 'string' || (Array.isArray(content) && content.some(block => block?.type === 'text')) ? 'human' : null;
 }
-// Overdue wakes only when the package is past 1.5x its baseline, has produced nothing for the silence window and
-// has no process still running it (Jay 2026-10-11); a slow but working package is recorded, not interrupted.
-function overdueNeedsReview(item, nowMs = Date.now()) {
-  const last = Date.parse(item.lastActivityAt);
-  return item.ratio >= OVERDUE_RATIO && item.alive !== true && (!Number.isFinite(last) || last > nowMs || nowMs - last >= PROGRESS_REVIEW_MS);
-}
+// The highest overdue tier a package has reached, or null. Whether it still produces or runs a process does not
+// matter (rule A, Jay 2026-10-13); a finished package has no ratio and never counts.
+function overdueTier(item) { return [...OVERDUE_TIERS].reverse().find(tier => item.ratio >= tier) ?? null; }
 // Machine sleep does not count toward an awake-time window, as it does not count toward a package's elapsed time.
 function awakeSince(sleeps, from, nowMs = Date.now()) {
   const slept = (sleeps || []).reduce((sum, item) => sum + Math.max(0, Math.min(nowMs, Date.parse(item.to)) - Math.max(from, Date.parse(item.from))), 0);
@@ -192,6 +193,6 @@ function subagentActivityAt(binding) {
   return Math.min(latest, Date.now());
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_RATIO, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
-  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, RATE_LIMIT_FALLBACK_MS, quietReview, replayed, inputSource,
-  overdueNeedsReview, awakeSince, deliveredText, deliveryRecorded, subagentActivityAt };
+  REVIEW_INTERVAL_MS, OVERDUE_TIERS, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
+  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, PLATFORM_ERROR_MS, quietReview, replayed, inputSource,
+  overdueTier, awakeSince, deliveredText, deliveryRecorded, subagentActivityAt };
