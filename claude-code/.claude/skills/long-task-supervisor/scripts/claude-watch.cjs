@@ -365,7 +365,8 @@ async function watch(){
   validateContract(read(contractPath),{run,binding});
   need(hash(path.join(run,'executor-prompt.txt'))===binding.promptSha256,'Executor prompt changed');
   if(stopped()){state.phase='stopped';checkpoint();return;}
-  state.pid=process.pid;state.phase='watching';checkpoint();
+  // A watcher that starts cleanly has recovered; keep the error only while the phase is still 'error'.
+  state.pid=process.pid;state.phase='watching';state.error=null;checkpoint();
   save(readyPath,{pid:process.pid,executorId:binding.executorId,executorDesktopId:binding.executorDesktopId,readVerified:true,at:now()});
   let lastGrowthAt=Date.now();
   state.lastExecutorActivityAt ||= Math.max(Date.parse(binding.createdAt)||0,fs.statSync(binding.executorLog).mtimeMs);
