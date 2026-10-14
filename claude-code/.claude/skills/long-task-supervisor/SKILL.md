@@ -7,7 +7,7 @@ description: 使用者在 Claude Code 桌面研究對話定案後，要求監督
 
 **目前可見的研究對話就是監督對話；執行主線必須是另一個 Claude Desktop Code 可見對話。** 先讀 [啟動與事件協定](references/runtime.md)，沿用本對話已定案的目標、驗收與授權。執行對話由使用者在桌面 App 開啟並送出準備好的 prompt；若當前環境真有可建立桌面 Code 對話的原生工具，可以直接建立。不得用 `claude -p`、`--session-id` 或背景 CLI 取代桌面執行主線，也不得把 CLI session 出現在清單中當成桌面啟動證據。
 
-1. 保存定案原文、附件與規則的快照及 SHA-256，逐條建立驗收契約。執行 prompt 要帶唯一 `LONG_TASK_BIND:<uuid>` 標記、契約位置、既有授權、完整工作與 [事件格式](references/runtime.md#執行對話的事件)，要求執行者使用 `long-task-orchestrator`。明寫「問題交監督依契約查證並代答；只有具體未授權操作才暫停該操作，其餘工作續行」；送出前檢查並刪除舊 prompt 中「監督會把問題轉成使用者選擇題」等相反指示。新的商業取捨及不可逆動作仍按上層授權處理；不替使用者自行設定 `/goal`。
+1. 保存定案原文、附件與規則的快照及 SHA-256，逐條建立驗收契約。契約含多項開發或修正時，依同一情境、同一段程式或同一條測試路徑分組寫進執行 prompt：同組修正湊齊後只跑一次完整測試、只發一版並一起送驗。執行 prompt 要帶唯一 `LONG_TASK_BIND:<uuid>` 標記、契約位置、既有授權、完整工作與 [事件格式](references/runtime.md#執行對話的事件)，要求執行者使用 `long-task-orchestrator`。明寫「問題交監督依契約查證並代答；只有具體未授權操作才暫停該操作，其餘工作續行」；送出前檢查並刪除舊 prompt 中「監督會把問題轉成使用者選擇題」等相反指示。新的商業取捨及不可逆動作仍按上層授權處理；不替使用者自行設定 `/goal`。
 2. 若沒有原生桌面建對話工具，交付可直接貼上的 prompt 路徑及明確的桌面 Code 操作入口，等使用者在新對話送出。透過桌面對話搜尋工具用唯一標記找到精確 `local_...` 對話，再核對同一 prompt 所在的本機 transcript、`entrypoint=claude-desktop` 與專案路徑；有歧義就停在綁定階段，不猜 session ID。
 3. 使用 `scripts/supervise.cjs init` 鎖定兩個對話與契約；在**監督桌面對話的背景 Bash 工具**執行 `scripts/claude-watch.cjs RUN`。它只讀精確執行 transcript，遇完成回合就輸出事件並結束；桌面 App 的背景完成通知應喚醒原監督對話，須以真實模型回合讀取輸出並核對事件 ID，才算喚醒成功。將 run 路徑及 runtime 的[原生事件交接](references/runtime.md#原生事件交接)交給執行者：提問、阻塞或送驗先用 `scripts/handoff.cjs prepare` 保存事件，取得唯一資格才發原生短訊；監督對帳同一 pending 再決策，避免背景通知被平台暫停吞掉。`status.active=true` 且 `readVerified=true` 才說「監看已啟動」；背景工具結束但沒有喚醒時，不得宣稱持續監看。
 
