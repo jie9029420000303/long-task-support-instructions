@@ -171,17 +171,27 @@ function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
   return {speed:measured,packages,processActivityAt,subagentActivityAt};
 }
 // Real test resources (a host's diagnosis slots, test identities) the snapshot declares: capacity.resources
-// [{key,slots}] and per-package uses [{key,units}]. Free slots while ready or blocked work needs the same resource
+// [{key,slots}] and per-package uses [{key,units}]. Free slots while work that could start now needs the same resource
 // mean the run could go faster (2026-10-07: the GDB host ran 2 of its 4 diagnosis slots while tests waited).
+// waiting lists only that work: a ready package the dispatch audit would call eligible (independent, safe, every
+// dependency completed, no exclusive resource held in flight) or one blocked only by a resource conflict, whose units
+// fit the free slots of every resource it uses. Work with open dependencies or needing more slots than are free is not
+// underuse (2026-10-14/15 IA: 19 resource wakes, 15 ended in observe, mostly for exactly those two reasons).
 function resourceUse(snapshot){
   const declared=snapshot?.capacity?.resources;
   if(!Array.isArray(declared))return [];
   const packages=snapshot.packages||{},uses=(item,key)=>(item.uses||[]).filter(use=>use&&use.key===key);
-  return declared.filter(item=>item&&item.key&&Number(item.slots)>0).map(({key,slots})=>{
-    const used=(packages.inFlight||[]).reduce((sum,item)=>sum+uses(item,key).reduce((total,use)=>total+(Number(use.units)||1),0),0);
-    const waiting=[...(packages.ready||[]),...(packages.blocked||[])].filter(item=>uses(item,key).length).map(item=>item.id);
-    return {key,slots:Number(slots),used,free:Number(slots)-used,waiting};
+  const units=(item,key)=>uses(item,key).reduce((total,use)=>total+(Number(use.units)||1),0);
+  const resources=declared.filter(item=>item&&item.key&&Number(item.slots)>0).map(({key,slots})=>{
+    const used=(packages.inFlight||[]).reduce((sum,item)=>sum+units(item,key),0);
+    return {key,slots:Number(slots),used,free:Number(slots)-used};
   });
+  const free=new Map(resources.map(item=>[item.key,item.free])),completed=new Set((packages.completed||[]).map(item=>item.id));
+  const held=new Set((packages.inFlight||[]).flatMap(item=>(item.exclusiveResources||[]).map(claim=>claim?.key)));
+  const startable=item=>(item.dependencies||[]).every(id=>completed.has(id))&&(item.exclusiveResources||[]).every(claim=>!held.has(claim?.key))&&
+    (item.uses||[]).every(use=>!free.has(use?.key)||units(item,use.key)<=free.get(use.key));
+  const candidates=[...(packages.ready||[]).filter(item=>item.independent&&item.safe),...(packages.blocked||[]).filter(item=>item.kind==='resource_conflict')].filter(startable);
+  return resources.map(item=>({...item,waiting:candidates.filter(candidate=>uses(candidate,item.key).length).map(candidate=>candidate.id)}));
 }
 module.exports={DEFAULTS,sessionsRoot,sessionFile,sessionFiles,markerIn,agentRuns,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
 if(require.main===module){

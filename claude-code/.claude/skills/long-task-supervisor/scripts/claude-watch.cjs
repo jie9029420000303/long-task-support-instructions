@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
 const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,IDLE_WORK_MS,
-  NO_EVENT_REVIEW_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,overdueTier,awakeSince,inputSource,deliveredText,subagentActivityAt}=require('./guard.cjs');
+  NO_EVENT_REVIEW_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,OVERDUE_TIERS,OVERDUE_NEAR,overdueTier,awakeSince,inputSource,deliveredText,subagentActivityAt}=require('./guard.cjs');
 const {holdAlive}=require('./claude-hold.cjs');
 const signals=require('./signals.cjs');
 const login=require('./login-check.cjs');
@@ -240,17 +240,31 @@ function supervisorClock(){
   const waitingUser=state.checkedWait?.kind==='user_approval',limited=rateLimited();
   // Rule A (Jay 2026-10-13): each baseline wakes the supervisor once at 1.5x and once more at 3x, whether or not the
   // package still produces, to judge whether it runs, is stuck, can go faster or grew in scope (GDB and IA: 12
-  // packages past 1.5x, 3 analysed). A re-estimated baseline, a new startedAt or minutes, gets its own two wakes:
-  // GDB C13-RELOGIN-EXEC ran a second phase on the first phase's 17.5 minutes. A rate-limited supervisor cannot act,
-  // so the tier waits for the reset.
-  const overdue=limited?[]:paced.packages.filter(item=>{const tier=overdueTier(item);
-    return Boolean(tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);});
+  // packages past 1.5x, 3 analysed). A rate-limited supervisor cannot act, so the tier waits for the reset.
+  // A tier wakes again only for a baseline that ends later than every one it woke on (startedAt + tier x the executor's
+  // minutes): a re-estimate for grown scope or a new phase (GDB C13-RELOGIN-EXEC ran a second phase on the first
+  // phase's 17.5 minutes). A smaller or merely recomputed baseline does not (2026-10-15 IA: WP-FIX2A-PROD woke at 3x on
+  // 26 minutes, was rewritten to 19.5 and woke at 3x again 4 minutes later). Keys keep their v0.26 form, so the wakes
+  // a live run already had still count after the upgrade.
+  const tierEnd=(startedAt,minutes,tier)=>Date.parse(startedAt)+tier*(Number(minutes)||0)*60000;
+  const tierDue=(item,tier)=>{
+    const prefix='overdue:'+item.id+'@',end=tierEnd(item.startedAt,item.executorBaselineMinutes,tier);
+    return !Object.keys(announced).some(key=>{const match=key.startsWith(prefix)&&/^([^@/]*)\/([^/x]*)x([\d.]+)$/.exec(key.slice(prefix.length));
+      return Boolean(match)&&Number(match[3])===tier&&tierEnd(match[1],match[2],tier)>=end;});
+  };
+  const tierOnce=(item,tier)=>tierDue(item,tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);
+  const overdue=limited?[]:paced.packages.filter(item=>{const tier=overdueTier(item);return Boolean(tier)&&tierOnce(item,tier);});
+  // One analysis for the batch (Jay 2026-10-15, D3): an overdue wake also brings the other in-flight packages already at
+  // 1.2x and records their 1.5x tier as announced; their 3x still wakes on its own.
+  const nearOverdue=overdue.length?paced.packages.filter(item=>!overdue.includes(item)&&item.ratio>=OVERDUE_NEAR&&item.ratio<OVERDUE_TIERS[0]&&tierOnce(item,OVERDUE_TIERS[0])):[];
   const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
   const blocked=blockedTools().filter(item=>once('blocked:'+item.id));
   const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
-  const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+'@'+item.used+':'+item.waiting.join(',')));
+  // Once per resource and set of packages that could start on it now: a package starting or ending elsewhere no longer
+  // re-wakes (2026-10-14/15 IA: the old key held the used count, 19 wakes and 15 observed).
+  const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+':'+[...item.waiting].sort().join(',')));
   let rateReset=null;
   // Every refusal row of a limit that reset is old news, so the cursor moves to the reset itself: a subagent's
   // transcript is read again on every tick.
@@ -261,11 +275,12 @@ function supervisorClock(){
   const failed=state.platformError;
   const platformError=failed&&!limited&&!waitingUser&&awake(Math.max(failed.since,failed.rearmedAt||0))>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?
     {who:failed.who,since:new Date(failed.since).toISOString(),kind:failed.kind,status:failed.status,text:failed.text}:null;
-  const lastEvent=state.lastRealEventAt||Date.parse(binding.createdAt)||Date.now(),quietEvent=awake(lastEvent)>=NO_EVENT_REVIEW_MS;
+  // The hour counts from the executor's last event or the supervisor's ruling on one, whichever is later (lastDecisionAt).
+  const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awake(lastEvent)>=NO_EVENT_REVIEW_MS;
   const noEventHour=quietEvent&&!waitingUser&&!limited&&once('no_event_hour:'+lastEvent);
   // A background job running alone is still idle capacity: only the executor's own work and its subagents count;
-  // a turn that only polls a job or sleeps is not work.
-  const idleSince=Math.max(state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0)||Date.parse(binding.createdAt)||Date.now();
+  // a turn that only polls a job or sleeps is not work. Waiting for the supervisor's ruling is not idle (lastDecisionAt).
+  const idleSince=Math.max(state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
   const idle=awake(idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser&&!limited;
@@ -328,7 +343,7 @@ function supervisorClock(){
         ...(limited?['rate_limited']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
   }
   if(!reasons.length)return null;
-  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
+  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awake(lastEvent)/60000)}}:{}),
     ...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
@@ -489,8 +504,9 @@ async function watch(){
     const held=checkedWait.unchanged(state);
     const clock=isPaused?null:supervisorClock();
     // Quiet means nothing moves at all: the executor, its subagents and the test processes it runs. A pause or a
-    // running rate limit is a known stop, not silence.
-    const silent=!held&&!isPaused&&!rateLimited()&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);
+    // running rate limit is a known stop, not silence, and neither is waiting for the supervisor's ruling on an executor
+    // event (lastDecisionAt, set by supervise.cjs decision; absent in older state, it counts as 0).
+    const silent=!held&&!isPaused&&!rateLimited()&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);
     if(silent||clock){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
       const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[])];
@@ -498,7 +514,8 @@ async function watch(){
         kind:'progress_review',reasons,lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
         lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
         lastProcessActivityAt:state.lastProcessActivityAt?new Date(state.lastProcessActivityAt).toISOString():null,
-        unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],
+        lastDecisionAt:state.lastDecisionAt?new Date(state.lastDecisionAt).toISOString():null,
+        unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],nearOverdue:clock?.nearOverdue||[],
         baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
         machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,

@@ -12,8 +12,6 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},now=
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
   const autoReview=settings?.approvalPolicy&&settings.approvalPolicy!=='never';
   const switched=Object.entries(state.modelSwitch||{}).filter(([,item])=>!item.restored);
-  const hours=Math.max(0,(now-(Date.parse(binding.createdAt)||now))/3600000);
-  const perHour=passed&&hours>0?passed/hours:0;
   const queued=(state.eventQueue||[]).length;
   const handling=(state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無')+
     (queued?'；另有 '+queued+' 個執行對話事件排隊，處理完依序送監督':'');
@@ -44,10 +42,16 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},now=
   if(paced.packages.length)lines.push('| 工作包 | 已跑（分） | 預估（分） | 比值 |','|---|---|---|---|',
     ...paced.packages.map(item=>'| '+item.id+' | '+(item.elapsedMinutes??'—')+' | '+(item.baselineMinutes??'未填')+' | '+(item.ratio??'—')+' |'));
   else lines.push('目前沒有在途工作包。');
+  // Only measured package baselines estimate the rest; without them the page says 未估 (no measurement, no estimate).
+  // Passed criteria per hour said 19.7 hours on GDB 2026-10-15 while most criteria pass together after one deploy.
   lines.push('','## 預估完成','');
-  if(perHour&&open.length)lines.push('約 '+Math.round(open.length/perHour*10)/10+' 小時。算法：開工 '+Math.round(hours*10)/10+' 小時通過 '+passed+' 條，每小時約 '+
-    Math.round(perHour*100)/100+' 條；剩 '+open.length+' 條 ÷ 每小時條數。不含等你核准或外部結果的時間。');
-  else lines.push(open.length?'還沒有任何條件通過，無法用實測速度推估。':'所有條件都已通過，或尚未建立驗收表。');
+  const remaining=['ready','blocked'].flatMap(key=>snapshot?.packages?.[key]||[]),inFlight=paced.packages.filter(item=>!item.finished);
+  const unmeasured=[...remaining.map(item=>item.id),...inFlight.filter(item=>!item.baselineMinutes||item.ratio>=1).map(item=>item.id)];
+  if(!snapshot)lines.push('未估：還沒有派工快照。');
+  else if(unmeasured.length)lines.push('未估：'+unmeasured.length+' 個工作包沒有可用的時程基準（就緒或受阻、還沒開跑的包，以及沒填基準或已超過基準的在途包）：'+unmeasured.slice(0,8).join('、')+(unmeasured.length>8?' 等':'')+'。');
+  else if(inFlight.length){const minutes=Math.max(...inFlight.map(item=>item.baselineMinutes-item.elapsedMinutes));
+    lines.push('約 '+Math.round(minutes)+' 分鐘（'+clock(now+minutes*60000)+' 前後）。依據：派工快照在途 '+inFlight.length+' 個工作包的時程基準減去已跑時間（扣掉電腦睡眠），取最晚的一包；不含等你核准、限速、外部結果與之後還沒拆出的工作。');}
+  else lines.push(open.length?'未估：還有 '+open.length+' 條未通過，派工快照沒有剩餘的工作包。':'所有條件都已通過，或尚未建立驗收表。');
   return lines.join('\n')+'\n';
 }
 function write(run,args){

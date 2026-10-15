@@ -9,8 +9,6 @@ const OPEN=['FAIL','PENDING','INCONCLUSIVE','BLOCKED'];
 function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions={open:[]},queue=[],now=Date.now()}){
   const items=snapshot?.acceptance?.items||[],passed=items.filter(item=>item.status==='PASS').length;
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
-  const hours=Math.max(0,(now-(Date.parse(binding.createdAt)||now))/3600000);
-  const perHour=passed&&hours>0?passed/hours:0;
   const pending=state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無';
   const refusedItems=[...new Set((state.reviewRejections||[]).map(item=>item.item).filter(Boolean))];
   const permission=!settings?.permissionMode?'尚未讀到':settings.permissionMode==='auto'?'自動模式（Git、遠端連線等操作可能被自動模式擋下；請在該對話的權限選單切成「略過權限」，不必在該對話打字，續接訊息由監督送）'+
@@ -39,10 +37,19 @@ function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions
   if(paced.packages.length)lines.push('| 工作包 | 已跑（分） | 預估（分） | 比值 |','|---|---|---|---|',
     ...paced.packages.map(item=>'| '+item.id+' | '+(item.elapsedMinutes??'—')+' | '+(item.baselineMinutes??'未填')+' | '+(item.ratio??'—')+' |'));
   else lines.push('目前沒有在途工作包。');
+  // Only measured package baselines estimate the rest; without them the page says 未估 (no measurement, no estimate).
+  // Passed criteria per hour said 19.7 hours on GDB 2026-10-15 while most criteria pass together after one deploy.
   lines.push('','## 預估完成','');
-  if(perHour&&open.length)lines.push('約 '+Math.round(open.length/perHour*10)/10+' 小時。算法：開工 '+Math.round(hours*10)/10+' 小時通過 '+passed+' 條，每小時約 '+
-    Math.round(perHour*100)/100+' 條；剩 '+open.length+' 條 ÷ 每小時條數。不含等你核准、限速或外部結果的時間。');
-  else lines.push(open.length?'還沒有任何條件通過，無法用實測速度推估。':'所有條件都已通過，或尚未建立驗收表。');
+  // A package not yet started cannot be placed in time; one in flight counts only before it passes its baseline.
+  const notStarted=['ready','blocked'].flatMap(key=>snapshot?.packages?.[key]||[]),inFlight=paced.packages.filter(item=>!item.finished);
+  const measured=item=>item.baselineMinutes>0&&item.elapsedMinutes!==null&&item.elapsedMinutes<item.baselineMinutes;
+  const unmeasured=[...notStarted.map(item=>item.id),...inFlight.filter(item=>!measured(item)).map(item=>item.id)];
+  if(!snapshot)lines.push('未估：還沒有派工快照。');
+  else if(unmeasured.length)lines.push('未估：'+unmeasured.length+' 個工作包沒有可用的時程基準（就緒或受阻、還沒開跑的包，以及沒填基準或已超過基準的在途包）：'+
+    unmeasured.slice(0,8).join('、')+(unmeasured.length>8?' 等':'')+'。');
+  else if(inFlight.length){const minutes=Math.max(...inFlight.map(item=>item.baselineMinutes-item.elapsedMinutes));
+    lines.push('約 '+Math.round(minutes)+' 分鐘（'+clock(now+minutes*60000)+' 前後）。依據：派工快照在途 '+inFlight.length+' 個工作包的時程基準減去已跑時間（扣掉電腦睡眠），取最晚的一包；不含等你核准、限速、外部結果與之後還沒拆出的工作。');}
+  else lines.push(open.length?'未估：還有 '+open.length+' 條未通過，派工快照沒有剩餘的工作包。':'所有條件都已通過，或尚未建立驗收表。');
   lines.push('','背景監看在每個事件後暫停、由監督處理完再重掛；暫停期間與驗收後本頁不更新，最新的「待你決定」以狀態面板或 run 目錄的 pending-decisions.json 為準。');
   return lines.join('\n')+'\n';
 }

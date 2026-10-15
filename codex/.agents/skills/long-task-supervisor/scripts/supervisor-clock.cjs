@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS}=require('./guard.cjs');
+const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS}=require('./guard.cjs');
 const automations=require('./automations.cjs');
 const login=require('./login-check.cjs');
 const now=()=>new Date().toISOString();
@@ -171,25 +171,40 @@ function check(run,binding,state){
   if(paced.subagentActivityAt)state.lastSubagentActivityAt=Math.max(state.lastSubagentActivityAt||0,paced.subagentActivityAt);
   const once=key=>announced[key]?false:(announced[key]=now(),true);
   // Rule A (Jay 2026-10-13): each baseline wakes the supervisor once at 1.5x and once more at 3x, whether or not the
-  // package still produces, to judge whether it runs, is stuck, can go faster or grew in scope. A re-estimated
-  // baseline, a new startedAt or minutes, gets its own two wakes (GDB C13-RELOGIN-EXEC: a second phase on the
-  // first phase's 17.5 minutes).
-  const overdue=paced.packages.filter(item=>{const tier=overdueTier(item);
-    return Boolean(tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);});
+  // package still produces, to judge whether it runs, is stuck, can go faster or grew in scope.
+  // A tier wakes again only for a baseline that ends later than every one it woke on (startedAt + tier x the executor's
+  // minutes): a re-estimate for grown scope or a new phase (GDB C13-RELOGIN-EXEC ran a second phase on the first
+  // phase's 17.5 minutes). A smaller or merely recomputed baseline does not (2026-10-15 IA: WP-FIX2A-PROD woke at 3x on
+  // 26 minutes, was rewritten to 19.5 and woke at 3x again 4 minutes later). Keys keep their v0.26 form, so the wakes
+  // a live run already had still count after the upgrade.
+  const tierEnd=(startedAt,minutes,tier)=>Date.parse(startedAt)+tier*(Number(minutes)||0)*60000;
+  const tierDue=(item,tier)=>{
+    const prefix='overdue:'+item.id+'@',end=tierEnd(item.startedAt,item.executorBaselineMinutes,tier);
+    return !Object.keys(announced).some(key=>{const match=key.startsWith(prefix)&&/^([^@/]*)\/([^/x]*)x([\d.]+)$/.exec(key.slice(prefix.length));
+      return Boolean(match)&&Number(match[3])===tier&&tierEnd(match[1],match[2],tier)>=end;});
+  };
+  const tierOnce=(item,tier)=>tierDue(item,tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);
+  const overdue=paced.packages.filter(item=>{const tier=overdueTier(item);return Boolean(tier)&&tierOnce(item,tier);});
+  // One analysis for the batch (Jay 2026-10-15, D3): an overdue wake also brings the other in-flight packages already at
+  // 1.2x and records their 1.5x tier as announced; their 3x still wakes on its own.
+  const nearOverdue=overdue.length?paced.packages.filter(item=>!overdue.includes(item)&&item.ratio>=OVERDUE_NEAR&&item.ratio<OVERDUE_TIERS[0]&&tierOnce(item,OVERDUE_TIERS[0])):[];
   const baselineMissing=paced.packages.filter(item=>item.baselineMissing&&once('baseline:'+item.id));
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
   const stuck=blockedTools(state),blocked=stuck.filter(item=>once('blocked:'+item.id));
   const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
-  const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+'@'+item.used+':'+item.waiting.join(',')));
+  // Once per resource and set of packages that could start on it now: a package starting or ending elsewhere no longer
+  // re-wakes (2026-10-14/15 IA: the old key held the used count, 19 wakes and 15 observed).
+  const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+':'+[...item.waiting].sort().join(',')));
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
   for(const [,item] of repeated)item.announced=now();
   // A checked wait on Jay's approval already says what is missing: asking again every hour only spends turns.
   const waitingUser=state.checkedWait?.kind==='user_approval';
-  const lastEvent=state.lastRealEventAt||Date.parse(binding.createdAt)||Date.now(),quietEvent=awakeSince(state,lastEvent)>=NO_EVENT_REVIEW_MS;
+  // The hour restarts when the supervisor's ruling on an executor event is applied: the executor waited for it.
+  const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awakeSince(state,lastEvent)>=NO_EVENT_REVIEW_MS;
   const noEventHour=quietEvent&&!waitingUser&&once('no_event_hour:'+lastEvent);
   // A background job running alone is still idle capacity: only the executor's own turns and its subagents count.
-  const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0)||Date.parse(binding.createdAt)||Date.now();
+  const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
   const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser;
@@ -258,7 +273,7 @@ function check(run,binding,state){
         ...stuck.map(item=>'executor_blocked:'+item.command.slice(0,60)),...(quietEvent?['no_event_hour']:[]),...(idle?['idle_with_work']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
   }
   if(!reasons.length)return null;
-  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
+  return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
     ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),

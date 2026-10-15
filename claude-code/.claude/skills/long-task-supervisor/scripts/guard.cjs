@@ -7,8 +7,10 @@ const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const PROGRESS_REVIEW_MS = 15 * 60 * 1000;
 // The supervisor's own clock (Jay 2026-10-07): a progress check at least every 30 minutes, and at once when a
 // package runs past its AI-speed baseline or the same failing command repeats three times. Rule A (Jay 2026-10-13):
-// each baseline wakes the supervisor at 1.5x and once more at 3x, whether or not the package still produces.
-const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_TIERS = [1.5, 3], REPEAT_FAILURES = 3;
+// each baseline wakes the supervisor at 1.5x and once more at 3x, whether or not the package still produces. An
+// overdue wake also brings the other in-flight packages already at 1.2x, and their 1.5x counts as announced (Jay
+// 2026-10-15, D3: one IA batch reached 1.5x within 7 minutes and woke the supervisor 3 times).
+const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_TIERS = [1.5, 3], OVERDUE_NEAR = 1.2, REPEAT_FAILURES = 3;
 // A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
 // a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
 const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
@@ -193,6 +195,6 @@ function subagentActivityAt(binding) {
   return Math.min(latest, Date.now());
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_TIERS, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
+  REVIEW_INTERVAL_MS, OVERDUE_TIERS, OVERDUE_NEAR, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
   INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, PLATFORM_ERROR_MS, quietReview, replayed, inputSource,
   overdueTier, awakeSince, deliveredText, deliveryRecorded, subagentActivityAt };
