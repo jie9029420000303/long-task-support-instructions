@@ -1007,6 +1007,30 @@ class SharedSpecTests(unittest.TestCase):
                 self.assertIn(marker, text, f"{skill_dir.name}: {marker}")
 
     @canonical_only
+    def test_both_adapters_carry_the_evidence_carryover_rule(self):
+        # 2026-10-16 GDB Gate 2：三處小修正讓整套視覺查核（約 2.8 小時、上億 token）從頭重跑，
+        # 因為舊規則要契約另行授權才可沿用。新規則預設只重驗受影響部分，但有兩道安全網：
+        # 每種寬度的完整長頁像素比對（共用樣式檔一改雜湊就變，雜湊證明不了畫面沒變），
+        # 以及最終放行前的完整同版回歸。少了任一道，中途沿用就可能把拼接的證據帶進最終 PASS；
+        # 只改一個平台，另一個平台的長任務仍會每次換版整套重跑。
+        spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
+        for marker in ("未受影響項目的舊證據預設沿用", "像素比對", "完整同版回歸", "判斷不出影響時，該範圍整套重驗"):
+            self.assertIn(marker, spec, marker)
+        self.assertNotIn("未變依賴的舊證據只能在契約或最新使用者授權允許", spec)
+        codex = REPOSITORY / "codex" / ".agents" / "skills"
+        claude = ADAPTER / "skills"
+        for orchestrator in (claude / "long-task-orchestrator", codex / "goal-orchestrator"):
+            text = "".join((orchestrator / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md"))
+            for marker in ("附沿用核對後沿用", "完整長頁巡檢", "像素比對", "完整同版回歸"):
+                self.assertIn(marker, text, f"{orchestrator.name}: {marker}")
+        for supervisor in (claude / "long-task-supervisor", codex / "long-task-supervisor"):
+            acceptance = (supervisor / "references" / "acceptance.md").read_text(encoding="utf-8")
+            for marker in ("未受影響案例的舊證據預設沿用", "像素比對", "沿用項不必重開瀏覽器重驗", "完整同版回歸"):
+                self.assertIn(marker, acceptance, f"{supervisor}: {marker}")
+            review = (supervisor / "references" / "event-review.md").read_text(encoding="utf-8")
+            self.assertIn("換版沿用的項目查沿用紀錄", review, str(supervisor))
+
+    @canonical_only
     def test_both_guards_enforce_the_same_completion_gate(self):
         # 放行紀律是共同語意：兩個平台的守門工具對同一份狀態檔必須給出同一個結論，否則同一個任務換平台就換標準。
         codex_guard = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator" / "scripts" / "sidecar-guard.py"
