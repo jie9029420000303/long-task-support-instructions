@@ -279,7 +279,8 @@ function dispatchPreflight() {
 }
 try {
   const result = command === 'attach-acceptance' ? contractState.attachAcceptance(run,load().binding,read(other))
-    : command === 'amend' ? contractState.append(run,load().binding,read(other))
+    // An authorization that answers pending items closes them with its amendmentId in the same step (pendingKeys).
+    : command === 'amend' ? (() => { const {binding} = load(); const result = pending.amend(run, binding, read(other)); refreshDashboard(binding); return result; })()
     : command === 'effective-contract' ? contractState.effective(run,load().binding)
     : command === 'init' ? init()
     : command === 'status' ? status()

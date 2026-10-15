@@ -317,6 +317,10 @@ async function refuseDecision(event,file,error){
   }
   await changed(run,()=>!fs.existsSync(file)||hash(file)!==sha256);
 }
+// An executor whose turn ended on an event waits for this ruling (Jay 2026-10-15): its silence, idle and quiet-hour
+// clocks restart when the ruling is applied, not at its submission (GDB 05:07 and 08:10: a 21- and a 27-minute review
+// each ended in a silence check of an executor that had been waiting for the verdict). Clock reviews do not stop it.
+function ruled(event) { if (!['progress_review','dispatch_review'].includes(event.kind)) state.lastDecisionAt = Date.now(); }
 async function pendingDecision() {
   const event = state.pending;
   if (!(state.supervisorWake ||= {})[event.id]) {
@@ -374,7 +378,7 @@ async function pendingDecision() {
       checkedWait.observeSupervisorInput(state,detail);
       checkedWait.remember(state,decision,binding);
     }
-    state.lastProgressReviewAt=Date.now();
+    state.lastProgressReviewAt=Date.now();ruled(event);
     if(event.kind==='progress_review')state.failedCommands={};
     (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
     state.seen.push(event.id); state.pending = null;
@@ -391,6 +395,7 @@ async function pendingDecision() {
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
   }
   await sendAndRead(binding.executorId,decision.reply,'answer-' + event.id);
+  ruled(event);
   // Every instruction is tracked against a deadline; the clock wakes the supervisor if nothing acts on it.
   const given = decision.instruction;
   state.instruction = {eventId:event.id,what:given?.what || decision.reply.replace(/\s+/g,' ').slice(0,200),doneWhen:given?.doneWhen || null,

@@ -46,7 +46,9 @@ function checkSite(site){
 }
 // Exit 0 = the login works, 1 = it has lapsed. Any other exit (126/127: no such command; a crash; a mistyped server
 // name trapped by the check) or a timeout means the check itself is broken: that is never reported as a logout, so
-// nobody is asked to log in again when the check needs fixing. A fixed working directory keeps a project's own
+// nobody is asked to log in again when the check needs fixing. A check exits 1 only when it knows the credential was
+// refused: ssh exits 255 for a refused key and for an unreachable host alike (2026-10-15 GDB: a firewall timeout was
+// reported as a logout), so an ssh check tests its output for "Permission denied". A fixed working directory keeps a project's own
 // settings (for example its MCP list) from changing the answer between the preflight and the watcher.
 function checkCommand(site){
   try{execFileSync('/bin/sh',['-c',site.check],{cwd:os.tmpdir(),timeout:COMMAND_TIMEOUT_MS,stdio:'ignore'});return {name:site.name,status:'logged_in'};}

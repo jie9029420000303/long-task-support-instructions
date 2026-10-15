@@ -272,6 +272,10 @@ function decision() {
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
   if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();state.failedCommands={};}
+  // An executor whose turn ended on an event waits for this ruling (Jay 2026-10-15): its silence, idle and quiet-hour
+  // clocks restart when the ruling is applied, not at its submission (GDB 05:07 and 08:10: a 21- and a 27-minute review
+  // each ended in a silence check of an executor that had been waiting for the verdict). Clock reviews do not stop it.
+  if (!['progress_review','dispatch_review'].includes(event.kind) && value.disposition!=='accept') state.lastDecisionAt=Date.now();
   state.phase=value.disposition==='accept'?'accepted':'idle';
   if (state.phase==='accepted') state.acceptedAt=now();
   // Questions and blocks queued behind an accepted submission close with it; the supervisor lists them for Jay.
@@ -354,11 +358,11 @@ function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'da
 function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const processAt=pace.inFlight(binding,snapshotOf(binding),Date.now(),state.sleeps).processActivityAt||0;
   // Only silence and a changed wait end with new activity; overdue, like the other clock reasons, asks about the
   // baseline and scope of a package that is still busy (rule A, Jay 2026-10-13).
-  const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
+  const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
 (async()=>{
   try {
     const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))
-      :command==='amend'?contractState.append(run,load().binding,read(inputArgument))
+      :command==='amend'?pending.amend(run,load().binding,read(inputArgument))
       :command==='effective-contract'?contractState.effective(run,load().binding)
       :command==='init'?init():command==='status'?(inputArgument==='--wait-active'?waitActive(Number(process.argv[5])||10):status())
       :command==='brief'?brief():command==='context'?context()

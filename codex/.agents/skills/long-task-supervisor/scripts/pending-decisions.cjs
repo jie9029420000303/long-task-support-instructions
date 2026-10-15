@@ -117,6 +117,33 @@ function apply(run,change,{binding,checkQuote,at=new Date().toISOString()}={}){
   store(run,ledger);
   return {...result,...view(run,{},ledger)};
 }
+// An answer that is itself an authorization or an acceptance change is recorded once: supervise.cjs amend takes the
+// amendment plus pendingKeys (the open items it answers, each a key or {key, choice}) and closes them with its id. On
+// 2026-10-15 IA closed 10 items with Jay's words and recorded the same answers as two amendments; every
+// answer.amendmentId stayed empty. The keys are checked before the journal is written and never stored in it, so a
+// retry of a recorded amendment closes only what is still open.
+function amend(run,binding,input,{at}={}){
+  need(input&&typeof input==='object'&&!Array.isArray(input),'An amendment is one JSON object');
+  const {pendingKeys,...row}=input;
+  need(pendingKeys===undefined||Array.isArray(pendingKeys),'pendingKeys lists the open pending items this amendment answers');
+  if(!pendingKeys?.length)return contractState.append(run,binding,row);
+  need(binding,'Amendments need the run binding');
+  contractState.supervisorOnly(binding);
+  const byKey=new Map(load(run).items.map(item=>[item.key,item])),seen=new Set(),answer=[],already=[];
+  for(const entry of pendingKeys){
+    const key=typeof entry==='string'?entry:entry?.key,choice=typeof entry==='string'?null:entry?.choice;
+    need(typeof key==='string'&&KEY.test(key)&&!seen.has(key),'Each pending key once (letters, digits, - or _): '+key);seen.add(key);
+    need(choice==null||text(choice),key+': choice must be text');
+    const item=byKey.get(key);
+    need(item,key+' is not in the pending ledger');
+    if(item.status==='answered'&&item.answer?.amendmentId===row.id){already.push(key);continue;}
+    need(isOpen(item),key+' is already '+item.status+'; an amendment closes only open items');
+    answer.push({key,amendmentId:row.id,...(text(choice)?{choice}:{})});
+  }
+  const recorded=contractState.append(run,binding,row);
+  const closed=answer.length?apply(run,{answer},{binding,at}):{answered:[],...view(run,{},load(run))};
+  return {...recorded,pending:{...closed,alreadyAnswered:already}};
+}
 // What a card must carry: every open item. new lists the keys not yet on a card or changed since; repeat means the
 // last card already showed all of them unchanged, so there is nothing to ask again. Reading never stamps.
 function ask(run){
@@ -138,4 +165,4 @@ function shown(run,keys,{binding,at=new Date().toISOString()}={}){
   store(run,ledger);
   return {shown:open,at};
 }
-module.exports={FILE,KINDS,load,view,apply,ask,shown};
+module.exports={FILE,KINDS,load,view,apply,amend,ask,shown};
