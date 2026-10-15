@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>（填入：專案名稱）交接說明</title>
+<!--
+  交接說明會簡報模板（長任務技能附帶，2026-10-15）。用法見同資料夾「交接文件大綱.md」。
+  - 每頁一個 <section class="slide">，data-source 寫這頁取材的 .md 標題，產生出處對照表時照抄。
+  - 15 頁以內；超過時畫面頂端會出現紅色提示。
+  - 影片放同資料夾，檔名與第一頁 <video src> 一致；圖片放「流程圖/」子資料夾。
+  - 不連外部資源，離線雙擊就能開；換頁不用動畫，避免閃動。
+  交付前把所有「（填入：…）」換成 .md 的內容並刪掉這段註解；doc-check.py 會抓沒換掉的占位字。
+-->
+<style>
+  :root { --bg:#f4f5f7; --paper:#ffffff; --ink:#1d2330; --muted:#566070; --line:#d7dbe2; --accent:#1f5fbf; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family:"PingFang TC","Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif; }
+  body { display:flex; flex-direction:column; align-items:center; justify-content:center; }
+  .stage { position:relative; width:min(100vw, calc((100vh - 56px) * 16 / 9)); aspect-ratio:16/9;
+    background:var(--paper); box-shadow:0 2px 16px rgba(0,0,0,.08); container-type:inline-size; overflow:hidden; }
+  .slide { position:absolute; inset:0; padding:5cqw 6cqw; display:none; flex-direction:column; gap:1.6cqw; }
+  .slide.active { display:flex; }
+  h1 { margin:0; font-size:3.6cqw; line-height:1.25; }
+  h2 { margin:0; font-size:3cqw; line-height:1.25; padding-bottom:1cqw; border-bottom:.25cqw solid var(--accent); }
+  .lead { margin:0; font-size:1.8cqw; color:var(--muted); }
+  ul { margin:0; padding-left:2.4cqw; font-size:2cqw; line-height:1.6; }
+  li + li { margin-top:.8cqw; }
+  table { border-collapse:collapse; font-size:1.6cqw; width:100%; }
+  th, td { border:1px solid var(--line); padding:.8cqw 1.2cqw; text-align:left; vertical-align:top; }
+  th { background:#eef2f8; }
+  figure { margin:0; flex:1; min-height:0; display:flex; flex-direction:column; gap:.8cqw; }
+  figure img, figure video { flex:1; min-height:0; width:100%; object-fit:contain; background:#0d1117; border-radius:.6cqw; }
+  figure.diagram img { background:transparent; }
+  figcaption { font-size:1.4cqw; color:var(--muted); }
+  .bar { height:56px; width:min(100vw, calc((100vh - 56px) * 16 / 9)); display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 4px; }
+  .bar button { font:inherit; font-size:15px; padding:8px 18px; border:1px solid var(--line); border-radius:8px; background:var(--paper); color:var(--ink); cursor:pointer; }
+  .bar button:disabled { opacity:.4; cursor:default; }
+  .counter { font-size:15px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .warning { display:none; position:fixed; top:0; left:0; right:0; padding:8px; background:#b42318; color:#fff; text-align:center; font-size:15px; z-index:9; }
+  @media print {
+    body { display:block; background:#fff; } .bar, .warning { display:none !important; }
+    .stage { width:100%; box-shadow:none; overflow:visible; aspect-ratio:auto; }
+    .slide { position:relative; display:flex !important; aspect-ratio:16/9; page-break-after:always; }
+  }
+</style>
+</head>
+<body>
+<div class="warning" id="warning"></div>
+<main class="stage" id="stage">
+  <section class="slide" data-source="## 專案概覽">
+    <h1>（填入：專案名稱）交接說明</h1>
+    <p class="lead">（填入：一句話說明這個專案做什麼）</p>
+    <figure class="video">
+      <video src="概覽影片.mp4" controls preload="metadata" playsinline></video>
+      <figcaption>概覽影片：（填入：一句話說明影片涵蓋的內容）</figcaption>
+    </figure>
+  </section>
+  <section class="slide" data-source="## 這個專案解決什麼問題">
+    <h2>要解決的問題</h2>
+    <ul><li>（填入：使用者遇到的問題，一句一個事實，數字取自 .md）</li><li>（填入：問題造成的影響）</li></ul>
+  </section>
+  <section class="slide" data-source="## 解決方案簡介">
+    <h2>解決方案簡介</h2>
+    <ul><li>（填入：做了什麼，一句話）</li><li>（填入：主要元件與它們的分工）</li></ul>
+  </section>
+  <section class="slide" data-source="## 總體流程">
+    <h2>總體流程</h2>
+    <figure class="diagram"><img src="流程圖/總體流程.png" alt="（填入：總體流程圖的文字說明，與 .md 的流程段一致）"><figcaption>（填入：圖說，對應 .md 段落）</figcaption></figure>
+  </section>
+  <section class="slide" data-source="## 細部流程一">
+    <h2>細部流程一</h2>
+    <figure class="diagram"><img src="流程圖/細部流程一.png" alt="（填入：這張圖的文字說明）"><figcaption>（填入：圖說）</figcaption></figure>
+  </section>
+  <section class="slide" data-source="## 細部流程二">
+    <h2>細部流程二</h2>
+    <figure class="diagram"><img src="流程圖/細部流程二.png" alt="（填入：這張圖的文字說明）"><figcaption>（填入：圖說）</figcaption></figure>
+  </section>
+  <section class="slide" data-source="## 細部流程三">
+    <h2>細部流程三</h2>
+    <figure class="diagram"><img src="流程圖/細部流程三.png" alt="（填入：這張圖的文字說明）"><figcaption>（填入：圖說）</figcaption></figure>
+  </section>
+  <section class="slide" data-source="## 執行重點">
+    <h2>執行重點</h2>
+    <ul><li>（填入：上線或交接時一定要做對的事）</li><li>（填入：容易做錯的地方與正確做法）</li></ul>
+  </section>
+  <section class="slide" data-source="## 觀察重點">
+    <h2>觀察重點</h2>
+    <ul><li>（填入：上線後要看的指標或紀錄，以及在哪裡看）</li><li>（填入：什麼情況代表異常）</li></ul>
+  </section>
+  <section class="slide" data-source="## 預期結果">
+    <h2>預期結果</h2>
+    <ul><li>（填入：完成後使用者會看到的變化）</li><li>（填入：可以驗證的結果與驗證方式）</li></ul>
+  </section>
+  <section class="slide" data-source="## 部署與設定">
+    <h2>部署與設定</h2>
+    <table><thead><tr><th>項目</th><th>值</th><th>出處</th></tr></thead><tbody><tr><td>（填入）</td><td>（填入：取自事實表）</td><td>（填入：檔名或主機讀回）</td></tr></tbody></table>
+  </section>
+  <section class="slide" data-source="## 例外處理與回退">
+    <h2>例外處理與回退</h2>
+    <ul><li>（填入：出錯時誰會收到什麼通知）</li><li>（填入：回退步驟）</li></ul>
+  </section>
+  <section class="slide" data-source="## 已知限制與待決事項">
+    <h2>已知限制與待決事項</h2>
+    <ul><li>（填入：目前不做或做不到的事，以及原因）</li><li>（填入：等誰決定什麼）</li></ul>
+  </section>
+  <section class="slide" data-source="## 交接清單">
+    <h2>交接清單</h2>
+    <ul><li>（填入：接手的人第一週要做的事）</li><li>（填入：帳號、權限與聯絡窗口）</li></ul>
+  </section>
+  <section class="slide" data-source="## 問答與參考資料">
+    <h2>問答與參考資料</h2>
+    <ul><li>完整說明：（填入：.md 檔名；細節請把這份檔交給 AI 問答）</li><li>（填入：其他參考文件）</li></ul>
+  </section>
+</main>
+<nav class="bar" aria-label="換頁">
+  <button type="button" id="prev">← 上一頁</button>
+  <span class="counter" id="counter" aria-live="polite"></span>
+  <button type="button" id="next">下一頁 →</button>
+</nav>
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var counter = document.getElementById('counter'), prev = document.getElementById('prev'), next = document.getElementById('next');
+  var current = 0, LIMIT = 15;
+  if (slides.length > LIMIT) {
+    var warning = document.getElementById('warning');
+    warning.textContent = '目前 ' + slides.length + ' 頁，交接簡報以 ' + LIMIT + ' 頁為上限';
+    warning.style.display = 'block';
+  }
+  function show(index) {
+    current = Math.max(0, Math.min(slides.length - 1, index));
+    slides.forEach(function (slide, k) {
+      slide.classList.toggle('active', k === current);
+      if (k !== current) slide.querySelectorAll('video').forEach(function (v) { v.pause(); });
+    });
+    counter.textContent = (current + 1) + ' / ' + slides.length;
+    prev.disabled = current === 0;
+    next.disabled = current === slides.length - 1;
+    if (location.hash !== '#' + (current + 1)) history.replaceState(null, '', '#' + (current + 1));
+  }
+  prev.addEventListener('click', function () { show(current - 1); });
+  next.addEventListener('click', function () { show(current + 1); });
+  document.getElementById('stage').addEventListener('click', function (event) {
+    if (event.target.closest('video, a, button, input, select, textarea')) return;
+    show(current + 1);
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.target.closest && event.target.closest('video, input, select, textarea')) return;
+    var key = event.key;
+    if (key === 'ArrowRight' || key === 'PageDown' || key === ' ') { event.preventDefault(); show(current + 1); }
+    else if (key === 'ArrowLeft' || key === 'PageUp') { event.preventDefault(); show(current - 1); }
+    else if (key === 'Home') { event.preventDefault(); show(0); }
+    else if (key === 'End') { event.preventDefault(); show(slides.length - 1); }
+  });
+  var start = parseInt((location.hash || '').slice(1), 10);
+  show(isNaN(start) ? 0 : start - 1);
+})();
+</script>
+</body>
+</html>

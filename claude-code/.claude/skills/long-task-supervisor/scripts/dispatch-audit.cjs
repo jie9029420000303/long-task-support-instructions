@@ -5,6 +5,8 @@ const crypto=require('node:crypto');
 const acceptance=require('./acceptance-audit.cjs');
 
 const kinds=['ready_capacity','returned_unintegrated','resource_conflict','recurring_rework','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn'];
+// Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time).
+const DOC_BUDGET_RATIO=1.5;
 const nonEmpty=value=>typeof value==='string'&&value.trim();
 function digest(value){return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');}
 function need(value,message){if(!value)throw Error(message);}
@@ -29,8 +31,20 @@ function parse(snapshot,binding){
   for(const item of p.blocked){need(nonEmpty(item.kind),item.id+' needs kind');evidence(item.evidence,item.id);}
   for(const item of p.completed){need(Array.isArray(item.acceptanceIds),item.id+' acceptanceIds must be an array');evidence(item.evidence,item.id);}
   for(const item of p.recurringRework){need(Number.isInteger(item.count)&&item.count>=2,item.id+' recurring count must be at least 2');evidence(item.evidence,item.id);}
+  // The budget is 1.5x the measured development time; more needs the amendment where Jay allowed it.
+  if(snapshot.docBudget!==undefined){const b=snapshot.docBudget;need(b&&Number.isFinite(Date.parse(b.startedAt)),'docBudget.startedAt must be a time');
+    need(Number.isFinite(b.devMinutes)&&b.devMinutes>0&&Number.isFinite(b.minutes)&&b.minutes>0,'docBudget.devMinutes and docBudget.minutes must be positive');
+    need(nonEmpty(b.basis),'docBudget.basis is required');
+    need(b.minutes<=b.devMinutes*DOC_BUDGET_RATIO+0.5||nonEmpty(b.approval),'docBudget.minutes above 1.5x devMinutes needs approval naming where Jay allowed it');}
   if(snapshot.updatedAt!==undefined)need(nonEmpty(snapshot.updatedAt),'updatedAt must be a string');
   return snapshot;
+}
+// The stage a document time budget has reached after awakeMs of awake time: 'half' from 50%, 'spent' from 100%.
+function docBudgetStage(budget,awakeMs){
+  const minutes=Number(budget?.minutes);
+  if(!budget||!Number.isFinite(Date.parse(budget.startedAt))||!(minutes>0)||!Number.isFinite(awakeMs))return null;
+  const ratio=awakeMs/(minutes*60000);
+  return ratio>=1?'spent':ratio>=0.5?'half':null;
 }
 function issue(kind,items,detail){need(kinds.includes(kind),'unknown issue kind');const affected=[...new Set(items)].sort();const key=digest({kind,affected,detail});return {kind,affected,detail,key};}
 function derive(snapshot){
@@ -82,4 +96,4 @@ function eventFor(result){
 function markAnnounced(state,event){const audit=state.dispatchAudit||{};const values=new Set(audit.announced||[]);for(const key of event.dispatchIssueKeys||[])values.add(key);audit.announced=[...values];state.dispatchAudit=audit;}
 function releaseAnnounced(state,event){const keys=new Set(event.dispatchIssueKeys||[]),audit=state.dispatchAudit||{};audit.announced=(audit.announced||[]).filter(key=>!keys.has(key));state.dispatchAudit=audit;}
 function stillCurrent(run,binding,state,event){const result=inspect(run,binding,state);const active=new Set(result.issues.map(item=>item.key));return {current:event.dispatchIssueKeys?.every(key=>active.has(key)),result};}
-module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent};
+module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,docBudgetStage,DOC_BUDGET_RATIO};

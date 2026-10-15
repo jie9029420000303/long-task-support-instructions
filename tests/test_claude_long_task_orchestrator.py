@@ -8,9 +8,11 @@
 codex/），或獨立技能副本（本機封裝 repo：tests/ 旁邊直接是 .claude/，與 ~/.claude 同形）。跨 adapter
 一致性只有正式 repo 才有比對對象，獨立副本會明確標為 skipped。
 """
+import contextlib
 import datetime as dt
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -706,6 +708,21 @@ class ResourceAuditTests(unittest.TestCase):
         live = snapshot([proc(402, self.root, start=written - dt.timedelta(minutes=1))])
         self.assertEqual(1, len(resource_ledger.audit(state, snapshot=live)[1]))
 
+    def test_a_later_work_package_status_write_extends_the_scan_window(self):
+        # 2026-10-15 起狀態檔只在送驗、判定、發版節點改寫，派出與收回只改 wp/<id>.md 的 [狀態] 行。
+        # 兩個節點之間派出的工作包若啟動常駐程序，守門仍要看得到，不能因狀態檔沒動就漏掃。
+        state = task_state(self.root, [("B-1", "在途")])
+        written = dt.datetime.fromtimestamp(state.stat().st_mtime)
+        started = written + dt.timedelta(minutes=5)
+        wp = state.parent / "wp"
+        wp.mkdir(exist_ok=True)
+        status = wp / "B-1.md"
+        status.write_text('[工作包] id=B-1\n[狀態] {"list":"inFlight","handle":"agent:a"}\n', encoding="utf-8")
+        stamp = (written + dt.timedelta(minutes=10)).timestamp()
+        os.utime(status, (stamp, stamp))
+        live = snapshot([proc(403, self.root, start=started)])
+        self.assertEqual(1, len(resource_ledger.audit(state, snapshot=live)[1]))
+
     def test_docker_unavailable_is_disclosed_not_treated_as_clean(self):
         # docker 沒開時不能默默當成「沒有容器」，否則最大宗的殘留會被當成已清乾淨。
         state = task_state(self.root, [("B-1", "在途")])
@@ -1062,6 +1079,90 @@ class SharedSpecTests(unittest.TestCase):
         for script in ("scope-overlap.py", "sidecar-guard.py", "resource-ledger.py"):
             self.assertIn(f"scripts/{script}", skill)
             self.assertTrue((SCRIPTS / script).is_file(), script)
+
+
+class DocCheckTests(unittest.TestCase):
+    """文件類成品的執行端檢查只用腳本（2026-10-15）。GDB v1.2.0 退件 21 項中 15 項是內容與程式或主機不符，
+    例如主機值在最後一次改設定之前讀、簡報寫了 .md 沒有的數字；這些都要在送驗前由腳本抓到，不靠子代理預檢。"""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="doc-check-"))
+        self.module = load("claude_doc_check", "doc-check.py")
+        (self.root / "repo" / "gateway_core").mkdir(parents=True)
+        (self.root / "repo" / "gateway_core" / "deploy_main.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
+        self.facts = self.root / "事實表.md"
+        self.facts.write_text("# 事實表\n讀取時間：2026-10-15 09:00\n| F1 | 硬碟剩 14 GB |\n| F2 | 每日 08:00 備份 |\n", encoding="utf-8")
+        self.keep = self.root / "保留清單.txt"
+        self.keep.write_text("不會發 Telegram\n", encoding="utf-8")
+        self.slides = self.root / "簡報.html"
+        self.map = self.root / "出處對照.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def run_check(self, md):
+        path = self.root / "完整說明.md"
+        path.write_text(md, encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.module.main(["--md", str(path), "--facts", str(self.facts), "--derived", str(self.slides),
+                                     "--source-map", str(self.map), "--keep", str(self.keep), "--repo", str(self.root / "repo"), "--json"])
+        return code, json.loads(out.getvalue())["problems"]
+
+    def test_each_kind_of_mismatch_is_reported_with_its_line(self):
+        self.slides.write_text("<section><h2>備份</h2><p>每日 08:00，剩 14 GB，共 30 份</p></section><script>let n = 99</script>",
+                               encoding="utf-8")
+        self.map.write_text(json.dumps([{"file": "簡報.html", "page": 1, "md": "## 備份"},
+                                        {"file": "簡報.html", "page": 2, "md": "## 不存在的段落"}], ensure_ascii=False), encoding="utf-8")
+        md = ("# 交接說明\n## 備份\n1. 每日 08:00 備份，硬碟剩 14 GB。\n"
+              "見 gateway_core/deploy_main.py:3 與 [附錄](附錄.md)\n这是說明\n## 通知\n不發通知，保留 9 GB。\n")
+        code, problems = self.run_check(md)
+        self.assertEqual(1, code)
+        found = {(p["kind"], p["where"].rsplit("/", 1)[-1], p["detail"]) for p in problems}
+        self.assertIn(("簡體字", "完整說明.md:5", "这"), found)
+        self.assertIn(("連結", "完整說明.md:4", "找不到 附錄.md"), found)
+        self.assertIn(("程式行號", "完整說明.md:4", "gateway_core/deploy_main.py:3 超出檔案長度 2 行"), found)
+        self.assertIn(("事實表", "完整說明.md:7", "數字 9 在事實表找不到"), found)
+        self.assertIn(("衍生件", "簡報.html:1", "數字 30 在 .md 找不到"), found)
+        self.assertIn(("保留清單", "保留清單.txt", "找不到「不會發 Telegram」"), found)
+        self.assertIn(("出處對照", "出處對照.json#2", "對到的 .md 標題「不存在的段落」不存在"), found)
+        self.assertFalse(any("99" in p["detail"] for p in problems), "程式碼區塊裡的數字不是讀者看得到的內容")
+        self.assertFalse(any(p["detail"].startswith("數字 1 ") for p in problems), "清單編號不是事實")
+
+    def test_a_document_that_matches_its_facts_passes(self):
+        self.slides.write_text("<section><h2>備份</h2><p>每日 08:00，剩 14 GB</p></section>", encoding="utf-8")
+        self.map.write_text(json.dumps([{"file": "簡報.html", "page": 1, "md": "## 備份"}], ensure_ascii=False), encoding="utf-8")
+        (self.root / "附錄.md").write_text("附錄\n", encoding="utf-8")
+        md = ("# 交接說明\n## 備份\n1. 每日 08:00 備份，硬碟剩 14 GB。\n"
+              "見 gateway_core/deploy_main.py:2 與 [附錄](附錄.md)\n## 通知\n不會發 Telegram。\n")
+        self.assertEqual((0, []), self.run_check(md))
+
+    def test_facts_without_a_read_time_are_rejected(self):
+        self.facts.write_text("# 事實表\n| F1 | 硬碟剩 14 GB |\n", encoding="utf-8")
+        self.slides.write_text("<p>剩 14 GB</p>", encoding="utf-8")
+        self.map.write_text(json.dumps([{"file": "簡報.html", "md": "## 備份"}], ensure_ascii=False), encoding="utf-8")
+        code, problems = self.run_check("# 說明\n## 備份\n硬碟剩 14 GB。不會發 Telegram。\n")
+        self.assertEqual(1, code)
+        self.assertEqual(["事實表"], [p["kind"] for p in problems])
+
+    def test_the_bundled_deck_template_is_caught_until_every_placeholder_is_filled(self):
+        # 模板直接交出去會把「（填入：…）」帶進成品；腳本要逐處抓出來，模板本身不能夾帶 .md 沒有的數字。
+        template = SKILL / "templates" / "交接簡報模板.html"
+        self.slides.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        (self.root / "流程圖").mkdir()
+        for media in ("概覽影片.mp4", "流程圖/總體流程.png", "流程圖/細部流程一.png", "流程圖/細部流程二.png", "流程圖/細部流程三.png"):
+            (self.root / media).write_bytes(b"")
+        self.map.write_text(json.dumps([{"file": "簡報.html", "page": 1, "md": "## 備份"}], ensure_ascii=False), encoding="utf-8")
+        code, problems = self.run_check("# 說明\n## 備份\n硬碟剩 14 GB。不會發 Telegram。\n")
+        self.assertEqual(1, code)
+        self.assertEqual({"占位字"}, {p["kind"] for p in problems}, problems)
+        self.assertGreaterEqual(len(problems), 15)
+
+    @canonical_only
+    def test_both_adapters_ship_the_same_doc_check(self):
+        codex = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator" / "scripts" / "doc-check.py"
+        self.assertEqual((SCRIPTS / "doc-check.py").read_bytes(), codex.read_bytes(), "兩邊文件檢查腳本必須是同一份")
 
 
 if __name__ == "__main__":

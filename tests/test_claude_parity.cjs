@@ -34,7 +34,7 @@ function fixture({quietMinutes=1,lastReviewMinutesAgo=1}={}){
   line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  save(input,{dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  save(input,{dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Finish on AI time',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Keep work moving',source:'source.md:1',verify:'Replay activity'},{id:'A2',requirement:'Second',source:'source.md:1',verify:'Replay'}],

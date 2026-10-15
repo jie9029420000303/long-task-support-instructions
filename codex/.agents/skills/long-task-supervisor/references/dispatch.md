@@ -64,3 +64,18 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 - ready、inFlight、blocked、returned 的工作包可附 `acceptanceIds:["條件ID"]`，標明它推進哪幾條驗收條件。快照的 `acceptance.items` 中，FAIL／PENDING／INCONCLUSIVE 的條件若沒有任何工作包標到它，且持續 10 分鐘（扣掉電腦睡眠），背景程式的監督時鐘發 `unplanned_criteria` 進度查核原因，附空著的子代理席位數；同一組條件只發一次，只剩等使用者核准或暫停中不發。只能等使用者核准或外部結果的條件，列進 blocked 並標上 acceptanceIds。
 - 開工拆包時，部署腳本、回退步驟、規格草稿、發布說明等準備工作一開始就列為 ready，和測試並行，不留到最後。
 - 同一包重做 2 次仍沒送驗就凍結（recurringRework 的 count 達 2 即送監督）：監督指定新做法或改派其他模型，不讓它原樣再跑第三次。
+
+## 由工作包檔產生快照（2026-10-15 定案）
+
+派工狀態的唯一紀錄是每個工作包檔 `wp/<id>.md` 裡的一行 `[狀態] {JSON}`（`list` 為 ready、inFlight、returned、blocked、completed、recurringRework 或 archived，其餘欄位照上表）。狀態一變就用一個指令同時改該行並重產整份快照，不手寫快照 JSON：
+
+```text
+node "<skill>/scripts/dispatch.cjs" mark "<RUN>" "<狀態目錄絕對路徑>" <工作包 id> '<狀態 JSON>' [--activity <activity>] [--revision <計畫版號>] [--base "<JSON 絕對路徑>"]
+node "<skill>/scripts/dispatch.cjs" from-wp "<RUN>" "<狀態目錄絕對路徑>" [同上選項]
+```
+
+`id` 取自 `[工作包] id=`；就緒包的 `dependencies` 取自 `依賴：`，排他資源取自 `[共用資源]` 的每個 `前綴:值`（帳號→account、瀏覽器→browser、DB／資料→database、主機→test_environment、worktree→worktree，其餘為 other），`acceptanceIds` 取自 `[驗收條目]`；狀態 JSON 寫了同名欄位時以 JSON 為準。evidence 第一筆自動是工作包檔路徑。容量、驗收逐條、`docBudget` 等其他欄位沿用上一份快照，第一份或要改時用 `--base` 帶入。沒填 `--activity` 時，有在途包算 working、只有未收回的回報算 integrating、其餘算 waiting，讓有就緒包卻沒派出時照樣被背景程式看見。整份快照先驗過才改工作包檔，驗不過兩邊都不動；缺 `[狀態]` 行的工作包檔會被一次列出。2026-10-14～15 GDB 主線只為記帳就用了 99 分鐘、506 個回合，還自己寫了一支快照產生器。
+
+## 文件時間預算
+
+文件類成品開工時，執行端在快照寫 `docBudget:{startedAt,devMinutes,minutes,basis}`：`devMinutes` 是本任務開發、測試與部署的實測分鐘，`minutes` 是文件時間預算，不得超過 `devMinutes` 的 1.5 倍，超過須附 `approval` 寫明使用者在哪裡同意；`basis` 寫明開發時間怎麼量的。背景程式從 `startedAt` 起算（扣掉電腦睡眠），用掉一半與用完時各叫醒監督一次（進度查核原因 `doc_budget`）。使用者 2026-10-15：「我認為文件撰寫不應該比開發時間還長，或至多只能是1.5倍的時間」；GDB v1.2.0 開發 76 分鐘、文件 12 小時以上。

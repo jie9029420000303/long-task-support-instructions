@@ -19,7 +19,7 @@ function fixture(){
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  save(input,{dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Persist handoff',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'One event',source:'source.md:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]}});
+  save(input,{dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Persist handoff',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'One event',source:'source.md:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]}});
   const env={...process.env,CLAUDE_CONFIG_DIR:path.join(root,'config'),CLAUDE_SESSION_ID:supervisorId,CLAUDE_WATCH_SETTLE_MS:'100',CLAUDE_HANDOFF_WAIT_MS:'5000'};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   return {root,run,env,executorLog,supervisorId};

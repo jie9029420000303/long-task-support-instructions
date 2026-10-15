@@ -111,7 +111,7 @@ for (const [platform,dir] of versions) {
 
 test('Codex run binds two exact threads and is not active before a verified read',()=>{
   const f=fixture(),run=path.join(f.root,'run'),input=path.join(f.root,'input.json');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],
+  fs.writeFileSync(input,JSON.stringify({loginSites:[],projectRoot:f.root,allowedRoots:[f.root],
     supervisorId:'supervisor-thread',executorId:'executor-thread',contract:f.contract}));
   const script=versions[0][1]+'/supervise.cjs';
   const env={...process.env,CODEX_THREAD_ID:'supervisor-thread',CODEX_TURN_ID:'supervisor-turn'};
@@ -125,7 +125,7 @@ test('Codex run binds two exact threads and is not active before a verified read
 
 test('Codex existing executor requires a baseline turn as well as a cursor',()=>{
   const f=fixture(),run=path.join(f.root,'run'),input=path.join(f.root,'input.json');
-  const value={projectRoot:f.root,allowedRoots:[f.root],supervisorId:'supervisor-thread',
+  const value={loginSites:[],projectRoot:f.root,allowedRoots:[f.root],supervisorId:'supervisor-thread',
     executorId:'executor-thread',executorCursor:'cursor-7',contract:f.contract};
   fs.writeFileSync(input,JSON.stringify(value));
   const script=versions[0][1]+'/supervise.cjs',env={...process.env,CODEX_THREAD_ID:'supervisor-thread',CODEX_TURN_ID:'supervisor-turn'};
@@ -146,7 +146,7 @@ test('Claude binds two verified desktop chats and does not claim startup early',
   fs.writeFileSync(log,JSON.stringify({type:'user',cwd:f.root,sessionId:supervisorId,entrypoint:'claude-desktop'})+'\n');
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:executorId,
     entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker+' QA prompt'}]}})+'\n');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({loginSites:[],projectRoot:f.root,allowedRoots:[f.root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' Use long-task-orchestrator for this isolated QA.',contract:f.contract}));
   const script=versions[1][1]+'/supervise.cjs';
@@ -170,7 +170,7 @@ test('Claude auto tool session resolves back to the visible supervisor session',
   fs.writeFileSync(path.join(project,outer+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:outer,entrypoint:'claude-desktop',message:{content:[{type:'text',text:inner}]}})+'\n');
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:executorId,
     entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}})+'\n');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId:inner,
+  fs.writeFileSync(input,JSON.stringify({loginSites:[],projectRoot:f.root,allowedRoots:[f.root],supervisorId:inner,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' QA executor prompt; supervisor '+inner,contract:f.contract}));
   const script=versions[1][1]+'/supervise.cjs';
@@ -193,7 +193,7 @@ test('Claude binds when the executor transcript quotes the desktop supervisor ID
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),[{type:'user',cwd:f.root,sessionId:executorId,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker}]}},{type:'user',cwd:f.root,sessionId:executorId,
     message:{content:[{type:'tool_result',content:'decision file: supervisor session '+supervisorId}]}}].map(row=>JSON.stringify(row)).join('\n')+'\n');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({loginSites:[],projectRoot:f.root,allowedRoots:[f.root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' QA',contract:f.contract}));
   const initialized=JSON.parse(execFileSync(process.execPath,[versions[1][1]+'/supervise.cjs','init',run,input],
@@ -211,7 +211,7 @@ test('Claude rejects a CLI-created executor as a desktop mainline',()=>{
   fs.writeFileSync(path.join(project,supervisorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:supervisorId,entrypoint:'claude-desktop'})+'\n');
   fs.writeFileSync(path.join(project,executorId+'.jsonl'),JSON.stringify({type:'user',cwd:f.root,sessionId:executorId,
     entrypoint:'cli',message:{content:[{type:'text',text:marker}]}})+'\n');
-  fs.writeFileSync(input,JSON.stringify({projectRoot:f.root,allowedRoots:[f.root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({loginSites:[],projectRoot:f.root,allowedRoots:[f.root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' QA',contract:f.contract}));
   assert.throws(()=>execFileSync(process.execPath,[versions[1][1]+'/supervise.cjs','init',run,input],

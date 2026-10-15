@@ -129,6 +129,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 - `repeat`：綁定後同一條指令連續失敗 3 次。處理過一次進度查核後重新計數。
 - `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠；停頓從執行端最後活動或監督對它事件的判定套用時（`lastDecisionAt`）起算，取較晚者），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
 - `unplanned_criteria`：未通過的驗收條件 10 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），執行端在忙也照樣觸發。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
+- `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）從 `startedAt` 起算、扣掉電腦睡眠，用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；等使用者核准時不發。
 
 事件附 `pace`（每個在途包的開始時間、扣掉睡眠後的經過分鐘、睡眠分鐘、基準分鐘、比值、是否已做完、程序是否還活著、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`executorBlocked`、`machineSlept`、`overdue`、`nearOverdue`、`baselineMissing`、`processStalled`、`resourceUnderused`、`failedCommands` 與各類最後活動時間（含監督最近一次判定套用的 `lastDecisionAt`）。
 
