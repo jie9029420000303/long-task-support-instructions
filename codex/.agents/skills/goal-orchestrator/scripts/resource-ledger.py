@@ -26,7 +26,8 @@ check 與守門只報告，不自動關閉任何資源。未登記資源＝在�
 `lt.task=<任務目錄名>` 標籤的容器；已登記在任何任務帳本（含 external）的資源不列。
 任務範圍＝專案根＋任務紀錄（state.md、archive.md、wp/*.md）裡的 `path:` 工作區＋紀錄裡提到的同 repo worktree
 ——整合候選版的 worktree 不屬任何工作包、已結束的工作包會封存進 archive.md，只看工作包表會漏掉這兩種。
-時間上限用狀態檔最後寫入：主線本來就是先更新狀態檔再跑守門；已結案或被 git 帶進其他 worktree 的舊狀態檔
+時間上限用任務紀錄最後寫入（狀態檔與 wp/*.md 取較晚者）：主線本來就是先更新紀錄再跑守門；2026-10-15 起狀態檔只在
+送驗、判定、發版節點改寫，派出與收回只改工作包檔的 [狀態] 行，所以兩者都算。已結案或被 git 帶進其他 worktree 的舊紀錄
 停在當時，之後才啟動的程序不歸給它（2026-09-30 對 202 份真實狀態檔實測：沒有這個上限時 6 份舊任務被誤報）。
 """
 import argparse
@@ -392,7 +393,9 @@ def task_scope(state, lines):
     info = state.stat()
     if since is None:
         since = dt.datetime.fromtimestamp(getattr(info, "st_birthtime", info.st_mtime)).replace(microsecond=0)
-    until = dt.datetime.fromtimestamp(info.st_mtime)
+    wp_dir = state.parent / "wp"
+    latest = max([info.st_mtime] + ([p.stat().st_mtime for p in wp_dir.glob("*.md")] if wp_dir.is_dir() else []))
+    until = dt.datetime.fromtimestamp(latest)
     return sorted({os.path.realpath(r) for r in roots}), since, until, task_dir.name, worktrees
 
 

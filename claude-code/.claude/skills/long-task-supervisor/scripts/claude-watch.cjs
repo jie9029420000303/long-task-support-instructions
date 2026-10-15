@@ -12,7 +12,7 @@ const login=require('./login-check.cjs');
 const dashboard=require('./dashboard.cjs');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced}=require('./dispatch-audit.cjs');
+const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage}=require('./dispatch-audit.cjs');
 const {digest,promoteNext,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
@@ -327,11 +327,17 @@ function supervisorClock(){
     executorModel={model:settings.model,effort:settings.effort||null,want:{family:'opus',effort:'high'},executorDesktopId:binding.executorDesktopId};
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
   for(const [,item] of repeated)item.announced=now();
+  // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time): one wake at half to see
+  // whether round trips eat the time, one when spent to put the status and options to Jay. A new budget re-arms both.
+  const budget=snapshot?.docBudget,budgetFrom=Date.parse(budget?.startedAt);
+  const budgetStage=budget&&!limited&&!waitingUser?docBudgetStage(budget,awake(budgetFrom)):null;
+  const docBudget=budgetStage&&once('doc_budget:'+budget.startedAt+'/'+budget.minutes+':'+budgetStage)?{stage:budgetStage,startedAt:budget.startedAt,
+    devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(awake(budgetFrom)/60000),basis:budget.basis}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(idleWork?['idle_with_work']:[]),
     ...(noEventHour?['no_event_hour']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automations.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(rateReset?['rate_limit_reset']:[]),
-    ...(platformError?['platform_error']:[]),...(executorModel?['executor_model']:[])];
+    ...(platformError?['platform_error']:[]),...(executorModel?['executor_model']:[]),...(docBudget?['doc_budget']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
@@ -347,7 +353,8 @@ function supervisorClock(){
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awake(lastEvent)/60000)}}:{}),
     ...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
-    ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(platformError?{platformError}:{}),...(executorModel?{executorModel}:{})};
+    ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(platformError?{platformError}:{}),...(executorModel?{executorModel}:{}),
+    ...(docBudget?{docBudget}:{})};
 }
 let lastDashboardAt=0;
 function writeDashboard(){
@@ -519,7 +526,7 @@ async function watch(){
         baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
         machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,
-        ...Object.fromEntries(['noEventHour','unplannedCriteria','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel']
+        ...Object.fromEntries(['noEventHour','unplannedCriteria','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel','docBudget']
           .filter(key=>clock?.[key]).map(key=>[key,clock[key]])),at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       wake(event);

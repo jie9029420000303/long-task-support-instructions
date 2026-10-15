@@ -397,6 +397,38 @@ test('an idle executor with every criterion passed and nothing ready is left alo
   }finally{await f.stop();}
 });
 
+// Document time budget (Jay 2026-10-15): GDB v1.2.0 spent more than 12 hours on documents after 76 minutes of development,
+// with 11 supervisor round trips and no one asking whether the time was still worth it. The clock wakes the supervisor
+// once at half the budget and once when it is spent, with the numbers; under half it stays quiet.
+const budgetSnapshot=startedMinutesAgo=>({docBudget:{startedAt:minutesAgo(startedMinutesAgo),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},
+  acceptance:{items:[{id:'A1',status:'PASS'}]},packages:{ready:[],inFlight:[]}});
+
+test('a document budget past half wakes the supervisor once with the budget numbers',async()=>{
+  const f=fixture({createdMinutesAgo:10});
+  save(path.join(f.run,'dispatch.json'),budgetSnapshot(60));
+  f.start();
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    assert.deepEqual(pending(f).reasons,['doc_budget']);
+    const budget=pending(f).docBudget;
+    assert.equal(budget.stage,'half');assert.equal(budget.budgetMinutes,114);assert.equal(budget.devMinutes,76);assert.ok(budget.usedMinutes>=59);
+  }finally{await f.stop();}
+});
+
+test('a spent document budget wakes as spent, and one under half stays quiet',async()=>{
+  const spent=fixture({createdMinutesAgo:10}),quiet=fixture({createdMinutesAgo:10});
+  save(path.join(spent.run,'dispatch.json'),budgetSnapshot(120));
+  save(path.join(quiet.run,'dispatch.json'),budgetSnapshot(20));
+  spent.start();quiet.start();
+  try{
+    await until(()=>pending(spent)?.kind==='progress_review');
+    assert.deepEqual(pending(spent).reasons,['doc_budget']);assert.equal(pending(spent).docBudget.stage,'spent');
+    await until(()=>fs.existsSync(path.join(quiet.run,'clock.jsonl')));
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(pending(quiet),null);assert.equal(sends(quiet).length,0);
+  }finally{await spent.stop();await quiet.stop();}
+});
+
 test('an executor running real commands in one long turn is not idle even without new messages',async()=>{
   const f=fixture({createdMinutesAgo:10,quietMinutes:8});
   work(f,0.5);

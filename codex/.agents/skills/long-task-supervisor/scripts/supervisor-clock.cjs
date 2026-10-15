@@ -5,6 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
+const {docBudgetStage}=require('./dispatch-audit.cjs');
 const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS}=require('./guard.cjs');
 const automations=require('./automations.cjs');
 const login=require('./login-check.cjs');
@@ -259,10 +260,17 @@ function check(run,binding,state){
   // or tell Jay what to do. While Jay's approval is the checked wait, another failing turn behind it is not news.
   const failed=state.platformError;
   const platformError=failed&&!waitingUser&&awakeSince(state,failed.since)>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?{...failed,since:new Date(failed.since).toISOString()}:null;
+  // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time): one wake at half to see
+  // whether round trips eat the time, one when spent to put the status and options to Jay. A new budget re-arms both.
+  const budget=snapshot?.docBudget,budgetFrom=Date.parse(budget?.startedAt);
+  const budgetStage=budget&&!waitingUser?docBudgetStage(budget,awakeSince(state,budgetFrom)):null;
+  const docBudget=budgetStage&&once('doc_budget:'+budget.startedAt+'/'+budget.minutes+':'+budgetStage)?{stage:budgetStage,startedAt:budget.startedAt,
+    devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(awakeSince(state,budgetFrom)/60000),basis:budget.basis}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
     ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
-    ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(platformError?['platform_error']:[])];
+    ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(platformError?['platform_error']:[]),
+    ...(docBudget?['doc_budget']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
@@ -277,6 +285,7 @@ function check(run,binding,state){
     failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
     ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
-    ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{})};
+    ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{}),
+    ...(docBudget?{docBudget}:{})};
 }
 module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince};

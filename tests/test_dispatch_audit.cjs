@@ -30,6 +30,56 @@ test('both installable skills ship byte-identical dispatch audit and writer',()=
   for(const file of ['dispatch-audit.cjs','dispatch.cjs'])assert.deepEqual(fs.readFileSync(path.join(codex,file)),fs.readFileSync(path.join(claude,file)));
 });
 
+// Document time budget (Jay 2026-10-15): document work after development takes at most 1.5x the development time. In the
+// GDB v1.2.0 run development took 76 minutes and the documents more than 12 hours. A budget the executor sets above 1.5x
+// would silence the check, so more than that needs the place where Jay allowed it.
+test('a document budget is checked against 1.5x the development time and its stages are half and spent',()=>{
+  const {parse,docBudgetStage}=require(path.join(codex,'dispatch-audit.cjs'));
+  const binding={executorId:'x'},budget={startedAt:'2026-10-15T01:05:00Z',devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'};
+  assert.equal(parse(snapshot('x',{docBudget:budget}),binding).docBudget.minutes,114);
+  assert.throws(()=>parse(snapshot('x',{docBudget:{...budget,minutes:300}}),binding),/needs approval/);
+  assert.equal(parse(snapshot('x',{docBudget:{...budget,minutes:300,approval:'AMEND-DOC-BUDGET-1'}}),binding).docBudget.minutes,300);
+  assert.throws(()=>parse(snapshot('x',{docBudget:{...budget,basis:''}}),binding),/basis/);
+  assert.throws(()=>parse(snapshot('x',{docBudget:{...budget,startedAt:'soon'}}),binding),/startedAt/);
+  assert.deepEqual([0.4,0.5,0.99,1,2].map(ratio=>docBudgetStage(budget,ratio*114*60000)),[null,'half','half','spent','spent']);
+  assert.equal(docBudgetStage(undefined,1e9),null);
+});
+
+// Bookkeeping by script (Jay 2026-10-15): in GDB v1.2.0 the main line spent 99 minutes and 506 turns only on records,
+// rewriting snapshot JSON and a generator of its own. The work-package files are the record; one command per state
+// change rewrites the package's [狀態] line and derives the snapshot, and a rejected change leaves both untouched.
+test('work-package files become the snapshot, one mark per state change, and a rejected mark changes nothing',()=>{
+  const f=fixture('dispatch-wp-','claude'),state=path.join(f.root,'state'),wp=path.join(state,'wp');fs.mkdirSync(wp,{recursive:true});
+  const script=path.join(claude,'dispatch.cjs'),run=args=>execFileSync(process.execPath,[script,...args],{stdio:'pipe',encoding:'utf8'});
+  fs.writeFileSync(path.join(wp,'B1.md'),'[工作包] id=B1；類型＝B 技術；依賴：無；目前錯誤次數 0\n[狀態] {"list":"ready"}\n[共用資源] worktree:v120-b1\n[驗收條目] A1\n\n## 共同規則\n');
+  fs.writeFileSync(path.join(wp,'B2.md'),'[工作包] id=B2；類型＝介面操作；依賴：B1；目前錯誤次數 0\n[狀態] {"list":"ready"}\n[共用資源]\n- 帳號:jay+uat2\n- 瀏覽器:pane（介面包必填）\n[禁止事項] 不改 [可修改範圍] 以外的檔\n');
+  fs.writeFileSync(path.join(wp,'C0.md'),'[工作包] id=C0；類型＝C 研究\n[狀態] {"list":"archived"}\n');
+  const base=path.join(f.root,'base.json');save(base,{capacity:{verified:3,evidence:['platform:list_agents']}});
+  try{
+    assert.throws(()=>run(['from-wp',f.run,state]),error=>/--base/.test(error.stderr));
+    run(['from-wp',f.run,state,'--base',base,'--revision','p1']);
+    let snap=JSON.parse(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'));
+    assert.equal(snap.activity,'waiting','nothing in flight must read as waiting so ready work still raises a review');
+    assert.deepEqual(snap.packages.ready.map(item=>item.id),['B1','B2']);
+    const b1=snap.packages.ready[0];
+    assert.deepEqual(b1.exclusiveResources,[{key:'worktree:v120-b1',kind:'worktree'}]);assert.deepEqual(b1.acceptanceIds,['A1']);
+    assert.deepEqual(b1.dependencies,[]);assert.deepEqual(snap.packages.ready[1].dependencies,['B1']);assert.equal(b1.evidence[0],path.join(wp,'B1.md'));
+    assert.deepEqual(snap.packages.ready[1].exclusiveResources,[{key:'帳號:jay+uat2',kind:'account'},{key:'瀏覽器:pane',kind:'browser'}],'multi-line Chinese claims stay exclusive');
+    const baseline={minutes:24,startedAt:'2026-10-15T01:00:00Z',basis:'pace.cjs estimate: 90000 tokens at 66.9/s plus 2 tool minutes'};
+    run(['mark',f.run,state,'B1',JSON.stringify({list:'inFlight',handle:'agent:abc',baseline})]);
+    snap=JSON.parse(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'));
+    assert.equal(snap.activity,'working');assert.equal(snap.capacity.verified,3,'capacity carries over from the previous snapshot');assert.equal(snap.planningRevision,'p1');
+    assert.deepEqual(snap.packages.inFlight.map(item=>[item.id,item.handle,item.baseline.minutes]),[['B1','agent:abc',24]]);
+    assert.match(fs.readFileSync(path.join(wp,'B1.md'),'utf8'),/^\[狀態\] \{"list":"inFlight","handle":"agent:abc"/m);
+    const before=fs.readFileSync(path.join(wp,'B2.md'),'utf8'),snapBefore=fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8');
+    assert.throws(()=>run(['mark',f.run,state,'B2','{"list":"inFlight"}']),error=>/platform handle/.test(error.stderr));
+    assert.equal(fs.readFileSync(path.join(wp,'B2.md'),'utf8'),before);assert.equal(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'),snapBefore);
+    fs.writeFileSync(path.join(wp,'B3.md'),'[工作包] id=B3；依賴：無\n');
+    assert.throws(()=>run(['from-wp',f.run,state]),error=>/B3\.md/.test(error.stderr));
+    assert.equal(fs.readFileSync(path.join(f.run,'dispatch-history.jsonl'),'utf8').trim().split('\n').length,2);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
 test('deterministic audit ignores transition underdispatch and flags exclusive overlap without read-read loopholes',()=>{
   const {derive}=require(path.join(codex,'dispatch-audit.cjs'));
   const ready={id:'B1',independent:true,safe:true,dependencies:[],exclusiveResources:[],evidence:['plan:B1']};

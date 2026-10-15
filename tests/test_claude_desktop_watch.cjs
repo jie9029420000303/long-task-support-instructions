@@ -36,7 +36,7 @@ test('desktop watcher ignores a thinking-only end_turn and wakes on the real eve
   line(supervisorLog,{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Test desktop event',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Valid event',source:'source.md:1',verify:'Read transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
@@ -73,7 +73,7 @@ test('earlier turn text cannot make a thinking row swallow the real final questi
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Catch final question',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Final question must reach supervisor',source:'source.md:1',verify:'Replay transcript'}],
@@ -115,7 +115,7 @@ test('replayed progress uses the original reply time instead of extending its de
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep wait deadlines',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Replay does not postpone a wake',source:'source.md:1',verify:'Replay old progress'}],
@@ -151,7 +151,7 @@ test('real split-turn rows produce one event per reply and delivery works withou
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',
     message:{content:[{type:'text',text:marker+' test'}]}});
   const input=path.join(root,'input.json'),run=path.join(root,'run');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Check real split rows',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'One event per reply',source:'source.md:1',verify:'Replay transcript'}],
@@ -197,7 +197,7 @@ test('a waiting reply with a merge approval block wakes the supervisor immediate
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,
     executorPrompt:marker+' test',contract:{goal:'Catch actionable waiting reply',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Review blocked merge',source:'source.md:1',verify:'Replay transcript'}],
@@ -229,7 +229,7 @@ test('Claude observe clears a known approval block without delivery and the next
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Observe known approval',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Watch next event',source:'source.md:1',verify:'Replay transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Observe known approval',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Watch next event',source:'source.md:1',verify:'Replay transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
   const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'120',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   const script=path.join(scripts,'supervise.cjs');execFileSync(process.execPath,[script,'init',run,input],{env});
   const first=crypto.randomUUID();
@@ -264,7 +264,7 @@ test('Claude observe honors an existing STOP without consuming the pending event
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep STOP authoritative',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Do not consume pending after STOP',source:'source.md:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]}}));
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep STOP authoritative',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Do not consume pending after STOP',source:'source.md:1',verify:'Read state'}],sources:[{path:source,sha256:sha(source)}]}}));
   const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'120',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   const script=path.join(scripts,'supervise.cjs');execFileSync(process.execPath,[script,'init',run,input],{env});
   const eventId=crypto.randomUUID();
@@ -294,7 +294,7 @@ function boundRun(prefix,{dispatchAudit=false}={}){
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  fs.writeFileSync(input,JSON.stringify({dispatchAudit,projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Root-cause regression',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Watch events',source:'source.md:1',verify:'Replay transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
+  fs.writeFileSync(input,JSON.stringify({dispatchAudit,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Root-cause regression',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Watch events',source:'source.md:1',verify:'Replay transcript'}],sources:[{path:source,sha256:sha(source)}]}}));
   const env={...process.env,CLAUDE_WATCH_SETTLE_MS:'120',CLAUDE_CONFIG_DIR:path.join(root,'claude-config'),CLAUDE_SESSION_ID:supervisorId};
   execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'init',run,input],{env});
   const state=()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));

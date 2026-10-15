@@ -20,7 +20,7 @@ function fixture(quietMinutes=16){
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  save(input,{dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  save(input,{dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Keep executor moving',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Follow up on stalled work',source:'source.md:1',verify:'Replay activity'}],

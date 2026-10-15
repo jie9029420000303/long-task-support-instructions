@@ -28,7 +28,7 @@ function fixture({lastReviewMinutesAgo=1,quietMinutes=1}={}){
   line(path.join(project,supervisorId+'.jsonl'),{type:'user',sessionId:supervisorId,cwd:root,entrypoint:'claude-desktop'});
   line(executorLog,{type:'user',sessionId:executorId,cwd:root,entrypoint:'claude-desktop',message:{content:[{type:'text',text:marker}]}});
   const run=path.join(root,'run'),input=path.join(root,'input.json');
-  save(input,{dispatchAudit:false,projectRoot:root,allowedRoots:[root],supervisorId,
+  save(input,{dispatchAudit:false,loginSites:[],projectRoot:root,allowedRoots:[root],supervisorId,
     supervisorDesktopId:'local_'+crypto.randomUUID(),executorId,executorDesktopId:'local_'+crypto.randomUUID(),
     executorMarker:marker,executorPrompt:marker+' test',contract:{goal:'Finish on AI time',authorization:'Isolated QA',
       criteria:[{id:'A1',requirement:'Keep work moving',source:'source.md:1',verify:'Replay activity'}],
@@ -363,6 +363,36 @@ test('free slots on a declared test resource while work waits on it are surfaced
     assert.deepEqual(pending(f).reasons,['resource_underused']);
     assert.deepEqual(pending(f).resourceUnderused,[{key:'host:gateway',slots:4,used:2,free:2,waiting:['C9']}]);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+// Document time budget (Jay 2026-10-15): the GDB v1.2.0 documents took more than 12 hours after 76 minutes of development,
+// with 11 supervisor round trips nobody stopped to question. The clock wakes the supervisor once at half the budget and
+// once when it is spent; under half it stays quiet.
+test('a document budget past half wakes the supervisor once with the budget numbers',async()=>{
+  const f=fixture();
+  save(path.join(f.run,'dispatch.json'),{docBudget:{startedAt:minutesAgo(60),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
+  const child=start(f);
+  try{
+    await until(()=>pending(f)?.kind==='progress_review');
+    assert.deepEqual(pending(f).reasons,['doc_budget']);
+    const budget=pending(f).docBudget;
+    assert.equal(budget.stage,'half');assert.equal(budget.budgetMinutes,114);assert.equal(budget.devMinutes,76);assert.ok(budget.usedMinutes>=59);
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+test('a spent document budget wakes as spent, and one under half stays quiet',async()=>{
+  const spent=fixture();
+  save(path.join(spent.run,'dispatch.json'),{docBudget:{startedAt:minutesAgo(120),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
+  const quiet=fixture();
+  save(path.join(quiet.run,'dispatch.json'),{docBudget:{startedAt:minutesAgo(20),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
+  const children=[start(spent),start(quiet)];
+  try{
+    await until(()=>pending(spent)?.kind==='progress_review');
+    assert.deepEqual(pending(spent).reasons,['doc_budget']);assert.equal(pending(spent).docBudget.stage,'spent');
+    await until(()=>fs.existsSync(path.join(quiet.run,'clock.jsonl')));
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.equal(pending(quiet),null);
+  }finally{for(const child of children)child.kill('SIGTERM');for(const f of [spent,quiet])fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
 test('a wait that expires is reported with its due time, not the time it was declared',async()=>{
