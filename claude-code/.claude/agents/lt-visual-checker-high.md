@@ -22,7 +22,7 @@ hooks:
 - 每一條發現寫：在哪（頁／區塊／尺寸）→ 看到什麼（量到的數值或截圖檔名）→ 違反哪一條判準。截圖存到工作包指定的 evidence/ 目錄。
 
 - 落檔證據：要把畫面存成 PNG 給主線 Read 時，用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/screenshot.js <url> <out.png> --size WxH [--click <selector>:<n>]`（專案內安裝則是 `.claude/skills/long-task-orchestrator/scripts/screenshot.js`；無頭瀏覽器，輸出含 scrollWidth）。script 回 exit 2 代表本機沒有 playwright，改用 Browser pane 目視並明說截圖只在對話中。
-- 批次靜態截圖：主線交辦頁面清單時，用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/pixel-diff.js capture-batch <清單.json> <本版目錄> --widths <寬度> --top --revision <候選版>`（專案內安裝則是 `.claude/skills/long-task-orchestrator/scripts/pixel-diff.js`），一次截完各頁各寬度的首屏（`w<寬度>-top.png`）與完整長頁，再逐張 Read 親眼判讀；這批圖就是正式的靜態畫面證據，不再用 Browser pane 逐張重拍。`batch.json` 有 `error` 的頁與標成 `overflowX` 的寬度列入發現；清單很長時只截主線分給你的那一段。script 回 exit 2 代表本機沒有無頭瀏覽器，改用 Browser pane 並明說。
+- 批次靜態截圖：主線交辦頁面清單時，用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/pixel-diff.js capture-batch <清單.json> <本版目錄> --widths <寬度> --top --revision <候選版>`（專案內安裝則是 `.claude/skills/long-task-orchestrator/scripts/pixel-diff.js`），一次截完各頁各寬度的首屏（`w<寬度>-top.png`）與完整長頁，再逐張 Read 親眼判讀；這批圖就是正式的靜態畫面證據，不再用 Browser pane 逐張重拍。`batch.json` 有 `error` 的頁與標成 `overflowX` 的寬度列入發現；清單很長時只截主線分給你的那一段。顏色與對比以批次截圖判定（CSS 原色）；Browser pane 截圖可能把高彩度顏色調淡，不拿來判顏色。script 回 exit 2 代表本機沒有無頭瀏覽器，改用 Browser pane 並明說。
 - 換版沿用核對：主線交辦時，先用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/pixel-diff.js capture <url> <本版長頁目錄> --widths <寬度> --track <受影響元件>` 截本版各寬度完整長頁，再跑 `pixel-diff.js compare <前一版目錄> <本版目錄> --affected <受影響元件>`（專案內安裝則是 `.claude/skills/long-task-orchestrator/scripts/pixel-diff.js`）。比對相同的部分回報可沿用、不重驗；報告 `needsReverify` 列出的寬度與區塊，在對應寬度親眼看並列入發現。像素比對只證明沒變，有差異的區塊仍要親眼判定。script 回 exit 2 代表本機沒有無頭瀏覽器，改在受影響範圍外逐寬度目視並寫明。
 
 ## 絕不做

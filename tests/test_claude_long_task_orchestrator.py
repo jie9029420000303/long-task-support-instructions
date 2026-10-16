@@ -1058,13 +1058,14 @@ class SharedSpecTests(unittest.TestCase):
         # 每個效能包重搭量測環境。只改一個平台，另一個平台的視覺任務照舊排隊；規則沒寫進子代理定義，
         # 派出去的查核仍逐張用互動瀏覽器重拍，監督也看不出執行端在逐點派修。
         spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
-        for marker in ("28. 畫面成品查核", "批次截圖腳本一次截完", "先掃完全部頁面", "同一份樣式來源", "量測腳本與固定設定", "契約明文指定截圖用的瀏覽器或工具時照契約"):
+        # v0.32.0：GDB 實測平台瀏覽器截圖排版與批次截圖一致、但把高彩度顏色調淡；首次採用要抽查，顏色以批次截圖判定。
+        for marker in ("28. 畫面成品查核", "批次截圖腳本一次截完", "先掃完全部頁面", "同一份樣式來源", "量測腳本與固定設定", "契約明文指定截圖用的瀏覽器或工具時照契約", "以平台瀏覽器同版截圖抽查", "顏色與對比以批次截圖判定"):
             self.assertIn(marker, spec, marker)
         codex = REPOSITORY / "codex" / ".agents" / "skills"
         claude = ADAPTER / "skills"
         for orchestrator in (claude / "long-task-orchestrator", codex / "goal-orchestrator"):
             text = "".join((orchestrator / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md"))
-            for marker in ("## 畫面成品查核流程", "#畫面成品查核流程", "瀏覽器能力", "capture-batch", "compare-batch", "--top", "一趟走完", "先掃完", "同一份樣式來源", "效能量測"):
+            for marker in ("## 畫面成品查核流程", "#畫面成品查核流程", "瀏覽器能力", "capture-batch", "compare-batch", "--top", "一趟走完", "先掃完", "同一份樣式來源", "效能量測", "渲染一致性抽查", "顏色與對比以批次截圖判定"):
                 self.assertIn(marker, text, f"{orchestrator.name}: {marker}")
         for supervisor in (claude / "long-task-supervisor", codex / "long-task-supervisor"):
             acceptance = (supervisor / "references" / "acceptance.md").read_text(encoding="utf-8")
@@ -1072,7 +1073,7 @@ class SharedSpecTests(unittest.TestCase):
                 self.assertIn(marker, acceptance, f"{supervisor}: {marker}")
         for effort in ("medium", "high", "xhigh"):
             agent = (AGENTS / f"lt-visual-checker-{effort}.md").read_text(encoding="utf-8")
-            for marker in ("pixel-diff.js capture-batch", "--top", "不再用 Browser pane 逐張重拍", "內容狀態"):
+            for marker in ("pixel-diff.js capture-batch", "--top", "不再用 Browser pane 逐張重拍", "內容狀態", "顏色與對比以批次截圖判定"):
                 self.assertIn(marker, agent, f"{effort}: {marker}")
         for effort in ("low", "medium", "high"):
             agent = (AGENTS / f"lt-ui-tester-{effort}.md").read_text(encoding="utf-8")
