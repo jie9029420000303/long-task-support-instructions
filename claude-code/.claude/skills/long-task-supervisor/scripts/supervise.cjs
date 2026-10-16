@@ -178,7 +178,7 @@ function brief() {
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
   const pausedFile = path.join(run, 'PAUSED.json');
-  return {status:status(), pending:review.summary(state.pending), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps),
+  return {status:status(), pending:review.summary(state.pending), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt),
     sleeps:(state.sleeps || []).slice(-5),
     // Jay is online for 10 minutes after typing in the supervisor chat: then ask every open ledger item at once.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},

@@ -407,3 +407,37 @@ test('a wait that expires is reported with its due time, not the time it was dec
     assert.equal(Date.now()-Date.parse(event.at)<60000,true);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+// v0.33.0 (2026-10-16 GDB): the main line's own package (handle "main") kept driving the interactive browser while its
+// evidence list lagged. Reading only evidence file mtimes called it a stalled process 6 times in 7 hours, and 4 of those
+// reviews sent the executor back to rewrite its records instead of testing. The executor's own work is main's activity.
+test("a main-line package takes its activity from the executor's own work and is never a stalled process",()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-main-line-')),executorId='e1',log=path.join(root,executorId+'.jsonl'),evidence=path.join(root,'checkpoint.json');
+  fs.mkdirSync(path.join(root,executorId,'subagents'),{recursive:true});fs.writeFileSync(log,'');
+  fs.writeFileSync(evidence,'{}');const old=Date.now()-40*60000;fs.utimesSync(evidence,old/1000,old/1000);
+  try{
+    const binding={executorLog:log,executorId};
+    const snapshot={packages:{inFlight:[{id:'G3-main',handle:'main',evidence:[evidence],baseline:{minutes:8,startedAt:minutesAgo(50)}}]}};
+    const workAt=Date.now()-60000,paced=pace.inFlight(binding,snapshot,Date.now(),[],workAt),item=paced.packages[0];
+    assert.equal(item.process,false,'the main line is not a test process');assert.equal(item.main,true);
+    assert.equal(Date.parse(item.lastActivityAt),workAt,'its latest real tool call, not the 40-minute-old checkpoint');
+    assert.equal(paced.processActivityAt,workAt,'its work still keeps the run from counting as silent');
+    const quiet=pace.inFlight(binding,snapshot,Date.now(),[]).packages[0];
+    assert.ok(Math.abs(Date.parse(quiet.lastActivityAt)-old)<1000,'without executor work the evidence still counts');
+    const tests=pace.inFlight(binding,{packages:{inFlight:[{id:'T',handle:'resource:r1',evidence:[evidence]}]}},Date.now(),[],workAt).packages[0];
+    assert.equal(tests.process,true,'a test process still reads only its own evidence');assert.ok(Math.abs(Date.parse(tests.lastActivityAt)-old)<1000);
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('a main line still working with a 20-minute-old checkpoint does not wake the supervisor as a stalled process',async()=>{
+  const f=fixture(),evidence=path.join(f.root,'checkpoint.json');fs.writeFileSync(evidence,'{}');
+  const old=new Date(Date.now()-20*60000);fs.utimesSync(evidence,old,old);
+  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'G3-main-a11y',handle:'main',evidence:[evidence],
+    baseline:{minutes:300,startedAt:minutesAgo(30),basis:'measured'}}]}});
+  const child=start(f);
+  try{
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(f),null,'a main line still driving the browser is not stalled');
+  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+});

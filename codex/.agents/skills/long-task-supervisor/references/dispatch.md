@@ -37,7 +37,7 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 | `completed` | `acceptanceIds`、`evidence` | 已核對工作與所支援的驗收條目；不是監督已接受 |
 | `recurringRework` | `count`、`evidence` | 同一項已重做至少兩次，交監督判斷是否有效重驗 |
 
-子代理的 `handle` 填平台的代理路徑（例如 `/root/technical_poc`）或子代理對話 ID，監督據此找到它在 `CODEX_HOME/sessions` 的紀錄、算輸出速度與是否已做完；測試、主機程序等非代理工作經資源帳本啟動者填 `resource:<資源 id>`，evidence 列 `resources/` 下的紀錄檔，監督可查程序是否還活著。
+子代理的 `handle` 填平台的代理路徑（例如 `/root/technical_poc`）或子代理對話 ID，監督據此找到它在 `CODEX_HOME/sessions` 的紀錄、算輸出速度與是否已做完；測試、主機程序等非代理工作經資源帳本啟動者填 `resource:<資源 id>`，evidence 列 `resources/` 下的紀錄檔，監督可查程序是否還活著。主線自己做的工作包（例如在平台瀏覽器走真實操作）填 `main`：監督把執行對話自己紀錄裡最後一次實際工作（輪詢不算）與 evidence 的修改時間都算成這包的活動，不會因為新存檔點還沒列進 evidence 就判成程序停住；主線真的停下，由「執行端與子代理都停了 5 分鐘」那條叫醒。
 
 真實測試資源（例如正式主機的排查名額、測試身分）用 `capacity.resources:[{key,slots}]` 宣告總名額，各包用 `uses:[{key,units}]` 宣告占用。在途包的占用合計低於名額，同時有可立即開跑的包也要用同一資源時，背景程式通知監督評估能否並行：就緒包須 `independent`、`safe`、依賴全部完成、排他資源沒被在途包占用；受阻包只算 kind 為 `resource_conflict` 的；且它用到的每個已宣告資源空位都夠它的 units。`resourceUnderused[].waiting` 只列這些包；同一資源的這組可派包沒變就不再通知。`capacity.verified` 仍只表示 AI 子代理席位。
 
