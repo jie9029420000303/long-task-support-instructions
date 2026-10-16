@@ -2,16 +2,25 @@
 // 長頁像素比對：換版時證明「沒受影響的畫面跟前一版完全相同」，才能沿用前一版的肉眼查核（共用規格不變量 7）。
 // 用法：
 //   node pixel-diff.js capture <網址或本機 HTML> <輸出目錄> --widths 320,768,1440 [--height 900] [--wait 毫秒]
-//                      [--mask <選擇器>]... [--track <選擇器>]... [--revision <版本或雜湊>]
+//                      [--mask <選擇器>]... [--track <選擇器>]... [--revision <版本或雜湊>] [--top]
 //   node pixel-diff.js compare <前一版目錄> <本版目錄> [--affected <選擇器或標籤>]... [--out <報告目錄>]
+//   node pixel-diff.js capture-batch <清單.json> <輸出根目錄> --widths … [其餘同 capture]
+//   node pixel-diff.js compare-batch <前一版根目錄> <本版根目錄> [--affected <選擇器或標籤>]... [--out <報告目錄>]
 // capture：每種寬度截一張完整長頁（縮放固定 1 倍、動畫直接跑到結束、游標隱藏、等字型與圖片載入），
 //          記下頁首、各區段、頁尾、有 id 或 data-component 的元素與 --track 元素的位置，寫進 manifest.json。
 //          每一版都留著，當下一版的比對基準，舊版不必重新部署。輪播、時間這類每次都會變的區塊用 --mask 遮掉。
+//          --top 另存每種寬度的首屏（頁面最上方一個視窗高），檔名 w<寬度>-top.png。
 // compare：逐像素比對，門檻為零，一個像素不同就算有差。每種寬度判成 identical（完全相同）、
 //          inside（差異只在 --affected 範圍內）、outside（範圍外也有差異）、missing（缺這個寬度）。
 //          頁高不同時，從上、下各自對齊，找出真正變動的那一段。報告與標色差異圖寫進本版目錄（或 --out），不覆蓋舊檔。
+// capture-batch：清單是 [{"name":"首頁_正常內容","url":"…"}, …] 或 {"pages":[…]}，每頁可另加 mask、track 陣列；
+//          相對路徑以清單所在目錄為準。只開一次瀏覽器依序截完所有頁，每頁一個子目錄（同 capture 的格式），
+//          根目錄寫 batch.json。某頁失敗照樣截完其他頁，失敗頁記在 batch.json 的 error。
+// compare-batch：依頁名逐頁比對兩個 capture-batch 根目錄；--affected 只套用到截圖紀錄裡找得到它的頁，
+//          每一頁都找不到時算參數錯誤。只在一邊有、或截圖失敗的頁判 missing（整頁重驗）。
 // 結束碼：0＝每種寬度都是 identical 或 inside；1＝有 outside 或 missing，needsReverify 列出要併入重驗的區塊；
 //         2＝本機沒有 playwright 或 chrome-headless-shell；3＝參數或輸入檔有誤；4＝截圖過程失敗。
+//         capture-batch 有頁失敗時，參數或選擇器錯誤回 3，其他失敗回 4，成功的頁仍可使用。
 // 這支工具只證明「沒變」。有差異的區塊仍要由視覺查核子代理親眼看，比對結果不代替看畫面。
 "use strict";
 const fs = require("fs");
@@ -21,8 +30,10 @@ const zlib = require("zlib");
 const crypto = require("crypto");
 const { pathToFileURL } = require("url");
 
-const USAGE = "用法：node pixel-diff.js capture <網址或本機 HTML> <輸出目錄> --widths 320,768,1440 [--height 900] [--wait 毫秒] [--mask 選擇器]... [--track 選擇器]... [--revision 版本]\n" +
-  "      node pixel-diff.js compare <前一版目錄> <本版目錄> [--affected 選擇器或標籤]... [--out 報告目錄]";
+const USAGE = "用法：node pixel-diff.js capture <網址或本機 HTML> <輸出目錄> --widths 320,768,1440 [--height 900] [--wait 毫秒] [--mask 選擇器]... [--track 選擇器]... [--revision 版本] [--top]\n" +
+  "      node pixel-diff.js compare <前一版目錄> <本版目錄> [--affected 選擇器或標籤]... [--out 報告目錄]\n" +
+  "      node pixel-diff.js capture-batch <清單.json> <輸出根目錄> --widths 320,768,1440 [其餘同 capture]\n" +
+  "      node pixel-diff.js compare-batch <前一版根目錄> <本版根目錄> [--affected 選擇器或標籤]... [--out 報告目錄]";
 const CHUNK = 4000;
 const SIG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const LANDMARKS = "header,nav,main,footer,section,article,aside,[id],[data-component],[data-section]";
@@ -37,6 +48,12 @@ const OVERALL_LABEL = {
   identical: "所有寬度完全相同",
   inside: "所有差異都在受影響範圍內",
   outside: "有範圍外差異或缺少寬度，needsReverify 列出的區塊要併入重驗",
+};
+const PAGE_MISSING_LABEL = "這一頁缺少可比對的截圖，整頁要重驗";
+const BATCH_LABEL = {
+  identical: "所有頁、所有寬度完全相同",
+  inside: "所有差異都在受影響範圍內",
+  outside: "有頁面在範圍外有差異或缺截圖，needsReverify 列出的頁與區塊要併入重驗",
 };
 
 class InputError extends Error {}
@@ -139,10 +156,11 @@ function encodePng(width, height, rgba) {
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   const positional = [];
-  const flags = { widths: null, height: 900, wait: 300, mask: [], track: [], affected: [], revision: null, out: null };
+  const flags = { widths: null, height: 900, wait: 300, mask: [], track: [], affected: [], revision: null, out: null, top: false };
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
     if (!arg.startsWith("--")) { positional.push(arg); continue; }
+    if (arg === "--top") { flags.top = true; continue; }
     const key = arg.slice(2), value = rest[++i];
     if (value === undefined) throw new InputError(arg + " 後面缺少值");
     if (key === "widths") flags.widths = value.split(",").map((s) => Number(s.trim()));
@@ -195,53 +213,132 @@ async function settle(page, flags) {
   if (flags.wait > 0) await page.waitForTimeout(flags.wait);
 }
 
-async function capture(target, outDir, flags) {
-  if (fs.existsSync(outDir) && fs.readdirSync(outDir).length) throw new InputError("輸出目錄已有檔案，不覆蓋：" + outDir);
-  const url = /^[a-z][a-z0-9+.-]*:/i.test(target) ? target : pathToFileURL(path.resolve(target)).href;
+const toUrl = (target, baseDir) => /^[a-z][a-z0-9+.-]*:/i.test(target) ? target : pathToFileURL(path.resolve(baseDir || process.cwd(), target)).href;
+function refuseNonEmpty(dir) {
+  if (fs.existsSync(dir) && fs.readdirSync(dir).length) throw new InputError("輸出目錄已有檔案，不覆蓋：" + dir);
+}
+
+async function launchBrowser() {
   const pw = findPlaywright(), exe = findHeadlessShell();
   if (!pw || !exe) {
     console.error("找不到 playwright 模組（" + pw + "）或 chrome-headless-shell（" + exe + "）；長頁比對無法執行，改請視覺查核子代理在受影響範圍外逐寬度目視確認。");
-    return 2;
+    return null;
   }
   const { chromium } = require(pw);
-  const browser = await chromium.launch({ headless: true, executablePath: exe, args: ["--no-sandbox", "--force-color-profile=srgb", "--hide-scrollbars"] });
+  return chromium.launch({ headless: true, executablePath: exe, args: ["--no-sandbox", "--force-color-profile=srgb", "--hide-scrollbars"] });
+}
+
+async function captureInto(browser, url, outDir, flags) {
   const manifest = { tool: "pixel-diff", schema: 1, url, revision: flags.revision, capturedAt: new Date().toISOString(), viewportHeight: flags.height, masks: flags.mask, tracked: flags.track, widths: [] };
-  try {
-    fs.mkdirSync(outDir, { recursive: true });
-    for (const width of flags.widths) {
-      const context = await browser.newContext({ viewport: { width, height: flags.height }, deviceScaleFactor: 1, locale: "zh-TW" });
-      try {
-        const page = await context.newPage();
-        await page.goto(url, { waitUntil: "load", timeout: 60000 });
-        const invalid = await page.evaluate((sels) => sels.filter((s) => { try { document.querySelectorAll(s); return false; } catch (_) { return true; } }), [...flags.mask, ...flags.track]);
-        if (invalid.length) throw new InputError("選擇器無效：" + invalid.join("、"));
-        await settle(page, flags);
-        const info = await page.evaluate(collectBoxes, { landmarks: LANDMARKS, tracks: flags.track, max: MAX_BOXES });
-        const pageW = Math.max(width, info.scrollWidth), pageH = info.scrollHeight;
-        const masks = flags.mask.map((s) => page.locator(s));
-        const rgba = Buffer.alloc(pageW * pageH * 4);
-        let offset = 0;
-        for (let y = 0; y < pageH; y += CHUNK) {
-          const h = Math.min(CHUNK, pageH - y);
-          const shot = await page.screenshot({ fullPage: true, clip: { x: 0, y, width: pageW, height: h }, animations: "disabled", caret: "hide", scale: "css", mask: masks });
-          const img = decodePng(shot);
-          if (img.width !== pageW || img.height !== h) throw new Error("分段截圖尺寸 " + img.width + "x" + img.height + " 與預期 " + pageW + "x" + h + " 不符");
-          img.data.copy(rgba, offset); offset += img.data.length;
-        }
-        const png = encodePng(pageW, pageH, rgba);
-        const file = "w" + width + ".png";
-        fs.writeFileSync(path.join(outDir, file), png, { flag: "wx" });
-        manifest.widths.push({ width, file, sha256: sha256(png), pixelWidth: pageW, pixelHeight: pageH, scrollWidth: info.scrollWidth, overflowX: info.scrollWidth > width, boxes: info.boxes });
-      } finally {
-        await context.close();
+  fs.mkdirSync(outDir, { recursive: true });
+  for (const width of flags.widths) {
+    const context = await browser.newContext({ viewport: { width, height: flags.height }, deviceScaleFactor: 1, locale: "zh-TW" });
+    try {
+      const page = await context.newPage();
+      await page.goto(url, { waitUntil: "load", timeout: 60000 });
+      const invalid = await page.evaluate((sels) => sels.filter((s) => { try { document.querySelectorAll(s); return false; } catch (_) { return true; } }), [...flags.mask, ...flags.track]);
+      if (invalid.length) throw new InputError("選擇器無效：" + invalid.join("、"));
+      await settle(page, flags);
+      const info = await page.evaluate(collectBoxes, { landmarks: LANDMARKS, tracks: flags.track, max: MAX_BOXES });
+      const pageW = Math.max(width, info.scrollWidth), pageH = info.scrollHeight;
+      const masks = flags.mask.map((s) => page.locator(s));
+      const rgba = Buffer.alloc(pageW * pageH * 4);
+      let offset = 0;
+      for (let y = 0; y < pageH; y += CHUNK) {
+        const h = Math.min(CHUNK, pageH - y);
+        const shot = await page.screenshot({ fullPage: true, clip: { x: 0, y, width: pageW, height: h }, animations: "disabled", caret: "hide", scale: "css", mask: masks });
+        const img = decodePng(shot);
+        if (img.width !== pageW || img.height !== h) throw new Error("分段截圖尺寸 " + img.width + "x" + img.height + " 與預期 " + pageW + "x" + h + " 不符");
+        img.data.copy(rgba, offset); offset += img.data.length;
       }
+      const png = encodePng(pageW, pageH, rgba);
+      const file = "w" + width + ".png";
+      fs.writeFileSync(path.join(outDir, file), png, { flag: "wx" });
+      const entry = { width, file, sha256: sha256(png), pixelWidth: pageW, pixelHeight: pageH, scrollWidth: info.scrollWidth, overflowX: info.scrollWidth > width, boxes: info.boxes };
+      if (flags.top) {
+        const topH = Math.min(flags.height, pageH);
+        const top = encodePng(pageW, topH, rgba.subarray(0, pageW * topH * 4));
+        entry.topFile = "w" + width + "-top.png";
+        entry.topSha256 = sha256(top);
+        fs.writeFileSync(path.join(outDir, entry.topFile), top, { flag: "wx" });
+      }
+      manifest.widths.push(entry);
+    } finally {
+      await context.close();
+    }
+  }
+  fs.writeFileSync(path.join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" });
+  return manifest;
+}
+const widthSummary = (m) => m.widths.map((w) => ({ width: w.width, file: w.file, topFile: w.topFile, size: [w.pixelWidth, w.pixelHeight], overflowX: w.overflowX }));
+
+async function capture(target, outDir, flags) {
+  refuseNonEmpty(outDir);
+  const browser = await launchBrowser();
+  if (!browser) return 2;
+  let manifest;
+  try {
+    manifest = await captureInto(browser, toUrl(target), outDir, flags);
+  } finally {
+    await browser.close();
+  }
+  console.log(JSON.stringify({ outDir, revision: flags.revision, widths: widthSummary(manifest) }));
+  return 0;
+}
+
+function readList(listFile) {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(listFile, "utf8")); } catch (e) { throw new InputError("清單讀不到或不是 JSON：" + listFile + "（" + e.message + "）"); }
+  const pages = Array.isArray(data) ? data : data && Array.isArray(data.pages) ? data.pages : null;
+  if (!pages || !pages.length) throw new InputError('清單要是 [{"name":…,"url":…}] 或 {"pages":[…]}，且至少一頁');
+  const seen = new Set();
+  for (const p of pages) {
+    if (!p || typeof p.name !== "string" || typeof p.url !== "string" || !p.name.trim() || !p.url.trim()) throw new InputError("清單每一頁都要有 name 與 url");
+    if (/[\\/]/.test(p.name) || p.name === "." || p.name === "..") throw new InputError("頁名不能含斜線，也不能是 . 或 ..：" + p.name);
+    if (seen.has(p.name)) throw new InputError("頁名重複：" + p.name);
+    seen.add(p.name);
+    for (const k of ["mask", "track"]) {
+      if (p[k] !== undefined && !(Array.isArray(p[k]) && p[k].every((s) => typeof s === "string"))) throw new InputError(p.name + " 的 " + k + " 要是選擇器字串陣列");
+    }
+  }
+  return pages;
+}
+
+async function captureBatch(listFile, rootDir, flags) {
+  const pages = readList(listFile);
+  refuseNonEmpty(rootDir);
+  const baseDir = path.dirname(path.resolve(listFile));
+  const browser = await launchBrowser();
+  if (!browser) return 2;
+  const entries = [];
+  let inputFailed = false, otherFailed = false;
+  try {
+    fs.mkdirSync(rootDir, { recursive: true });
+    for (const p of pages) {
+      const url = toUrl(p.url, baseDir);
+      const pageFlags = { ...flags, mask: [...flags.mask, ...(p.mask || [])], track: [...flags.track, ...(p.track || [])] };
+      const entry = { name: p.name, url, dir: p.name };
+      try {
+        entry.widths = widthSummary(await captureInto(browser, url, path.join(rootDir, p.name), pageFlags));
+      } catch (e) {
+        if (e instanceof InputError) inputFailed = true; else otherFailed = true;
+        entry.error = String((e && e.message) || e);
+      }
+      entries.push(entry);
     }
   } finally {
     await browser.close();
   }
-  fs.writeFileSync(path.join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" });
-  console.log(JSON.stringify({ outDir, revision: flags.revision, widths: manifest.widths.map((w) => ({ width: w.width, file: w.file, size: [w.pixelWidth, w.pixelHeight], overflowX: w.overflowX })) }));
-  return 0;
+  const index = { tool: "pixel-diff", schema: 1, kind: "batch", revision: flags.revision, capturedAt: new Date().toISOString(), list: path.resolve(listFile), widths: flags.widths, viewportHeight: flags.height, top: flags.top, pages: entries };
+  fs.writeFileSync(path.join(rootDir, "batch.json"), JSON.stringify(index, null, 2) + "\n", { flag: "wx" });
+  console.log(JSON.stringify({
+    outDir: rootDir,
+    revision: flags.revision,
+    pages: entries.length,
+    failed: entries.filter((e) => e.error).map((e) => ({ name: e.name, error: e.error })),
+    overflowX: entries.flatMap((e) => (e.widths || []).filter((w) => w.overflowX).map((w) => e.name + "@" + w.width)),
+  }));
+  return inputFailed ? 3 : otherFailed ? 4 : 0;
 }
 
 function readManifest(dir) {
@@ -358,7 +455,7 @@ function diffImage(b, flags) {
   return encodePng(b.width, b.height, out);
 }
 
-function compare(oldDir, newDir, flags) {
+function compareDirs(oldDir, newDir, flags) {
   const oldM = readManifest(oldDir), newM = readManifest(newDir);
   const all = [...oldM.widths, ...newM.widths];
   const unknown = flags.affected.filter((spec) => !all.some((w) => (w.boxes || []).some((b) => matches(b, spec))));
@@ -417,24 +514,71 @@ function compare(oldDir, newDir, flags) {
   const report = { tool: "pixel-diff", schema: 1, comparedAt: new Date().toISOString(), old: side(oldM, oldDir), new: side(newM, newDir), affected: flags.affected, verdict, label: OVERALL_LABEL[verdict], results, needsReverify };
   const reportPath = path.join(outDir, base + ".json");
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
-  console.log(JSON.stringify({ verdict, label: OVERALL_LABEL[verdict], report: reportPath, widths: results.map((r) => ({ width: r.width, verdict: r.verdict, bands: (r.bands || []).length })) }));
+  return { verdict, label: OVERALL_LABEL[verdict], reportPath, results, needsReverify };
+}
+
+function compare(oldDir, newDir, flags) {
+  const r = compareDirs(oldDir, newDir, flags);
+  console.log(JSON.stringify({ verdict: r.verdict, label: r.label, report: r.reportPath, widths: r.results.map((x) => ({ width: x.width, verdict: x.verdict, bands: (x.bands || []).length })) }));
+  return r.verdict === "outside" ? 1 : 0;
+}
+
+function readBatch(dir) {
+  const file = path.join(dir, "batch.json");
+  if (!fs.existsSync(file)) throw new InputError("找不到 " + file + "；這個目錄要先用 capture-batch 產生");
+  const b = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (b.tool !== "pixel-diff" || b.kind !== "batch" || !Array.isArray(b.pages)) throw new InputError(file + " 不是 pixel-diff 的批次截圖紀錄");
+  return b;
+}
+
+function compareBatch(oldRoot, newRoot, flags) {
+  const oldB = readBatch(oldRoot), newB = readBatch(newRoot);
+  const usable = (b, root) => new Map(b.pages.filter((p) => !p.error).map((p) => [p.name, { dir: path.join(root, p.dir), manifest: readManifest(path.join(root, p.dir)) }]));
+  const oldP = usable(oldB, oldRoot), newP = usable(newB, newRoot);
+  const onPage = (m, spec) => m.widths.some((w) => (w.boxes || []).some((b) => matches(b, spec)));
+  const all = [...oldP.values(), ...newP.values()].map((p) => p.manifest);
+  const unknown = flags.affected.filter((spec) => !all.some((m) => onPage(m, spec)));
+  if (unknown.length) {
+    throw new InputError("受影響範圍在每一頁的截圖紀錄都找不到：" + unknown.join("、") + "。capture-batch 時用 --track 或清單的 track 記下它們的位置，或改用紀錄裡的標籤");
+  }
+  const outRoot = path.resolve(flags.out || newRoot);
+  fs.mkdirSync(outRoot, { recursive: true });
+  const names = [...new Set([...oldB.pages.map((p) => p.name), ...newB.pages.map((p) => p.name)])];
+  const pages = [];
+  for (const name of names) {
+    const o = oldP.get(name), n = newP.get(name);
+    if (!o || !n) { pages.push({ name, verdict: "missing", label: PAGE_MISSING_LABEL, missingIn: !n ? "本版" : "前一版" }); continue; }
+    const affected = flags.affected.filter((spec) => onPage(o.manifest, spec) || onPage(n.manifest, spec));
+    const r = compareDirs(o.dir, n.dir, { ...flags, affected, out: flags.out ? path.join(outRoot, name) : null });
+    pages.push({ name, verdict: r.verdict, label: r.label, affected, report: r.reportPath, needsReverify: r.needsReverify });
+  }
+  const verdict = pages.some((p) => p.verdict === "outside" || p.verdict === "missing") ? "outside"
+    : pages.some((p) => p.verdict === "inside") ? "inside" : "identical";
+  const needsReverify = pages.filter((p) => p.verdict === "outside" || p.verdict === "missing").map((p) => ({ name: p.name, wholePage: p.verdict === "missing", widths: p.needsReverify || [] }));
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "") + "-" + process.pid;
+  const reportPath = path.join(outRoot, "pixel-diff-batch-" + stamp + ".json");
+  const report = { tool: "pixel-diff", schema: 1, kind: "batch", comparedAt: new Date().toISOString(), old: { dir: oldRoot, revision: oldB.revision, capturedAt: oldB.capturedAt }, new: { dir: newRoot, revision: newB.revision, capturedAt: newB.capturedAt }, affected: flags.affected, verdict, label: BATCH_LABEL[verdict], pages, needsReverify };
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
+  console.log(JSON.stringify({ verdict, label: BATCH_LABEL[verdict], report: reportPath, pages: pages.map((p) => ({ name: p.name, verdict: p.verdict })) }));
   return verdict === "outside" ? 1 : 0;
 }
 
 async function main() {
   const { command, positional, flags } = parseArgs(process.argv.slice(2));
-  if (command === "capture") {
+  if (command === "capture" || command === "capture-batch") {
     if (positional.length !== 2) throw new InputError(USAGE);
     if (!flags.widths || !flags.widths.length || flags.widths.some((w) => !Number.isInteger(w) || w < 100 || w > 4000)) {
       throw new InputError("--widths 要給 100～4000 的整數，以逗號分隔，例如 --widths 320,768,1440");
     }
     if (!Number.isInteger(flags.height) || flags.height < 100) throw new InputError("--height 要給 100 以上的整數");
     if (!Number.isFinite(flags.wait) || flags.wait < 0) throw new InputError("--wait 要給 0 以上的毫秒數");
+    if (command === "capture-batch") return captureBatch(path.resolve(positional[0]), path.resolve(positional[1]), flags);
     return capture(positional[0], path.resolve(positional[1]), flags);
   }
-  if (command === "compare") {
+  if (command === "compare" || command === "compare-batch") {
     if (positional.length !== 2) throw new InputError(USAGE);
-    return compare(path.resolve(positional[0]), path.resolve(positional[1]), flags);
+    const compareFn = command === "compare-batch" ? compareBatch : compare;
+    return compareFn(path.resolve(positional[0]), path.resolve(positional[1]), flags);
   }
   throw new InputError(USAGE);
 }

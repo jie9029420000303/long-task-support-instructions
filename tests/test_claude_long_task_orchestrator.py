@@ -1053,6 +1053,32 @@ class SharedSpecTests(unittest.TestCase):
                 self.assertIn(marker, agent, f"{effort}: {marker}")
 
     @canonical_only
+    def test_both_adapters_carry_the_visual_pipeline_rule(self):
+        # 2026-10-15～16 GDB：時間不是花在閒置，而是所有截圖排在唯一的瀏覽器控制上、一次修一個點、
+        # 每個效能包重搭量測環境。只改一個平台，另一個平台的視覺任務照舊排隊；規則沒寫進子代理定義，
+        # 派出去的查核仍逐張用互動瀏覽器重拍，監督也看不出執行端在逐點派修。
+        spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
+        for marker in ("28. 畫面成品查核", "批次截圖腳本一次截完", "先掃完全部頁面", "同一份樣式來源", "量測腳本與固定設定", "契約明文指定截圖用的瀏覽器或工具時照契約"):
+            self.assertIn(marker, spec, marker)
+        codex = REPOSITORY / "codex" / ".agents" / "skills"
+        claude = ADAPTER / "skills"
+        for orchestrator in (claude / "long-task-orchestrator", codex / "goal-orchestrator"):
+            text = "".join((orchestrator / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md"))
+            for marker in ("## 畫面成品查核流程", "#畫面成品查核流程", "瀏覽器能力", "capture-batch", "compare-batch", "--top", "一趟走完", "先掃完", "同一份樣式來源", "效能量測"):
+                self.assertIn(marker, text, f"{orchestrator.name}: {marker}")
+        for supervisor in (claude / "long-task-supervisor", codex / "long-task-supervisor"):
+            acceptance = (supervisor / "references" / "acceptance.md").read_text(encoding="utf-8")
+            for marker in ("第一次全面掃描完成前就逐點派修", "沿用第一個效能包的量測腳本"):
+                self.assertIn(marker, acceptance, f"{supervisor}: {marker}")
+        for effort in ("medium", "high", "xhigh"):
+            agent = (AGENTS / f"lt-visual-checker-{effort}.md").read_text(encoding="utf-8")
+            for marker in ("pixel-diff.js capture-batch", "--top", "不再用 Browser pane 逐張重拍", "內容狀態"):
+                self.assertIn(marker, agent, f"{effort}: {marker}")
+        for effort in ("low", "medium", "high"):
+            agent = (AGENTS / f"lt-ui-tester-{effort}.md").read_text(encoding="utf-8")
+            self.assertIn("一趟走完", agent, effort)
+
+    @canonical_only
     def test_both_guards_enforce_the_same_completion_gate(self):
         # 放行紀律是共同語意：兩個平台的守門工具對同一份狀態檔必須給出同一個結論，否則同一個任務換平台就換標準。
         codex_guard = REPOSITORY / "codex" / ".agents" / "skills" / "goal-orchestrator" / "scripts" / "sidecar-guard.py"
