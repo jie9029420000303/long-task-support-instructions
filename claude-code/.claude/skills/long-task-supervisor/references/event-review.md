@@ -1,6 +1,6 @@
 # 單次事件處理
 
-只處理 context 指定的事件。STOP、已處理或事件已換就結束；context 回 `queued:true` 時，該事件還排在別的事件後面：照 `next` 先處理目前事件（沒有待決事件而接收器沒在跑時才重掛，不掛第二個），排隊事件決策後依序送到。不重建 run、不重讀整段聊天。`supervise.cjs context RUN EVENT_ID` 已含事件、brief、授權來源、本頁規則與 decisionPath；只有實際遇到授權問題才執行 `supervise.cjs authorization RUN`，問題與送驗事件直接附有效授權及來源；一般進度只補缺少的直接證據，不重讀 SKILL、全部驗收或自己的歷史。送驗才讀完整有效契約，逐條獨立驗證同版候選，不能採信自報 PASS；換版沿用的項目查沿用紀錄、原始變更與像素比對，不重開瀏覽器重驗（[換版與有效證據](acceptance.md#換版與有效證據)）。文件類成品只送驗兩次：依 [acceptance.md](acceptance.md#品質方向與正式達標)，.md 送到時查內容並做盲測，用 reply 回覆通過或一次列完的問題清單，不擋下游；整包送到時核對衍生件並做唯一一次外觀檢查，全部條件通過才 accept，否則 reject 並一次列完；重送只驗差異與上次列出的項目。
+只處理 context 指定的事件。STOP、已處理或事件已換就結束；context 回 `queued:true` 時，該事件還排在別的事件後面：照 `next` 先處理目前事件（沒有待決事件而接收器沒在跑時才重掛，不掛第二個），排隊事件決策後依序送到。不重建 run、不重讀整段聊天。`supervise.cjs context RUN EVENT_ID` 已含事件、brief、授權來源、本頁規則與 decisionPath；只有實際遇到授權問題才執行 `supervise.cjs authorization RUN`，問題與送驗事件直接附有效授權及來源；一般進度只補缺少的直接證據，不重讀 SKILL、全部驗收或自己的歷史。送驗才讀完整有效契約，逐條獨立驗證同版候選，不能採信自報 PASS；換版沿用的項目查影響清單、沿用紀錄、原始變更與像素比對報告，不重開瀏覽器重驗；最終放行的送驗由監督分功能段落全套驗收、不沿用（[換版與有效證據](acceptance.md#換版與有效證據)）。文件類成品只送驗兩次：依 [acceptance.md](acceptance.md#品質方向與正式達標)，.md 送到時查內容並做盲測，用 reply 回覆通過或一次列完的問題清單，不擋下游；整包送到時核對衍生件並做唯一一次外觀檢查，全部條件通過才 accept，否則 reject 並一次列完；重送只驗差異與上次列出的項目。
 
 進度正常或指示已被執行：observe，不傳「收到」、不催促。有可行下一步或證據不足：reply，指出具體工作／問題。派工事件送出前跑 dispatch-preflight，進度事件跑 progress-preflight，過期不送。silence／wait_changed 若只剩已核對等待，observe 另附 wait；不能把等待當驗收通過。阻塞只停該動作，其餘已授權工作繼續。
 
