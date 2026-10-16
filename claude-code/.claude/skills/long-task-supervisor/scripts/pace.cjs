@@ -70,6 +70,12 @@ function baseline({model,estimatedOutputTokens,toolMinutes=0},measured){
   return {model:model||null,estimatedOutputTokens:tokens,tokensPerSecond:known.tokensPerSecond,toolMinutes:Number(toolMinutes)||0,minutes,
     basis:`${tokens} output tokens ÷ ${known.tokensPerSecond} tokens/s (${known.source}, ${known.samples} samples)`+(toolMinutes?` + ${toolMinutes} min measured tool time`:'')};
 }
+// The executor's own main-line package (handle "main", e.g. real-event checks in the one interactive browser) is not
+// a test process: its work is the executor's own tool calls. Its activity is the later of its evidence files and the
+// executor's last real work in its transcript (polling excluded), and it never counts as a stalled process; a main
+// line that really stops is the idle-with-work check's job. 2026-10-16 GDB: main kept driving the browser while its
+// evidence list lagged, and 6 process_stalled wakes in 7 hours read only evidence file mtimes.
+const mainLine=handle=>handle==='main';
 // A process package (tests, product runs) shows activity through its evidence files, such as its log.
 function evidenceActivity(item){
   let latest=0;
@@ -100,14 +106,15 @@ function sleptWithin(sleeps,from,to){
 // In-flight packages against their baselines. An agent package is recomputed from its own transcript; a
 // process package can only carry the executor's measured baseline. Elapsed time excludes machine sleep, and an
 // agent whose transcript already ended is finished (the snapshot is stale), not overdue.
-function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
+function inFlight(binding,snapshot,now=Date.now(),sleeps=[],mainWorkAt=null){
   const runs=agentRuns(binding),measured=speed(runs),byId=new Map(runs.map(run=>[run.id,run]));
   for(const run of runs)if(run.workflow&&run.label)byId.set(run.workflow+':'+run.label,run);
   const packages=(snapshot?.packages?.inFlight||[]).map(item=>{
-    const agentId=/^(?:agent|workflow):(.+)$/.exec(item.handle||'')?.[1],run=agentId?byId.get(agentId):null,declared=item.baseline||null;
+    const agentId=/^(?:agent|workflow):(.+)$/.exec(item.handle||'')?.[1],main=!agentId&&mainLine(item.handle),run=agentId?byId.get(agentId):null,declared=item.baseline||null;
     const startedAt=Date.parse(declared?.startedAt)||run?.startedAt||null;
     const own=run?baseline({model:run.model||declared?.model,estimatedOutputTokens:declared?.estimatedOutputTokens,toolMinutes:declared?.toolMinutes},measured):null;
-    const minutes=declared?.minutes||own?.minutes||null,process=!agentId,activity=process?evidenceActivity(item):run?.lastAt;
+    const minutes=declared?.minutes||own?.minutes||null,process=!agentId&&!main;
+    const activity=main?Math.max(evidenceActivity(item)||0,Number(mainWorkAt)||0)||null:process?evidenceActivity(item):run?.lastAt;
     const finished=Boolean(run?.done),alive=process?processAlive(item):null;
     const slept=startedAt?sleptWithin(sleeps,startedAt,now):0;
     const elapsed=startedAt?round((now-startedAt-slept)/60000):null;
@@ -115,10 +122,10 @@ function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
     return {id:item.id,handle:item.handle,startedAt:startedAt?new Date(startedAt).toISOString():null,elapsedMinutes:elapsed,
       baselineMinutes:minutes,ratio:minutes&&elapsed!==null&&!finished?round(elapsed/minutes):null,executorBaselineMinutes:declared?.minutes??null,
       supervisorBaselineMinutes:own?.minutes??null,mismatch,outputTokens:run?.outputTokens??null,
-      lastActivityAt:activity?new Date(activity).toISOString():null,process,alive,finished,sleptMinutes:round(slept/60000),baselineMissing:!minutes&&!finished};
+      lastActivityAt:activity?new Date(activity).toISOString():null,process,main,alive,finished,sleptMinutes:round(slept/60000),baselineMissing:!minutes&&!finished};
   });
-  // A live process counts as activity even while it writes nothing.
-  const processActivityAt=Math.max(0,...packages.filter(item=>item.process&&(item.lastActivityAt||item.alive)).map(item=>item.alive?now:Date.parse(item.lastActivityAt)))||null;
+  // A live process counts as activity even while it writes nothing; so does the main line's own work.
+  const processActivityAt=Math.max(0,...packages.filter(item=>(item.process||item.main)&&(item.lastActivityAt||item.alive)).map(item=>item.alive?now:Date.parse(item.lastActivityAt)))||null;
   // Subagents refused for the subscription limit; the clock waits for the reset instead of calling them stalled.
   const rateLimits=runs.filter(run=>run.rateLimit&&!run.done).map(run=>({id:run.id,rateLimit:run.rateLimit}));
   return {speed:measured,packages,processActivityAt,...(rateLimits.length?{rateLimits}:{})};
@@ -157,8 +164,9 @@ if(require.main===module){
       const value=baseline({model:option('model'),estimatedOutputTokens:Number(option('tokens')),toolMinutes:Number(option('tool-minutes')||0)},speed(agentRuns(binding)));
       console.log(JSON.stringify({...value,startedAt:new Date().toISOString()}));
     }else{
-      let snapshot=null;try{snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{}
-      console.log(JSON.stringify(inFlight(binding,snapshot)));
+      let snapshot=null,state={};try{snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{}
+      try{state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'),'utf8'))||{};}catch{}
+      console.log(JSON.stringify(inFlight(binding,snapshot,Date.now(),state.sleeps||[],state.lastExecutorWorkAt)));
     }
   }catch(error){console.error(error.message);process.exitCode=1;}
 }

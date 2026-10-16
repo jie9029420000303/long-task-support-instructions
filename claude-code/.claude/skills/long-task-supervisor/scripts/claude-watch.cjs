@@ -185,7 +185,7 @@ function scanSupervisor(){
   }
 }
 function snapshotNow(){try{return read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{return null;}}
-function paceNow(snapshot=snapshotNow()){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps);}
+function paceNow(snapshot=snapshotNow()){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps,state.lastExecutorWorkAt);}
 // A foreground command that has no result after 5 minutes and no process running it never started: on the GDB
 // run it sat behind a permission prompt for 93 minutes. Only the user can clear that, so it is told at once.
 function blockedTools(){

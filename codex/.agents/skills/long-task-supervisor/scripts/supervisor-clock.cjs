@@ -151,7 +151,7 @@ function kernelSleep(state,binding){
   }catch{}
 }
 function snapshotOf(run,binding){try{return JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{return null;}}
-function paceNow(run,binding,state,snapshot=snapshotOf(run,binding)){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps);}
+function paceNow(run,binding,state,snapshot=snapshotOf(run,binding)){return pace.inFlight(binding,snapshot,Date.now(),state.sleeps,state.lastExecutorWorkAt);}
 // Rule A (Jay 2026-10-13): the highest overdue tier, 1.5x or 3x, a package has reached, or null. Whether it still
 // produces does not matter; a finished package has no ratio and never counts.
 function overdueTier(item){return [...OVERDUE_TIERS].reverse().find(tier=>item.ratio>=tier)??null;}

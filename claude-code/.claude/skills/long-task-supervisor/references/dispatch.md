@@ -39,7 +39,7 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 
 真實測試資源（例如正式主機的排查名額、測試身分）用 `capacity.resources:[{key,slots}]` 宣告總名額，各包用 `uses:[{key,units}]` 宣告占用。在途包的占用合計低於名額，同時有可立即開跑的包（標了 `independent`、`safe`、依賴已全部完成、排他資源未被占用、所需名額放得下的就緒包，或只因資源衝突受阻的包）也要用同一資源時，背景程式通知監督評估能否並行；同一資源的這組可派包沒變就不再通知。`capacity.verified` 仍只表示 AI 子代理席位。
 
-在途包的 `handle`：單獨派出的子代理寫 `agent:<agentId>`；執行端用 `long-task-batch` 工作流程派出的寫 `workflow:<runId>:<工作包 id>`，監督從工作流程紀錄（`subagents/workflows/<runId>/journal.jsonl` 的代理標籤）找到它；資源帳本啟動的程序寫 `resource:<id>`。每次 `dispatch.cjs write` 另在 run 目錄附加一行 `dispatch-history.jsonl`（時間、activity、就緒／在途／受阻包與未通過條件），供事後量「有工作卻空等」的時間。
+在途包的 `handle`：單獨派出的子代理寫 `agent:<agentId>`；執行端用 `long-task-batch` 工作流程派出的寫 `workflow:<runId>:<工作包 id>`，監督從工作流程紀錄（`subagents/workflows/<runId>/journal.jsonl` 的代理標籤）找到它；資源帳本啟動的程序寫 `resource:<id>`。主線自己做的工作包（例如在Browser pane走真實操作）填 `main`：監督把執行對話自己紀錄裡最後一次實際工作（輪詢不算）與 evidence 的修改時間都算成這包的活動，不會因為新存檔點還沒列進 evidence 就判成程序停住；主線真的停下，由「執行端與子代理都停了 5 分鐘」那條叫醒。每次 `dispatch.cjs write` 另在 run 目錄附加一行 `dispatch-history.jsonl`（時間、activity、就緒／在途／受阻包與未通過條件），供事後量「有工作卻空等」的時間。
 
 `inFlight` 每筆附 AI 時程基準 `baseline`：`minutes`（基準分鐘）、`startedAt`、`basis`（算法與來源）；代理工作另附 `model`、`estimatedOutputTokens`、`tokensPerSecond`、`toolMinutes`，用 `node "<skill>/scripts/pace.cjs" estimate "<RUN>" --model <模型> [--tokens <預估輸出 token>] [--tool-minutes <已量測工具分鐘>]` 產生。測試、主機程序等非代理工作以本場實測時長填 `minutes`，`basis` 寫明量測來源。不用人類開發經驗估時；沒有基準的在途包會叫醒監督一次，請執行端補上。同一包換新階段或範圍擴大（例如續派同一子代理做下一階段）時，當下用 `pace.cjs estimate` 估新增的工作並寫入新的 `baseline`：`startedAt` 改為重估時間，`basis` 寫明重估原因，不沿用前一階段的基準；監督把它當新基準，重新計算 1.5 倍與 3 倍的超時叫醒；但已叫醒過的那一級，只有新基準算出的叫醒時間（`startedAt` 加「級數 × 分鐘」）比該級先前每次叫醒時都晚才再叫醒，基準改小或只是重算數字不重叫。能獨立的新範圍優先拆成新工作包。
 

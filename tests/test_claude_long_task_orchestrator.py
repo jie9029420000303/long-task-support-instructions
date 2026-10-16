@@ -1059,18 +1059,24 @@ class SharedSpecTests(unittest.TestCase):
         # 派出去的查核仍逐張用互動瀏覽器重拍，監督也看不出執行端在逐點派修。
         spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
         # v0.32.0：GDB 實測平台瀏覽器截圖排版與批次截圖一致、但把高彩度顏色調淡；首次採用要抽查，顏色以批次截圖判定。
-        for marker in ("28. 畫面成品查核", "批次截圖腳本一次截完", "先掃完全部頁面", "同一份樣式來源", "量測腳本與固定設定", "契約明文指定截圖用的瀏覽器或工具時照契約", "以平台瀏覽器同版截圖抽查", "顏色與對比以批次截圖判定"):
+        # v0.33.0：截圖改批次後瓶頸移到看圖，一個子代理看 50 張首屏約 30 分鐘、另有 2 個名額閒著；規則只寫「可以」並行就不會被採用。
+        for marker in ("28. 畫面成品查核", "批次截圖腳本一次截完", "先掃完全部頁面", "同一份樣式來源", "量測腳本與固定設定", "契約明文指定截圖用的瀏覽器或工具時照契約", "以平台瀏覽器同版截圖抽查", "顏色與對比以批次截圖判定", "預設按頁分給 2～3 個查核子代理並行判讀"):
             self.assertIn(marker, spec, marker)
         codex = REPOSITORY / "codex" / ".agents" / "skills"
         claude = ADAPTER / "skills"
         for orchestrator in (claude / "long-task-orchestrator", codex / "goal-orchestrator"):
             text = "".join((orchestrator / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md"))
-            for marker in ("## 畫面成品查核流程", "#畫面成品查核流程", "瀏覽器能力", "capture-batch", "compare-batch", "--top", "一趟走完", "先掃完", "同一份樣式來源", "效能量測", "渲染一致性抽查", "顏色與對比以批次截圖判定"):
+            for marker in ("## 畫面成品查核流程", "#畫面成品查核流程", "瀏覽器能力", "capture-batch", "compare-batch", "--top", "一趟走完", "先掃完", "同一份樣式來源", "效能量測", "渲染一致性抽查", "顏色與對比以批次截圖判定", "看圖依圖量分工", "預設按頁分給 2～3 個子代理並行看"):
                 self.assertIn(marker, text, f"{orchestrator.name}: {marker}")
         for supervisor in (claude / "long-task-supervisor", codex / "long-task-supervisor"):
             acceptance = (supervisor / "references" / "acceptance.md").read_text(encoding="utf-8")
-            for marker in ("第一次全面掃描完成前就逐點派修", "沿用第一個效能包的量測腳本"):
+            for marker in ("第一次全面掃描完成前就逐點派修", "沿用第一個效能包的量測腳本", "卻只派一個查核子代理"):
                 self.assertIn(marker, acceptance, f"{supervisor}: {marker}")
+            # v0.33.0：主線自己做的工作包（handle 為 main）被當成測試程序、只看證據檔修改時間，GDB 7 小時誤報停住 6 次。
+            dispatch = (supervisor / "references" / "dispatch.md").read_text(encoding="utf-8")
+            self.assertIn("填 `main`", dispatch, str(supervisor))
+            runtime = (supervisor / "references" / "runtime.md").read_text(encoding="utf-8")
+            self.assertIn("的主線包不算程序", runtime, str(supervisor))
         for effort in ("medium", "high", "xhigh"):
             agent = (AGENTS / f"lt-visual-checker-{effort}.md").read_text(encoding="utf-8")
             for marker in ("pixel-diff.js capture-batch", "--top", "不再用 Browser pane 逐張重拍", "內容狀態", "顏色與對比以批次截圖判定"):

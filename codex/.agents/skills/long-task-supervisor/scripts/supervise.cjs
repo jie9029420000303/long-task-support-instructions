@@ -113,7 +113,7 @@ function executorTail(file, count = 3) {
 // executor's latest words and the dispatch picture, instead of probing file by file.
 function brief() {
   const {binding} = load(), state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
-  const paced = pace.inFlight(binding, snapshot, Date.now(), state.sleeps), iso = value => value ? new Date(value).toISOString() : null;
+  const paced = pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt), iso = value => value ? new Date(value).toISOString() : null;
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
   return {status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
@@ -219,7 +219,7 @@ function resume() {
 function refreshDashboard(binding) {
   try {
     const state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
-    require('./dashboard.cjs').write(run, {binding, state, snapshot, paced:pace.inFlight(binding, snapshot, Date.now(), state.sleeps),
+    require('./dashboard.cjs').write(run, {binding, state, snapshot, paced:pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt),
       alive:status().active, paused:fs.existsSync(path.join(run, 'PAUSED.json'))});
   } catch {}
 }

@@ -118,6 +118,12 @@ function agentRef(handle){
   const value=/^agent:(.+)$/.exec(handle||'')?.[1]||handle||'';
   return value.startsWith('/root/')||/^[0-9a-f]{8}-[0-9a-f]{4}-/.test(value)?value:null;
 }
+// The executor's own main-line package (handle "main", e.g. real-event checks in the one platform browser) is not a
+// test process: its work is the executor's own tool calls. Its activity is the later of its evidence files and the
+// executor's last real work in its own rollout (polling excluded), and it never counts as a stalled process; a main
+// line that really stops is the idle-with-work check's job. 2026-10-16 GDB: main kept driving the browser while its
+// evidence list lagged, and 6 process_stalled wakes in 7 hours read only evidence file mtimes.
+const mainLine=handle=>handle==='main';
 // A process package (tests, product runs) shows activity through its evidence files, such as its log.
 function evidenceActivity(item){
   let latest=0;
@@ -148,14 +154,15 @@ function sleptWithin(sleeps,from,to){
 // In-flight packages against their baselines. An agent package is recomputed from its own rollout; a process
 // package can only carry the executor's measured baseline. Elapsed time excludes machine sleep, and an agent
 // whose rollout already completed its turn is finished (the snapshot is stale), not overdue.
-function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
+function inFlight(binding,snapshot,now=Date.now(),sleeps=[],mainWorkAt=null){
   const runs=agentRuns(binding),measured=speed(runs),latest=new Map();
   for(const run of runs)for(const key of [run.id,run.path])if(key&&(!latest.has(key)||latest.get(key).startedAt<run.startedAt))latest.set(key,run);
   const packages=(snapshot?.packages?.inFlight||[]).map(item=>{
-    const ref=agentRef(item.handle),run=ref?latest.get(ref):null,declared=item.baseline||null;
+    const ref=agentRef(item.handle),main=!ref&&mainLine(item.handle),run=ref?latest.get(ref):null,declared=item.baseline||null;
     const startedAt=Date.parse(declared?.startedAt)||run?.startedAt||null;
     const own=run?baseline({model:run.model||declared?.model,estimatedOutputTokens:declared?.estimatedOutputTokens,toolMinutes:declared?.toolMinutes},measured):null;
-    const minutes=declared?.minutes||own?.minutes||null,process=!ref,activity=process?evidenceActivity(item):run?.lastAt;
+    const minutes=declared?.minutes||own?.minutes||null,process=!ref&&!main;
+    const activity=main?Math.max(evidenceActivity(item)||0,Number(mainWorkAt)||0)||null:process?evidenceActivity(item):run?.lastAt;
     const finished=Boolean(run?.done),alive=process?processAlive(item):null;
     const slept=startedAt?sleptWithin(sleeps,startedAt,now):0;
     const elapsed=startedAt?round((now-startedAt-slept)/60000):null;
@@ -163,10 +170,10 @@ function inFlight(binding,snapshot,now=Date.now(),sleeps=[]){
     return {id:item.id,handle:item.handle,startedAt:startedAt?new Date(startedAt).toISOString():null,elapsedMinutes:elapsed,
       baselineMinutes:minutes,ratio:minutes&&elapsed!==null&&!finished?round(elapsed/minutes):null,executorBaselineMinutes:declared?.minutes??null,
       supervisorBaselineMinutes:own?.minutes??null,mismatch,outputTokens:run?.outputTokens??null,
-      lastActivityAt:activity?new Date(activity).toISOString():null,process,alive,finished,sleptMinutes:round(slept/60000),baselineMissing:!minutes&&!finished};
+      lastActivityAt:activity?new Date(activity).toISOString():null,process,main,alive,finished,sleptMinutes:round(slept/60000),baselineMissing:!minutes&&!finished};
   });
-  // A live process counts as activity even while it writes nothing.
-  const processActivityAt=Math.max(0,...packages.filter(item=>item.process&&(item.lastActivityAt||item.alive)).map(item=>item.alive?now:Date.parse(item.lastActivityAt)))||null;
+  // A live process counts as activity even while it writes nothing; so does the main line's own work.
+  const processActivityAt=Math.max(0,...packages.filter(item=>(item.process||item.main)&&(item.lastActivityAt||item.alive)).map(item=>item.alive?now:Date.parse(item.lastActivityAt)))||null;
   const subagentActivityAt=Math.max(0,...runs.map(run=>run.lastAt||0))||null;
   return {speed:measured,packages,processActivityAt,subagentActivityAt};
 }
@@ -204,9 +211,9 @@ if(require.main===module){
       const value=baseline({model:option('model'),estimatedOutputTokens:Number(option('tokens')),toolMinutes:Number(option('tool-minutes')||0)},speed(agentRuns(binding)));
       console.log(JSON.stringify({...value,startedAt:new Date().toISOString()}));
     }else{
-      let snapshot=null,sleeps=[];try{snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{}
-      try{sleeps=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'),'utf8')).sleeps||[];}catch{}
-      console.log(JSON.stringify(inFlight(binding,snapshot,Date.now(),sleeps)));
+      let snapshot=null,state={};try{snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));}catch{}
+      try{state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'),'utf8'))||{};}catch{}
+      console.log(JSON.stringify(inFlight(binding,snapshot,Date.now(),state.sleeps||[],state.lastExecutorWorkAt)));
     }
   }catch(error){console.error(error.message);process.exitCode=1;}
 }
