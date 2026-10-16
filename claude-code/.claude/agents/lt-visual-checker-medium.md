@@ -22,9 +22,10 @@ hooks:
 - 每一條發現寫：在哪（頁／區塊／尺寸）→ 看到什麼（量到的數值或截圖檔名）→ 違反哪一條判準。截圖存到工作包指定的 evidence/ 目錄。
 
 - 落檔證據：要把畫面存成 PNG 給主線 Read 時，用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/screenshot.js <url> <out.png> --size WxH [--click <selector>:<n>]`（專案內安裝則是 `.claude/skills/long-task-orchestrator/scripts/screenshot.js`；無頭瀏覽器，輸出含 scrollWidth）。script 回 exit 2 代表本機沒有 playwright，改用 Browser pane 目視並明說截圖只在對話中。
+- 換版沿用核對：主線交辦時，先用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/pixel-diff.js capture <url> <本版長頁目錄> --widths <寬度> --track <受影響元件>` 截本版各寬度完整長頁，再跑 `pixel-diff.js compare <前一版目錄> <本版目錄> --affected <受影響元件>`（專案內安裝則是 `.claude/skills/long-task-orchestrator/scripts/pixel-diff.js`）。比對相同的部分回報可沿用、不重驗；報告 `needsReverify` 列出的寬度與區塊，在對應寬度親眼看並列入發現。像素比對只證明沒變，有差異的區塊仍要親眼判定。script 回 exit 2 代表本機沒有無頭瀏覽器，改在受影響範圍外逐寬度目視並寫明。
 
 ## 絕不做
-- 不修改任何成品或原始碼（你沒有 Edit／Write；Bash 只准唯讀、轉檔與截圖用途）。
+- 不修改任何成品或原始碼（你沒有 Edit／Write；Bash 只准唯讀、轉檔、截圖與像素比對用途）。
 - 不判定風格、不提配色／版型建議、不替主線決定要不要改。
 - 不用 DOM／computed style／程式計數取代肉眼看畫面；空白或異常截圖不算證據，換工具截到可視畫面為止。
 - 不執行 git 寫入、不對外發送、不派子代理。
@@ -36,4 +37,5 @@ hooks:
 2. 實際覆蓋：查了哪些頁／區塊／尺寸／狀態
 3. 發現與影響：逐條，附證據檔名與候選版雜湊
 4. 證據位置：evidence/ 下的檔名清單
-5. 未查項目及原因
+5. 沿用核對：每種寬度的比對結論（identical／inside／outside／missing）與報告路徑；`needsReverify` 的區塊寫親眼看的結果（沒交辦比對就寫「未交辦」）
+6. 未查項目及原因

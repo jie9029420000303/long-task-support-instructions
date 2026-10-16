@@ -1008,27 +1008,49 @@ class SharedSpecTests(unittest.TestCase):
 
     @canonical_only
     def test_both_adapters_carry_the_evidence_carryover_rule(self):
-        # 2026-10-16 GDB Gate 2：三處小修正讓整套視覺查核（約 2.8 小時、上億 token）從頭重跑，
-        # 因為舊規則要契約另行授權才可沿用。新規則預設只重驗受影響部分，但有兩道安全網：
-        # 每種寬度的完整長頁像素比對（共用樣式檔一改雜湊就變，雜湊證明不了畫面沒變），
-        # 以及最終放行前的完整同版回歸。少了任一道，中途沿用就可能把拼接的證據帶進最終 PASS；
-        # 只改一個平台，另一個平台的長任務仍會每次換版整套重跑。
+        # 2026-10-16 GDB Gate 2：三處小修正讓整套視覺查核（約 2.8 小時、上億 token）從頭重跑。
+        # v0.29.0 改成預設只重驗受影響部分；v0.30.0 依使用者同日補充再收斂：連帶範圍（引用與呼叫鏈、
+        # 研究的來源與截止時點）一定要追，但執行端不整套重跑，最終由監督分功能段落全套驗收一次。
+        # 沒追連帶範圍，程式與研究的沿用就沒有依據；執行端與監督各跑一次全套，最後一關等於做兩遍；
+        # 像素比對只寫在規則裡、沒有工具，執行端每次換版都得臨時自製；只改一個平台，另一個平台照舊流程跑。
         spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
-        for marker in ("未受影響項目的舊證據預設沿用", "像素比對", "完整同版回歸", "判斷不出影響時，該範圍整套重驗"):
+        for marker in (
+            "執行端只重驗受影響範圍、其連帶範圍及既定必要回歸",
+            "未受影響項目的舊證據預設沿用",
+            "沿引用與呼叫鏈",
+            "截止時點往後移時",
+            "改到共用基礎",
+            "判斷不出影響時，重驗該功能段落",
+            "自動化測試每版整套跑",
+            "scripts/pixel-diff.js",
+            "分功能段落做一次全套驗收",
+            "執行端不另跑全套人工回歸",
+        ):
             self.assertIn(marker, spec, marker)
-        self.assertNotIn("未變依賴的舊證據只能在契約或最新使用者授權允許", spec)
+        for gone in ("未變依賴的舊證據只能在契約或最新使用者授權允許", "對最終候選版做一次完整同版回歸", "該範圍整套重驗"):
+            self.assertNotIn(gone, spec, gone)
         codex = REPOSITORY / "codex" / ".agents" / "skills"
         claude = ADAPTER / "skills"
         for orchestrator in (claude / "long-task-orchestrator", codex / "goal-orchestrator"):
             text = "".join((orchestrator / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md"))
-            for marker in ("附沿用核對後沿用", "完整長頁巡檢", "像素比對", "完整同版回歸"):
+            for marker in ("附沿用核對後沿用", "連帶範圍", "pixel-diff.js capture", "pixel-diff.js compare", "needsReverify", "沿用核對", "主線不另跑全套人工回歸"):
                 self.assertIn(marker, text, f"{orchestrator.name}: {marker}")
+            self.assertNotIn("做一次完整同版回歸", text, orchestrator.name)
+            self.assertTrue((orchestrator / "scripts" / "pixel-diff.js").is_file(), orchestrator.name)
         for supervisor in (claude / "long-task-supervisor", codex / "long-task-supervisor"):
             acceptance = (supervisor / "references" / "acceptance.md").read_text(encoding="utf-8")
-            for marker in ("未受影響案例的舊證據預設沿用", "像素比對", "沿用項不必重開瀏覽器重驗", "完整同版回歸"):
+            for marker in ("未受影響案例的舊證據預設沿用", "影響清單漏追連帶範圍就退件", "needsReverify", "沿用項不必重開瀏覽器重驗", "分功能段落做一次全套獨立驗收"):
                 self.assertIn(marker, acceptance, f"{supervisor}: {marker}")
             review = (supervisor / "references" / "event-review.md").read_text(encoding="utf-8")
-            self.assertIn("換版沿用的項目查沿用紀錄", review, str(supervisor))
+            self.assertIn("換版沿用的項目查影響清單", review, str(supervisor))
+            self.assertIn("最終放行的送驗由監督分功能段落全套驗收", review, str(supervisor))
+            skill = (supervisor / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("最終放行由監督分功能段落全套驗收", skill, str(supervisor))
+            self.assertNotIn("最終放行前須有完整同版回歸", skill, str(supervisor))
+        for effort in ("medium", "high", "xhigh"):
+            agent = (AGENTS / f"lt-visual-checker-{effort}.md").read_text(encoding="utf-8")
+            for marker in ("pixel-diff.js capture", "pixel-diff.js compare", "沿用核對", "有差異的區塊仍要親眼判定"):
+                self.assertIn(marker, agent, f"{effort}: {marker}")
 
     @canonical_only
     def test_both_guards_enforce_the_same_completion_gate(self):
