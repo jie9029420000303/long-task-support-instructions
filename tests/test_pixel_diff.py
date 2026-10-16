@@ -3,10 +3,13 @@
 為什麼重要：換版時「受影響範圍外沒變」是沿用前一版肉眼查核的唯一依據（共用規格不變量 7）。
 該判 outside 卻判成 identical／inside，舊查核就被錯誤沿用；同一版截兩次就不一樣，每次換版都會被
 誤判成要重驗、省不到時間；兩個平台的工具內容不同，同一個任務換平台就換判準。
+批次模式（capture-batch／compare-batch）是畫面成品查核流程的靜態截圖通道：一次截完全部頁面、寬度與內容狀態，
+不占平台瀏覽器；它若漏頁、把只在某些頁出現的受影響元件當成錯誤，或一頁失敗就整批作廢，執行端又會回去逐頁手動截。
 本機沒有 playwright 或 chrome-headless-shell 時，實際截圖比對的測試會明確標為 skipped，不算通過。
 """
 import json
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -85,6 +88,87 @@ class PixelDiffBehaviourTests(unittest.TestCase):
             summary = json.loads(result.stdout)
             report = json.loads(Path(summary["report"]).read_text(encoding="utf-8"))
         return result, report
+
+    def batch_source(self, pages):
+        type(self).counter += 1
+        name = "b%03d" % self.counter
+        folder = self.tmp / (name + "-src")
+        folder.mkdir()
+        listing = []
+        for page_name, html, *options in pages:
+            (folder / (page_name + ".html")).write_text(html, encoding="utf-8")
+            listing.append({"name": page_name, "url": page_name + ".html", **(options[0] if options else {})})
+        (folder / "list.json").write_text(json.dumps(listing, ensure_ascii=False), encoding="utf-8")
+        return folder / "list.json", self.tmp / name
+
+    def capture_batch(self, pages, widths="320,800", *extra):
+        listing, out = self.batch_source(pages)
+        result = subprocess.run([NODE, str(self.tool), "capture-batch", str(listing), str(out), "--widths", widths, "--wait", "50", *extra], capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return out
+
+    def compare_batch(self, old, new, *extra):
+        result = subprocess.run([NODE, str(self.tool), "compare-batch", str(old), str(new), *extra], capture_output=True, text=True, timeout=300)
+        report = None
+        if result.returncode in (0, 1):
+            report = json.loads(Path(json.loads(result.stdout)["report"]).read_text(encoding="utf-8"))
+        return result, report
+
+    def test_batch_captures_every_page_in_one_run_with_first_screen(self):
+        # 契約常要求每種寬度的首屏與完整長頁；逐頁呼叫會逼執行端自寫包裝程式，首屏又得另外開瀏覽器拍。
+        out = self.capture_batch([("首頁_正常內容", page()), ("FAQ_短內容", page(clock="short"))], "320,800", "--top")
+        index = json.loads((out / "batch.json").read_text(encoding="utf-8"))
+        self.assertEqual([p["name"] for p in index["pages"]], ["首頁_正常內容", "FAQ_短內容"])
+        self.assertFalse([p for p in index["pages"] if p.get("error")])
+        for entry in index["pages"]:
+            manifest = json.loads((out / entry["dir"] / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual([w["width"] for w in manifest["widths"]], [320, 800])
+            for w in manifest["widths"]:
+                top = (out / entry["dir"] / w["topFile"]).read_bytes()
+                width, height = struct.unpack(">II", top[16:24])
+                self.assertEqual(width, w["pixelWidth"])
+                self.assertEqual(height, min(900, w["pixelHeight"]))
+
+    def test_batch_compare_reports_each_page_and_pages_missing_on_either_side(self):
+        # 新增或截圖失敗的頁沒有前一版可比，必須整頁重驗；不能因為其他頁相同就整批判可沿用。
+        old = self.capture_batch([("a", page()), ("b", page())], "320")
+        new = self.capture_batch([("a", page()), ("b", page(foot="background:#336")), ("c", page())], "320")
+        result, report = self.compare_batch(old, new)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        verdicts = {p["name"]: p["verdict"] for p in report["pages"]}
+        self.assertEqual(verdicts, {"a": "identical", "b": "outside", "c": "missing"})
+        reverify = {item["name"]: item for item in report["needsReverify"]}
+        self.assertNotIn("a", reverify)
+        self.assertTrue(reverify["c"]["wholePage"])
+        self.assertTrue(any("#foot" in band["sections"] for w in reverify["b"]["widths"] for band in w["bands"]))
+
+    def test_batch_compare_applies_affected_scope_only_where_it_exists(self):
+        # 一個元件只出現在部分頁面是常態；不能因為某頁沒有它就報參數錯誤，但每一頁都沒有就是打錯字。
+        without = page().replace('<div id="changed">x</div>', "")
+        old = self.capture_batch([("a", page()), ("b", without)], "320")
+        new = self.capture_batch([("a", page(changed="height:200px;background:#a48")), ("b", without)], "320")
+        result, report = self.compare_batch(old, new, "--affected", "#changed")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({p["name"]: p["verdict"] for p in report["pages"]}, {"a": "inside", "b": "identical"})
+        result, _ = self.compare_batch(old, new, "--affected", "#nowhere")
+        self.assertEqual(result.returncode, 3)
+
+    def test_batch_keeps_going_when_one_page_fails(self):
+        # 45 張長頁裡一頁的選擇器寫錯，不能讓其他 44 頁白截；失敗頁要記下原因並以參數錯誤結束。
+        listing, out = self.batch_source([("ok", page()), ("bad", page(), {"track": ["##bad"]})])
+        result = subprocess.run([NODE, str(self.tool), "capture-batch", str(listing), str(out), "--widths", "320", "--wait", "50"], capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        index = json.loads((out / "batch.json").read_text(encoding="utf-8"))
+        pages = {p["name"]: p for p in index["pages"]}
+        self.assertTrue(pages["ok"]["widths"])
+        self.assertIn("選擇器無效", pages["bad"]["error"])
+
+    def test_batch_list_with_duplicate_names_is_rejected(self):
+        listing, out = self.batch_source([("a", page())])
+        listing.write_text(json.dumps([{"name": "a", "url": "a.html"}, {"name": "a", "url": "a.html"}]), encoding="utf-8")
+        result = subprocess.run([NODE, str(self.tool), "capture-batch", str(listing), str(out), "--widths", "320"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("頁名重複", result.stderr)
 
     def test_same_page_captured_twice_is_identical_even_with_running_animation(self):
         # 同一版截兩次不同，每次換版都會被誤判成要重驗；無限動畫是最常見的不穩定來源。

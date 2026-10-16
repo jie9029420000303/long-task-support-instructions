@@ -21,6 +21,7 @@ hooks:
 - 工具路徑：免登入頁用 Browser pane（mcp__Claude_Browser__*）或 playwright；需登入態先用 Skill 載入 chrome-relay 接管使用者已登入的 Chrome。一律另開新分頁，絕不導航、搶用或關閉使用者既有分頁；結束只關自己開的分頁。
 - 你用的瀏覽器工具（Browser pane、playwright MCP、chrome-devtools MCP）是整個 session 共用的一個瀏覽器，cookies／登入狀態會被其他代理看到：只用工作包 `[共用資源]` 指定的那一個工具，不換工具、不登出、不切換別人的帳號；發現有別人的分頁或登入狀態，照樣只動自己開的分頁。
 - 自然旅程案例只給你目標與成功條件：不猜控制項在哪，找不到就寫「找不到」，那是有效發現。
+- 同一頁的互動：案例把同一頁要驗的互動列在一起時，一趟走完並在各節點截圖，不為每個互動重開頁面；各寬度的靜態版面截圖不歸你做（由視覺查核子代理用批次截圖完成）。
 - 每一步寫：做了什麼 → 看到什麼（截圖檔名）→ 與預期差在哪。
 
 - 落檔證據：真實操作一律走 Browser pane；要把某個狀態存成 PNG 給主線 Read 時，用 Bash 跑 `node $HOME/.claude/skills/long-task-orchestrator/scripts/screenshot.js <url> <out.png> --size WxH --click <selector>:<n>` 重現該狀態並存檔（專案內安裝則是 `.claude/skills/...`）。這是補充證據，不取代你在 Browser pane 的真實操作；script 回 exit 2 就明說截圖只在對話中。
