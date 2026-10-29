@@ -26,13 +26,15 @@ const NO_EVENT_REVIEW_MS = 60 * 60 * 1000;
 // An open criterion no package names gets 30 minutes before a check (Jay 2026-10-29; was 10): planning the next package
 // often takes longer, and the check only asks while the executor is idle.
 const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 30 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000;
-// The executor is not idle while one of its commands is still running or it registered an external wait (Jay 2026-10-29):
-// silence, idle-with-work and unplanned-criteria checks then stay quiet. Overdue tiers, a blocked command, a stalled
-// process and the hourly no-event check still wake the supervisor.
+// The executor is not idle while one of its commands is still running or the supervisor checked an external wait it
+// waits on (Jay 2026-10-29): silence, idle-with-work and unplanned-criteria checks then stay quiet. A wait the executor
+// only declared (waitMinutes) does not count: the supervisor keeps its own clock (Jay 2026-10-07; 43 of 46 GDB events
+// declared 15-40 minute waits and the supervisor never checked in 6.4 hours). Overdue tiers, a blocked command, a
+// stalled process and the hourly no-event check still wake the supervisor.
 function executorBusy(state) {
   // A call that only polls a background job or sleeps is waiting, not work: ready packages still count as idle capacity.
   return Object.values(state?.openTools || {}).some(item => item && typeof item === 'object' && !item.poll && !item.background) ||
-    Boolean(state?.progressWait) || state?.checkedWait?.kind === 'external_result';
+    state?.checkedWait?.kind === 'external_result';
 }
 // A turn the platform ended with an error that is not a rate limit naming its reset (Jay 2026-10-14): 2 minutes
 // without the executor resuming wakes the supervisor. A background job's notice or a queued message often resumes it

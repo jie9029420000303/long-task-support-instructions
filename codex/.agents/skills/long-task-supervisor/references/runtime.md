@@ -103,11 +103,11 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
  "answer":[{"key":"r24-r21-relogin","choice":"A","quote":"R24R21: A 兩個都重登"}]}
 ```
 
-- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人動手）、major_change（上層規則要先確認的重大變更）；其他類程式拒收，由監督自己決定。kind 只逼監督寫出理由，不證明真的該問。`ask`、`recommend`、`why` 必填，`options` 選填。
+- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人動手）、major_change（上層規則要先確認的重大變更）；其他類程式拒收，由監督自己決定。kind 只逼監督寫出理由，不證明真的該問。 依[預設類別授權](authorization.md#長任務預設類別授權)，有推薦、Git 操作、標明測試的對外發送、開工已授權的帳號密碼／付費／正式部署、開發過程產物的刪除都不登記：paid、credential 只用在開工沒授權的部分，irreversible 只用在改寫 Git 歷史或未授權的正式部署，delete 只用在既有資料，external 只用在不是測試的正式發送。`ask`、`recommend`、`why` 必填，`options` 選填。
 - 同一 key 再 raise 是更新原項；kind、ask、recommend、why、options 完全相同時不算變動，不留歷史、不需重列。已回答或已撤下的 key 只能用 `reopen` 附改變題目的新事實重開，舊答案留在 history。問題文字和任何一項相同（不論狀態）的會被拒：未決的請更新那個 key，已結的請 reopen 那個 key。換了說法的重複，由監督對照 context 附的完整清單自己判斷。
 - 使用者的回答要登記成授權或驗收修訂（同意某動作、給授權範圍、改驗收條文）時，唯一做法是 `supervise.cjs amend RUN FILE`，在修訂 JSON 加 `pendingKeys`（它回答的待決 key，每項是 key 字串或 `{"key":…,"choice":…}`）：一步登記修訂並以修訂 id 結案這些項（`answer.amendmentId`），不再另跑 `pending` 的 `answer`。任一 key 不在待決帳、已撤下或已由別的回答結案時整筆不寫，修訂帳與待決帳都不變；同一修訂重送只結案仍未決的項，修訂不重複登記。先 `answer` 原話再另做 `amend`，兩邊會連不起來（2026-10-15 IA 10 項待決的 `answer.amendmentId` 全空）。`pending` 的 `answer` 只用於不需登記修訂的回答（例如本人已切好權限選單），或結掉已被先前登記的修訂解決的項目（附那筆 `amendmentId`）。
 - `answer` 的 `quote` 是本回合收到的使用者原話（本對話輸入或別的對話轉來，規則同 pause）；不是本回合收到的，另附 `source:{path,sha256}` 指向允許根目錄內、含這句原話的已存原文快照，或改用已登記修訂的 `amendmentId`。`withdraw` 寫明為什麼監督能自己決定、依據哪份授權或修訂，或哪個事件讓它不再需要（例如 `permission_changed` 的事件識別）。
-- 問使用者：`supervise.cjs ask RUN` 只讀，回 `{items,new,repeat}`：`items` 是全部未決項，全部寫在同一則回覆；`new` 是還沒列過或列過後改過的 key；`repeat:true` 表示全都列過且沒變，不再問。列出的同一回合執行 `supervise.cjs shown RUN <key…>`，key 必須正好是全部未決項才記為已列，少列、多列都拒絕。
+- 問使用者：`supervise.cjs ask RUN` 只讀，回 `{items,new,repeat}`：`items` 是全部未決項，全部寫在同一則回覆；`new` 是還沒列過或列過後改過的 key；`repeat:true` 表示全都列過且沒變，不再問。列出的同一回合執行 `supervise.cjs shown RUN <key…>`，key 必須正好是全部未決項才記為已列，少列、多列都拒絕。記為已列時程式同時用「Jay的小秘書」推播一則「【開發任務需要你決定】『對話標題』有 N 題要你回答，請打開該監督對話查看。」，同一組待決只推一次、不重複催；推播失敗不影響記錄（收件設定見 runtime「監看中斷」）。
 - `context` 與 `brief` 的 `pendingDecisions` 有 `open`（完整未決項）、`closed`（已答／已撤下的 key、問題與答案）、`unpresented`（還沒列給使用者的 key）；檔案損壞時改附 `error`，修好前 `pending` 拒絕寫入。`監督儀表板.md` 的「待你決定」節顯示同一份未決清單，`pending`、`shown` 寫入後立即更新。
 - 舊版 run 的待決帳檔還沒建立時，`pendingDecisions.legacy` 列出歷次決策的 pendingApprovals 文字；監督依決策帳與現況把仍未決的以新格式登記一次（都已解決就送 `{"raise":[]}`），之後不再出現。舊文字有的是全表、有的是增量，所以程式不自動匯入。
 
@@ -117,7 +117,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 ## 主動進度查核
 
-監督有自己的進度時鐘，不以執行者說的等待或步調為準。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題，另列 `open`：當下仍未解決的問題，包括已通報過的）；只有發現問題才產生 `progress_review` 送進本對話，`reasons` 標明原因：
+監督有自己的進度時鐘，不以執行者說的等待或步調為準。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題，另列 `open`：當下仍未解決的問題，包括已通報過的）；只有發現問題才產生 `progress_review` 送進本對話，`reasons` 標明原因。執行端忙碌時（有指令在跑，只輪詢或背景執行的不算；或正在等監督核對過的外部結果 `external_result`。執行端自己宣告的 `waitMinutes` 不算忙碌，監督照樣用自己的時鐘，使用者 2026-10-07 定案），`silence`、`idle_with_work`、`unplanned_criteria` 不發，`overdue`、`executor_blocked`、`process_stalled`、`no_event_hour` 照發（使用者 2026-10-29 定案：GDB V32 監督被誤報叫醒 23 次）。
 
 - `executor_blocked`：執行對話的指令發出 5 分鐘仍沒有結果、這段期間沒有任何指令跑完，程序清單裡也找不到它在跑，這只是可能卡住的線索。先核對原工具結果及上層授權；沒有明確拒絕不得推定需要本人處理。工具確實要求本人確認時才用 `observe` 記錄拒絕原文與受阻動作，集中交由原監督向使用者說明。
 - `machine_slept`：綁定後電腦睡眠 5 分鐘以上，例如用電池闔蓋，整場因此停住。監督請使用者接電源、不要闔蓋，用 `observe`，並把停擺時長記進決策帳與驗收報告。綁定前的睡眠不算。
@@ -130,8 +130,8 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有依賴已全部完成、可立即開跑的包在等同一個資源；監督評估能否並行。可立即開跑＝就緒包須 `independent`、`safe`、依賴全部完成、排他資源沒被在途包占用；受阻包只算 kind 為 `resource_conflict` 的；且它用到的每個已宣告資源空位都夠它的 units。`resourceUnderused[].waiting` 只列這些包；依賴還沒完成或實際互斥的等待包不算。同一資源的可派包集合沒變就不再叫醒，包開始或結束只改變已用名額時不重叫（2026-10-15 IA 19 次叫醒中 15 次監督判 observe，因為舊去重以已用數與等待清單為準）。
 - `repeat`：綁定後同一條指令連續失敗 3 次。處理過一次進度查核後重新計數。
 - `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠；停頓從執行端最後活動或監督對它事件的判定套用時（`lastDecisionAt`）起算，取較晚者），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
-- `unplanned_criteria`：未通過的驗收條件 10 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），執行端在忙也照樣觸發。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
-- `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）從 `startedAt` 起算、扣掉電腦睡眠，用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；等使用者核准時不發。
+- `unplanned_criteria`：未通過的驗收條件 30 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），而且執行端正閒置（同 `idle_with_work` 的判斷）；執行端在忙時不發（2026-10-29 由 10 分鐘、在忙也發改成這樣：排下一包常超過 10 分鐘，多半是誤報）。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
+- `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）只算真正在寫文件的時間：有標 `"doc":true`（或 id 以 DOC 開頭）的文件包在途，且執行端或子代理 5 分鐘內有活動，兩次檢查相隔超過 5 分鐘的那段不算（使用者 2026-10-29 定案：V32 把等待也算進去，誤報用了 728 分鐘）。用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis,estimate}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；等使用者核准時不發。
 
 事件附 `pace`（每個在途包的開始時間、扣掉睡眠後的經過分鐘、睡眠分鐘、基準分鐘、比值、是否已做完、程序是否還活著、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`executorBlocked`、`machineSlept`、`overdue`、`nearOverdue`、`baselineMissing`、`processStalled`、`resourceUnderused`、`failedCommands` 與各類最後活動時間（含監督最近一次判定套用的 `lastDecisionAt`）。
 

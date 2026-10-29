@@ -38,14 +38,14 @@ function fixture() {
 }
 const reply=eventId=>({eventId,disposition:'reply',progressCheck:{evidence:['executor thread latest turn and dispatch snapshot'],finding:'No activity for 15 minutes; background job state is unknown',guidance:'Check the background job and continue an independent ready item.'},reply:'Progress check: Check the background job and continue an independent ready item.'});
 
-// Jay 2026-10-29: an executor whose own command is still running, or that registered an external wait, is not silent.
-// Polling a background job is still waiting, so the silence check stays.
-test('silence is not raised while an executor command runs or an external wait is registered',()=>{
+// Jay 2026-10-29: an executor whose own command is still running is not silent. A wait it only declared still is:
+// the supervisor keeps its own clock (Jay 2026-10-07). Polling a background job is still waiting, so the check stays.
+test('silence is not raised while an executor command runs, but a declared wait or polling is still checked',()=>{
   const quiet=Date.now()-PROGRESS_REVIEW_MS-60000,base=()=>({lastExecutorActivityAt:quiet,lastSupervisorActivityAt:quiet,lastProgressReviewAt:quiet});
   assert.equal(due(base()),true,'fifteen quiet minutes');
   assert.equal(due({...base(),openTools:{c1:{commands:['npm run deploy'],at:new Date(quiet).toISOString()}}}),false,'its deploy command has not returned');
   assert.equal(due({...base(),openTools:{c1:{commands:['write_stdin'],at:new Date(quiet).toISOString(),poll:true}}}),true,'only polling a job');
-  assert.equal(due({...base(),progressWait:{deadline:Date.now()+600000}}),false,'a declared wait for an external result');
+  assert.equal(due({...base(),progressWait:{deadline:Date.now()+600000}}),true,'a wait the executor only declared');
 });
 
 test('15-minute idle threshold requires both chats to have no new messages',()=>{
