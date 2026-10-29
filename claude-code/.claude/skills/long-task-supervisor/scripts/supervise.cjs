@@ -119,6 +119,8 @@ function init() {
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
   else save(path.join(run, 'contract.json'), contract);
   login.write(run, input.loginSites);
+  // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
+  fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   fs.writeFileSync(path.join(run, 'executor-prompt.txt'),
     input.executorPrompt.replaceAll(input.supervisorId,visible.id).replaceAll('{{SUPERVISOR_ID}}',visible.id));
   save(path.join(run, 'binding.json'), {
@@ -370,7 +372,8 @@ function progressPreflight(){const {binding}=load(),state=read(path.join(run,'da
       :command==='pause'?pause():command==='resume'?resume():command==='relocate-sources'?relocateSources()
       :command==='decision'?decision():command==='stop'?stop()
       :command==='pending'?pendingChange():command==='ask'?(load(),pending.ask(run))
-      :command==='shown'?pending.shown(run,process.argv.slice(4),{binding:load().binding})
+      // Jay hears about the batch on his phone too (Jay 2026-10-29), one push per batch.
+      :command==='shown'?await pending.pushShown(run,pending.shown(run,process.argv.slice(4),{binding:load().binding}),'Claude 的監督對話')
       :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()
       :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();

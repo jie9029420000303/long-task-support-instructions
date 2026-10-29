@@ -24,7 +24,17 @@ const IDLE_WORK_MS = 5 * 60 * 1000;
 // second miss is the supervisor's to handle, never Jay's (Jay 2026-10-11). An open criterion that no package
 // covers for 10 minutes wakes the supervisor to plan it (A1/B1). Jay is online when he typed in the supervisor
 // chat within 10 minutes. Automations aimed at the bound chats are looked for every 30 minutes.
-const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 10 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000, AUTOMATION_CHECK_MS = 30 * 60 * 1000;
+// An open criterion no package names gets 30 minutes before a check (Jay 2026-10-29; was 10): planning the next package
+// often takes longer, and the check only asks while the executor is idle.
+const INSTRUCTION_DEADLINE_MS = 30 * 60 * 1000, UNPLANNED_MS = 30 * 60 * 1000, ONLINE_MS = 10 * 60 * 1000, AUTOMATION_CHECK_MS = 30 * 60 * 1000;
+// The executor is not idle while one of its commands is still running or it registered an external wait (Jay 2026-10-29):
+// silence, idle-with-work and unplanned-criteria checks then stay quiet. Overdue tiers, a blocked command, a stalled
+// process and the hourly no-event check still wake the supervisor.
+function executorBusy(state) {
+  // A call that only polls a background job or sleeps is waiting, not work: ready packages still count as idle capacity.
+  return Object.values(state?.openTools || {}).some(item => item && typeof item === 'object' && !item.poll && !item.background) ||
+    Boolean(state?.progressWait) || state?.checkedWait?.kind === 'external_result';
+}
 // A turn the platform ended with an error (Jay 2026-10-14): 2 minutes without the executor resuming wakes the
 // supervisor. A rate-limit model switch or a queued message resumes it first; with nothing to resume it, two
 // "stream disconnected" turns on the GDB run (2026-10-10 20:30Z, 20:38Z) waited for a 10-minute heartbeat to notice.
@@ -148,4 +158,4 @@ function validateDecision(config, contract, event, decision, queue = []) {
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
   REVIEW_INTERVAL_MS, OVERDUE_TIERS, OVERDUE_NEAR, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS,
-  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, AUTOMATION_CHECK_MS, PLATFORM_ERROR_MS, quietReview };
+  INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, AUTOMATION_CHECK_MS, PLATFORM_ERROR_MS, quietReview, executorBusy };

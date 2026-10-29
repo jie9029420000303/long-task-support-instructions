@@ -56,6 +56,8 @@ function init() {
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
   else write(path.join(run, 'contract.json'), input.contract);
   login.write(run, input.loginSites);
+  // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
+  fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   const binding = {
     platform: 'codex', projectRoot: input.projectRoot, allowedRoots: input.allowedRoots.concat(run),
     executorId: input.executorId, supervisorId: input.supervisorId,
@@ -79,6 +81,12 @@ function status() {
   if (ready && ready.pid === state.pid) {
     try { process.kill(ready.pid, 0); alive = true; } catch {}
   }
+  // The parent (run-watch.cjs) and the outage record, for the check the supervisor runs before ending each turn.
+  const runtimePath = path.join(run, 'runtime-state.json'), runtime = fs.existsSync(runtimePath) ? read(runtimePath) : null;
+  let parentAlive = false;
+  if (runtime) { try { process.kill(runtime.pid, 0); parentAlive = true; } catch {} }
+  const outage = fs.existsSync(path.join(run, 'watch-health.json')) ? read(path.join(run, 'watch-health.json')).open || null : null;
+  const health = state.appHealth || {};
   return {
     run, executorId: binding.executorId, supervisorId: binding.supervisorId,
     phase: state.phase, active: alive && ['watching', 'awaiting_decision', 'needs_user'].includes(state.phase),
@@ -86,7 +94,10 @@ function status() {
     reads: state.reads, messages: state.messages.length, acceptedAt: state.acceptedAt || null,
     // An amendment waits for both to be empty (contract-state safePoint).
     pending: state.pending?.id || null, inflight: state.inflight ? { key: state.inflight.key, phase: state.inflight.phase || null } : null,
-    error: state.error || null
+    error: state.error || null,
+    watch: { parentAlive, heartbeatAt: runtime?.heartbeatAt || null, lastReadAt: state.lastReadAt || null,
+      appHealth: health.failingSince ? { failingSince: health.failingSince, kind: health.kind || null, lastError: health.lastError || null } : null,
+      outage, restartCommand: parentAlive ? null : '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ' + path.join(__dirname, 'run-watch.cjs') + ' ' + run }
   };
 }
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
@@ -237,7 +248,9 @@ function shown() {
   const {binding} = load();
   const result = pending.shown(run, process.argv.slice(4), {binding});
   refreshDashboard(binding);
-  return result;
+  // Jay hears about the batch on his phone too (Jay 2026-10-29), one push per batch.
+  const titles = read(path.join(run, 'daemon-state.json')).threadTitles || {};
+  return pending.pushShown(run, result, titles.supervisor);
 }
 function attachDispatch() {
   const {binding}=load();
@@ -298,7 +311,7 @@ try {
     : command === 'pause' ? pause()
     : command === 'resume' ? resume()
     : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, pending RUN FILE, ask RUN, shown RUN KEY..., relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN'); })();
-  console.log(JSON.stringify(result));
+  Promise.resolve(result).then(value => console.log(JSON.stringify(value)), error => { console.error(error.message); process.exitCode = 1; });
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

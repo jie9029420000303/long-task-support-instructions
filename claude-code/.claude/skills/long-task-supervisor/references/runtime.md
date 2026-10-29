@@ -133,6 +133,8 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 
 背景接收須保持運作，不因減少模型回合停止監看；避免為 idle watcher 外包會定時殺掉接收器的 timeout 命令。使用當前 App 真正支援的長期背景工具及事件完成通知，核對 status.active。若平台強制終止背景工具，據實記錄失效與原生交接途徑，不能保證 App 內部的喚醒，不能另建定時模型 heartbeat 或改由 CLI 代替桌面主線。
 
+**監看中斷推播**（使用者 2026-10-29 定案）：開工時跑 `node <installed-skill>/scripts/watch-guard.cjs status`，`loaded` 不是 true 就跑一次 `watch-guard.cjs install`。這是系統排程（launchd 每 3 分鐘，不叫模型），接收器啟動時把 run 登記給它。接收器應該在跑（phase 為 watching）卻已不在，或停在 error，滿 10 分鐘就由 `watch-health.cjs` 用「Jay的小秘書」推一則「【開發任務中止，需要開啟查看】…請打開監督對話查看」，並在儀表板最上方標示；同一次中斷只推一則，恢復時再推「【已恢復，不用處理】」。接收器在事件交出後依設計結束（awaiting_decision），這段不算中斷。推播設定（鑰匙圈金鑰、`~/.config/long-task-supervisor/notify.json` 收件對象）不寫進 run 或技能 repo，訊息不放按鈕。系統排程不能替監督重掛接收器；監督每次處理完事件、結束回合前，照舊確認 `status.active` 為 true。
+
 ## 原契約、使用者修訂與舊 run 接入
 
 鎖定來源完成正式版本歸檔後，只有內容雜湊完全相同時可用 `supervise.cjs relocate-sources RUN INPUT.json` 登記精確搬移。輸入逐項綁定原絕對路徑、歸檔後絕對路徑與原 SHA-256；歸檔檔案必須位於 run 的允許根目錄。這只處理檔案搬移，不改契約內容、驗收條文或授權；不得用同名搜尋、未綁定候選或不同雜湊代替原來源。

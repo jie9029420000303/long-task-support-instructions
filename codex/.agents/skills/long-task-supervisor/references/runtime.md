@@ -47,7 +47,9 @@ node <installed-skill>/scripts/supervise.cjs shown RUN KEY...
 node <installed-skill>/scripts/supervise.cjs stop RUN "<使用者原話>"
 ```
 
-`run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。等待期間是本機程式而非模型。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
+`run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。等待期間是本機程式而非模型：每 3 分鐘用 `read_thread` 讀一次執行對話與監督對話（使用者 2026-10-29 定案），不用 `wait_threads`（它綁在監督當下的回合，回合一結束就失敗）。同一 run 已有活著的父程序時，第二次啟動直接退出並印出 `alreadyRunning`，不會搶鎖。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
+
+開工時（續接也一樣）跑 `node <installed-skill>/scripts/watch-guard.cjs status`：`loaded` 不是 true 就跑一次 `watch-guard.cjs install`（系統排程，launchd 每 3 分鐘、不叫模型，見下方「監看中斷」）；`notify.configured` 不是 true 時小秘書推播不會送出，登記待決帳（`user_action`）請使用者提供推播設定，其餘照常開工。
 
 綁定既有執行對話時，先以 `wait_threads({targets:[{threadId:executorId}],timeoutMs:0})` 同時取當前 `cursor` 與 `latestTurn.id`，分別寫入 `executorCursor`、`executorBaselineTurnId`，從下一個新回合才開始監看；通知 API 即使游標未變仍會附上舊的 latestTurn，因此必須以 ID 排除它。新建執行對話須監看其第一個完成回合，不填這兩欄。
 
@@ -66,7 +68,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，到期前不發續接，結果變化或到期才產生 `continue` 事件。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。事件標記那一行本身是完整 JSON 即可，標記後面另起一行的文字會被忽略。新事件先持久保存完整原文，喚醒只傳事件識別、雜湊及 `supervise.cjs context RUN EVENT_ID`；不附整段處理規則或歷史。context 只接受目前待決事件，一次提供 brief 與授權來源；送驗才載完整有效契約。舊版未確認送達的 prompt 保留原文對帳，不在升級時改寫或重送。
 
-監督一次只處理一個事件。等待 API 只回報最新回合，所以背景程式每讀到一個新的完成回合，就從對話紀錄往回補讀（最多 8 個回合，到上一個已處理回合為止）：前一事件未決期間或兩次讀取之間完成的提問、阻塞、送驗、無標記或格式錯誤的回合，依完成先後排進 `eventQueue`，前一事件決策後依序成為待決事件，排在派工檢查與進度時鐘前面；已被後續回合取代的一般進度與等待、沒有最終回覆的回合只記為已處理，不再續接。brief 的 `eventQueue` 列出排隊事件，儀表板顯示件數。佇列裡有較新的送驗時不能接受目前這份（程式會拒絕）：用 observe 寫明「被排隊中的送驗 <id> 取代」，再處理那一份。佇列裡沒有送驗、只有提問或阻塞等事件時，送驗的 context 另附它們的完整原文（`queued`），接受照常；背景程式把它們記為驗收時一併結案（resolved 的 `closedWithAcceptance`），監督把它們列進給使用者的收尾清單。
+監督一次只處理一個事件。每次讀取只看最新回合，所以背景程式每讀到一個新的完成回合，就從對話紀錄往回補讀（最多 8 個回合，到上一個已處理回合為止）：前一事件未決期間或兩次讀取之間完成的提問、阻塞、送驗、無標記或格式錯誤的回合，依完成先後排進 `eventQueue`，前一事件決策後依序成為待決事件，排在派工檢查與進度時鐘前面；已被後續回合取代的一般進度與等待、沒有最終回覆的回合只記為已處理，不再續接。brief 的 `eventQueue` 列出排隊事件，儀表板顯示件數。佇列裡有較新的送驗時不能接受目前這份（程式會拒絕）：用 observe 寫明「被排隊中的送驗 <id> 取代」，再處理那一份。佇列裡沒有送驗、只有提問或阻塞等事件時，送驗的 context 另附它們的完整原文（`queued`），接受照常；背景程式把它們記為驗收時一併結案（resolved 的 `closedWithAcceptance`），監督把它們列進給使用者的收尾清單。
 
 送驗前用 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...` 產生候選清單及**可直接貼在最終回覆末尾的完整事件行**；不要手寫或截短雜湊。清單至少列一個檔案，包含本次候選版所有直接修改的交付檔。監督接收時會重算清單及每個候選檔，變動後必須另建清單並重交；舊證據只能附沿用核對後沿用（[換版與有效證據](acceptance.md#換版與有效證據)），不得未經核對拼接。
 
@@ -148,6 +150,16 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 ### 延遲收件恢復
 
 App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；送達對帳時若目標對話正在跑回合（訊息排在回合後面），每 15 秒再查一次，等回合結束收進去為止，不判為無法確認、不重開監看。該 delivery 預設不再送第二次。唯一例外是能證明遺失：目標對話在本機有紀錄檔、目前閒置、送出後已有回合結束，所有紀錄段落卻都沒有該送達標記（例如訊息排在進行中的回合後面，該回合被中斷而丟失）。這時重送一次並記入 `lostDeliveries`；重送後仍對不到，或缺任何一項證據，照舊停在 needs_reconcile。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
+
+### 監看中斷
+
+使用者 2026-10-29 定案：監看停住要在 10 分鐘內讓他知道（先前三次停擺都是幾小時後才被發現，合計空等約 18 小時）。
+
+- 判定：只有成功讀到執行對話才算監看在運作。連續讀不到（`daemon-state` 的 `appHealth.failingSince`）、程式反覆出錯、父程序 `run-watch.cjs` 整個消失（`runtime-state.json` 的 PID 不在、心跳停了），都算沒在運作。
+- 通知：滿 10 分鐘時，`watch-health.cjs`（父程序每分鐘、系統排程 `watch-guard.cjs` 每 3 分鐘各查一次）用「Jay的小秘書」推一則「【開發任務中止，需要開啟查看】…請打開監督對話『…』查看」，並在儀表板最上方標示；同一次中斷只推一則，恢復時再推一則「【已恢復，不用處理】」。推播失敗重試一次，仍失敗就寫在儀表板。App 還收得到訊息時，監督對話另外收到一則 `LONG_TASK_WATCH_ALERT`；恢復後收到 `LONG_TASK_WATCH_RECOVERED`，用一句話結束回合即可。
+- 推播設定：Telegram bot 金鑰在鑰匙圈，收件對象在 `~/.config/long-task-supervisor/notify.json`（`notify.cjs status` 檢查、`notify.cjs configure` 設定）；兩者都不寫進 run 或技能 repo。訊息不放按鈕。
+- 重開：子程序 `native-watch.cjs` 掛掉由父程序自動重開。父程序整個消失時，系統排程無法從 App 外重開它（2026-10-29 實測：App 只接受它自己啟動的程式連線），所以只推播；監督在下一個回合重掛。
+- **監督每個回合結束前**跑 `supervise.cjs status RUN`：`active` 為 true 才結束回合。不是 true 且 run 沒有 STOP／accepted／stopped 時，先看 `watch` 欄位：`parentAlive` 為 false 就依上方啟動指令在本對話用背景命令重掛 `run-watch.cjs`（`restartCommand`），等到 `active` 為 true；父程序還在但 `appHealth` 顯示讀不到，依 `lastError` 處理（例如執行對話被封存或刪除就登記待決帳），不另開第二組監看。
 
 ## 原契約、使用者修訂與舊 run 接入
 

@@ -5,8 +5,8 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {docBudgetStage}=require('./dispatch-audit.cjs');
-const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS}=require('./guard.cjs');
+const {docBudgetStage,trackDocTime}=require('./dispatch-audit.cjs');
+const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,executorBusy}=require('./guard.cjs');
 const automations=require('./automations.cjs');
 const login=require('./login-check.cjs');
 const now=()=>new Date().toISOString();
@@ -82,7 +82,7 @@ function trackTools(state,row,boundAt=0){
     const items=state.callItems||={};items[payload.call_id]=workItem(payload);
     const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
-    if(commands.length)(state.openTools||={})[payload.call_id]={commands,at};
+    if(commands.length)(state.openTools||={})[payload.call_id]={commands,at,poll:pollOnly(payload)};
   }else if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type))delete state.openTools?.[payload.call_id];
   else if(row.type==='event_msg'&&['task_complete','turn_aborted'].includes(payload.type)){
     state.openTools={};
@@ -208,10 +208,11 @@ function check(run,binding,state){
   const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
-  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser;
+  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser&&!executorBusy(state);
   const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round(awakeSince(state,idleSince)/60000),openCriteria,readyPackages}:null;
-  // An open criterion no live package names (acceptanceIds) for 10 minutes while seats sit free: the supervisor
-  // names the packages to dispatch (Jay 2026-10-11). Kept in the clock so dispatch-audit stays shared with Claude.
+  // An open criterion no live package names (acceptanceIds) for 30 minutes while the executor is idle: the supervisor
+  // names the packages to dispatch (Jay 2026-10-11; 30 minutes and idle only, 2026-10-29). Kept in the clock so
+  // dispatch-audit stays shared with Claude.
   const live=['ready','inFlight','blocked','returned'].flatMap(key=>snapshot?.packages?.[key]||[]);
   const covered=new Set(live.flatMap(item=>Array.isArray(item.acceptanceIds)?item.acceptanceIds:[]));
   const uncovered=snapshot?openCriteria.filter(id=>!covered.has(id)).sort():[];
@@ -220,7 +221,7 @@ function check(run,binding,state){
   for(const id of uncovered)plan[id]??=Date.now();
   const longUncovered=uncovered.filter(id=>awakeSince(state,plan[id])>=UNPLANNED_MS);
   let unplanned=null;
-  if(longUncovered.length&&!waitingUser&&once('unplanned:'+longUncovered.join(','))){
+  if(longUncovered.length&&idle&&once('unplanned:'+longUncovered.join(','))){
     const seats=Number(snapshot?.capacity?.verified)||0,inFlight=(snapshot?.packages?.inFlight||[]).length;
     unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awakeSince(state,plan[id])))/60000)};
   }
@@ -262,10 +263,11 @@ function check(run,binding,state){
   const platformError=failed&&!waitingUser&&awakeSince(state,failed.since)>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?{...failed,since:new Date(failed.since).toISOString()}:null;
   // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time): one wake at half to see
   // whether round trips eat the time, one when spent to put the status and options to Jay. A new budget re-arms both.
-  const budget=snapshot?.docBudget,budgetFrom=Date.parse(budget?.startedAt);
-  const budgetStage=budget&&!waitingUser?docBudgetStage(budget,awakeSince(state,budgetFrom)):null;
+  // Only time spent writing documents counts (Jay 2026-10-29), not the wall clock since the budget started.
+  const budget=snapshot?.docBudget,usedMs=trackDocTime(state,snapshot,Math.max(state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0));
+  const budgetStage=budget&&!waitingUser?docBudgetStage(budget,usedMs):null;
   const docBudget=budgetStage&&once('doc_budget:'+budget.startedAt+'/'+budget.minutes+':'+budgetStage)?{stage:budgetStage,startedAt:budget.startedAt,
-    devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(awakeSince(state,budgetFrom)/60000),basis:budget.basis}:null;
+    devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(usedMs/60000),basis:budget.basis,estimate:budget.estimate||null}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
     ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),

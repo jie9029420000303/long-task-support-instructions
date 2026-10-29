@@ -264,26 +264,56 @@ test('successful completion breaks a failure streak instead of waking on scatter
 });
 
 
-test('bridge wait failure still delivers the exact question once through the same bound read API',async()=>{
+// 2026-10-28: wait_threads failed once the supervisor's turn ended and the run reconnected for 9 hours; since v0.34.0
+// the watcher reads the executor with read_thread only.
+test('the watcher delivers the exact question once through read_thread and never calls wait_threads',async()=>{
   const f=fixture({final:'Need the approved source.\nLONG_TASK_EVENT {"kind":"question"}'});
   const mock=read(f.mock);mock.waitError={code:-32000,message:'MCP error -32000: Codex app tool request failed'};save(f.mock,mock);
   f.start();
   try{
     await until(()=>pending(f)?.kind==='question'&&sends(f).length===1);
     const state=read(f.statePath);
-    assert.equal(state.waitFallback.tool,'wait_threads');
+    assert.equal(fs.readFileSync(f.sent+'.tools','utf8').split('\n').includes('wait_threads'),false);
+    assert.equal(state.waitFallback,undefined);
     assert.equal(state.reads,1);assert.equal(state.pending.id,'executor-turn-1');
     assert.ok(state.pending.text.includes('Need the approved source.'));
     assert.equal(state.phase,'awaiting_decision');
   }finally{await f.stop();}
 });
 
-test('a wait permission rejection remains an error, never a read fallback',async()=>{
-  const f=fixture();const mock=read(f.mock);mock.waitError={code:-32000,message:'Permission denied'};save(f.mock,mock);f.start();
+test('a read permission rejection stops with the error and is recorded as a read outage',async()=>{
+  const f=fixture(),errors=path.join(f.root,'read-errors');fs.writeFileSync(errors,'99');
+  const mock=read(f.mock);mock.readErrorFile=errors;mock.readErrorMessage='Permission denied';save(f.mock,mock);f.start();
   try{
     await until(()=>read(f.statePath).phase==='error');
     const state=read(f.statePath);assert.match(state.error.message,/Permission denied/);
-    assert.equal(state.waitFallback,undefined);assert.equal(sends(f).length,0);
+    assert.equal(state.appHealth.kind,'read');assert.ok(state.appHealth.failingSince);
+    assert.equal(state.readRetries,undefined,'only the App bridge failure is retried');assert.equal(sends(f).length,0);
+  }finally{await f.stop();}
+});
+
+// 2026-10-29: the App returned the bridge failure without its "MCP error -32000: " prefix and the retry never engaged.
+test('a bridge failure without the MCP prefix is retried like the prefixed one',async()=>{
+  const f=fixture({final:'Need the approved source.\nLONG_TASK_EVENT {"kind":"question"}'}),errors=path.join(f.root,'read-errors');
+  fs.writeFileSync(errors,'2');const mock=read(f.mock);mock.readErrorFile=errors;mock.readErrorMessage='Codex app tool request failed';save(f.mock,mock);
+  f.env.LONG_TASK_READ_RETRY_MS='50';f.start();
+  try{
+    await until(()=>pending(f)?.kind==='question'&&sends(f).length===1);
+    const state=read(f.statePath);
+    assert.notEqual(state.phase,'error');assert.equal(state.readRetries.length,2);
+    assert.equal(state.appHealth.failingSince,undefined,'a read that worked ends the outage');
+  }finally{await f.stop();}
+});
+
+// 2026-10-19 V32: the executor's last 8 turns at 20000 characters each no longer fit and the watcher stopped for 3 hours.
+test('a read over the size limit is shrunk instead of failing the same way every time',async()=>{
+  const f=fixture({final:'Need the approved source.\nLONG_TASK_EVENT {"kind":"question"}'});
+  const mock=read(f.mock);mock.sizeLimitChars=50000;save(f.mock,mock);f.start();
+  try{
+    await until(()=>pending(f)?.kind==='question'&&sends(f).length===1);
+    const state=read(f.statePath);
+    assert.ok(state.readShrinks.length>=2);assert.equal(state.readShrinks.at(-1).to.turnLimit,2);
+    assert.ok(state.pending.text.includes('Need the approved source.'));
   }finally{await f.stop();}
 });
 
@@ -311,15 +341,15 @@ test('a read that keeps failing still stops with the original error after the re
 });
 
 
-test('fallback keeps checking active work locally without waking a model',async()=>{
+test('reading keeps checking active work locally without waking a model',async()=>{
   const f=fixture();const mock=read(f.mock);
-  mock.waitError={code:-32000,message:'MCP error -32000: Codex app tool request failed'};mock.readTurnStatus='inProgress';save(f.mock,mock);
+  mock.readTurnStatus='inProgress';save(f.mock,mock);
   f.env.CODEX_WATCH_IDLE_SLEEP_MS='40';f.start();
   try{
     await until(()=>read(f.statePath).reads>=2);
     const state=read(f.statePath);assert.equal(state.phase,'watching');
     assert.equal(state.pending,null);assert.equal(sends(f).length,0);
-    assert.equal(state.waitFallback.tool,'wait_threads');
+    assert.equal(fs.readFileSync(f.sent+'.tools','utf8').split('\n').includes('wait_threads'),false);
   }finally{await f.stop();}
 });
 
@@ -371,9 +401,11 @@ test('an overdue package whose process is still running and a quiet log does not
 // leaves every subagent seat empty; the GDB run spent 10.2 of 23.7 hours like that. Five quiet minutes wake once.
 function poll(f,minutes){line(f.executorLog,{timestamp:minutesAgo(minutes),type:'response_item',payload:{type:'function_call',name:'write_stdin',call_id:'p'+minutes,arguments:JSON.stringify({session_id:7,chars:''})}});}
 function work(f,minutes){line(f.executorLog,{timestamp:minutesAgo(minutes),type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'w'+minutes,arguments:JSON.stringify({cmd:'npm test'})}});}
+// exec_command hands back a session after its yield time; the job keeps running and the main line only polls it.
+function yielded(f,minutes){line(f.executorLog,{timestamp:minutesAgo(minutes),type:'response_item',payload:{type:'function_call_output',call_id:'w'+minutes,output:'Process running with session ID 7'}});}
 test('a main line only polling a background job with criteria open wakes the supervisor once to push dispatch',async()=>{
   const f=fixture({createdMinutesAgo:10,quietMinutes:8});
-  work(f,8);poll(f,3);poll(f,1);
+  work(f,8);yielded(f,8);poll(f,3);poll(f,1);
   save(path.join(f.run,'dispatch.json'),{acceptance:{items:[{id:'A1',status:'PASS'},{id:'A2',status:'PENDING'}]},packages:{ready:[{id:'WP-NEXT'}],inFlight:[]}});
   f.start();
   try{
@@ -400,12 +432,14 @@ test('an idle executor with every criterion passed and nothing ready is left alo
 // Document time budget (Jay 2026-10-15): GDB v1.2.0 spent more than 12 hours on documents after 76 minutes of development,
 // with 11 supervisor round trips and no one asking whether the time was still worth it. The clock wakes the supervisor
 // once at half the budget and once when it is spent, with the numbers; under half it stays quiet.
-const budgetSnapshot=startedMinutesAgo=>({docBudget:{startedAt:minutesAgo(startedMinutesAgo),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},
-  acceptance:{items:[{id:'A1',status:'PASS'}]},packages:{ready:[],inFlight:[]}});
+// Since v0.34.0 only document-writing time counts (Jay 2026-10-29): the fixture records the minutes already used.
+const budgetSnapshot=(usedMinutes,f)=>{const startedAt=minutesAgo(300),state=read(f.statePath);state.docTime={key:startedAt,ms:usedMinutes*60000,at:Date.now()};save(f.statePath,state);
+  return {docBudget:{startedAt,devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},
+  acceptance:{items:[{id:'A1',status:'PASS'}]},packages:{ready:[],inFlight:[]}};};
 
 test('a document budget past half wakes the supervisor once with the budget numbers',async()=>{
   const f=fixture({createdMinutesAgo:10});
-  save(path.join(f.run,'dispatch.json'),budgetSnapshot(60));
+  save(path.join(f.run,'dispatch.json'),budgetSnapshot(60,f));
   f.start();
   try{
     await until(()=>pending(f)?.kind==='progress_review');
@@ -417,8 +451,8 @@ test('a document budget past half wakes the supervisor once with the budget numb
 
 test('a spent document budget wakes as spent, and one under half stays quiet',async()=>{
   const spent=fixture({createdMinutesAgo:10}),quiet=fixture({createdMinutesAgo:10});
-  save(path.join(spent.run,'dispatch.json'),budgetSnapshot(120));
-  save(path.join(quiet.run,'dispatch.json'),budgetSnapshot(20));
+  save(path.join(spent.run,'dispatch.json'),budgetSnapshot(120,spent));
+  save(path.join(quiet.run,'dispatch.json'),budgetSnapshot(20,quiet));
   spent.start();quiet.start();
   try{
     await until(()=>pending(spent)?.kind==='progress_review');

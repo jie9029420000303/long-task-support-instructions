@@ -1,4 +1,4 @@
-const { PROGRESS_REVIEW_MS } = require('./guard.cjs');
+const { PROGRESS_REVIEW_MS, executorBusy } = require('./guard.cjs');
 
 function activityMarker(poll) {
   return JSON.stringify([
@@ -29,6 +29,7 @@ function due(state, nowMs = Date.now()) {
   const hadWait=Boolean(state.checkedWait);
   if(require('./checked-wait.cjs').unchanged(state,nowMs))return false;
   if(hadWait)return true;
+  if(executorBusy(state))return false;
   // Quiet means nothing moves at all: both chats, the executor's subagents and the test processes it runs. Time the
   // executor spent waiting for the supervisor's ruling on its event is not quiet (lastDecisionAt, native-watch).
   return nowMs - Math.max(state.lastExecutorActivityAt || 0, state.lastSupervisorActivityAt || 0,

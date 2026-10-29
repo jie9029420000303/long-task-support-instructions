@@ -146,9 +146,10 @@ test('a main line that only polls a background job is idle while ready work wait
   }finally{await stopWatch(child);f.done();}
 });
 
-test('an open criterion nobody covers for ten minutes is named for dispatch; a covered one is not',async()=>{
+// Jay 2026-10-29: 30 minutes of grace (was 10), and only while the executor is idle.
+test('an open criterion nobody covers for thirty minutes is named for dispatch while the executor is idle; a covered one is not',async()=>{
   const f=fixture({quietMinutes:0});
-  f.patch(state=>{state.unplanned={A2:Date.now()-11*60000};state.lastExecutorWorkAt=Date.now();});
+  f.patch(state=>{state.unplanned={A2:Date.now()-31*60000};state.lastExecutorWorkAt=Date.now()-6*60000;});
   save(path.join(f.run,'dispatch.json'),{capacity:{verified:4},acceptance:{items:[{id:'A1',status:'PENDING'},{id:'A2',status:'FAIL'}]},
     packages:{inFlight:[{id:'WP-A1',handle:'agent:none',acceptanceIds:['A1'],evidence:['wp'],baseline:{minutes:30,startedAt:minutesAgo(1)}}]}});
   const child=start(f);

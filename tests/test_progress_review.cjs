@@ -29,13 +29,24 @@ function fixture() {
   save(mock,{supervisorId:binding.supervisorId,executorId:binding.executorId,noTurn:true,activityGate,supervisorActivityGate});
   let child;
   function start() {
-    child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mock,MOCK_CODEX_SENT:sent},stdio:['ignore','pipe','pipe']});
+    // Reads come every 3 minutes since v0.34.0; the fixture reads every 200 ms.
+    child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mock,MOCK_CODEX_SENT:sent,CODEX_WATCH_IDLE_SLEEP_MS:'200'},stdio:['ignore','pipe','pipe']});
     return child;
   }
   async function stop() {if(child?.exitCode===null){child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}}
   return {root,run,sent,activityGate,supervisorActivityGate,contract,binding,start,stop};
 }
 const reply=eventId=>({eventId,disposition:'reply',progressCheck:{evidence:['executor thread latest turn and dispatch snapshot'],finding:'No activity for 15 minutes; background job state is unknown',guidance:'Check the background job and continue an independent ready item.'},reply:'Progress check: Check the background job and continue an independent ready item.'});
+
+// Jay 2026-10-29: an executor whose own command is still running, or that registered an external wait, is not silent.
+// Polling a background job is still waiting, so the silence check stays.
+test('silence is not raised while an executor command runs or an external wait is registered',()=>{
+  const quiet=Date.now()-PROGRESS_REVIEW_MS-60000,base=()=>({lastExecutorActivityAt:quiet,lastSupervisorActivityAt:quiet,lastProgressReviewAt:quiet});
+  assert.equal(due(base()),true,'fifteen quiet minutes');
+  assert.equal(due({...base(),openTools:{c1:{commands:['npm run deploy'],at:new Date(quiet).toISOString()}}}),false,'its deploy command has not returned');
+  assert.equal(due({...base(),openTools:{c1:{commands:['write_stdin'],at:new Date(quiet).toISOString(),poll:true}}}),true,'only polling a job');
+  assert.equal(due({...base(),progressWait:{deadline:Date.now()+600000}}),false,'a declared wait for an external result');
+});
 
 test('15-minute idle threshold requires both chats to have no new messages',()=>{
   const now=Date.now(),poll={cursor:'v1',latestTurn:{id:'t1',status:'inProgress'},latestAssistantMessageId:'a1'};

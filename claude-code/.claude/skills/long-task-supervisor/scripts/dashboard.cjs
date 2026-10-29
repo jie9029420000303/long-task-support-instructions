@@ -54,7 +54,8 @@ function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions
   return lines.join('\n')+'\n';
 }
 function write(run,args){
-  const file=path.join(run,FILE),body=render({pendingDecisions:ledger.view(run,args.state),queue:queued(run),...args});
+  // An outage notice from watch-health.cjs stays at the top until the watch works again.
+  const file=path.join(run,FILE),body=require('./watch-health.cjs').withBanner(render({pendingDecisions:ledger.view(run,args.state),queue:queued(run),...args}),run);
   fs.writeFileSync(file+'.tmp',body);fs.renameSync(file+'.tmp',file);
   return file;
 }

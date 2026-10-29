@@ -35,11 +35,28 @@ function parse(snapshot,binding){
   if(snapshot.docBudget!==undefined){const b=snapshot.docBudget;need(b&&Number.isFinite(Date.parse(b.startedAt)),'docBudget.startedAt must be a time');
     need(Number.isFinite(b.devMinutes)&&b.devMinutes>0&&Number.isFinite(b.minutes)&&b.minutes>0,'docBudget.devMinutes and docBudget.minutes must be positive');
     need(nonEmpty(b.basis),'docBudget.basis is required');
-    need(b.minutes<=b.devMinutes*DOC_BUDGET_RATIO+0.5||nonEmpty(b.approval),'docBudget.minutes above 1.5x devMinutes needs approval naming where Jay allowed it');}
+    need(b.minutes<=b.devMinutes*DOC_BUDGET_RATIO+0.5||nonEmpty(b.approval),'docBudget.minutes above 1.5x devMinutes needs approval naming where Jay allowed it');
+    // The executor's per-item estimate before writing (Jay 2026-10-29): .md, slides, Archify diagrams with their image checks, video.
+    if(b.estimate!==undefined)need(Array.isArray(b.estimate)&&b.estimate.every(item=>nonEmpty(item?.item)&&Number.isFinite(item.minutes)&&item.minutes>0),'docBudget.estimate must list {item, minutes} with positive minutes');}
   if(snapshot.updatedAt!==undefined)need(nonEmpty(snapshot.updatedAt),'updatedAt must be a string');
   return snapshot;
 }
 // The stage a document time budget has reached after awakeMs of awake time: 'half' from 50%, 'spent' from 100%.
+// Document time counts only while document work runs (Jay 2026-10-29). V32 counted the wall clock from the budget's
+// start, waits and stalls included, and reported 728 minutes. Time between two checks counts when a package marked
+// "doc":true (or with an id starting DOC) is in flight and the executor or a subagent worked in the last 5 minutes; a
+// gap over 5 minutes (sleep, a stopped watch) never counts. Added minutes keep the time already used.
+const DOC_ACTIVE_MS=5*60000;
+const docWork=snapshot=>(snapshot?.packages?.inFlight||[]).some(item=>item?.doc===true||/^DOC/i.test(String(item?.id||'')));
+function trackDocTime(state,snapshot,lastWorkAt,nowMs=Date.now()){
+  const budget=snapshot?.docBudget;
+  if(!budget||!Number.isFinite(Date.parse(budget.startedAt)))return null;
+  const used=state.docTime?.key===budget.startedAt?state.docTime:(state.docTime={key:budget.startedAt,ms:0,at:nowMs});
+  const step=nowMs-used.at;
+  if(step>0&&step<=DOC_ACTIVE_MS&&docWork(snapshot)&&nowMs-(lastWorkAt||0)<DOC_ACTIVE_MS)used.ms+=step;
+  used.at=nowMs;
+  return used.ms;
+}
 function docBudgetStage(budget,awakeMs){
   const minutes=Number(budget?.minutes);
   if(!budget||!Number.isFinite(Date.parse(budget.startedAt))||!(minutes>0)||!Number.isFinite(awakeMs))return null;
@@ -96,4 +113,4 @@ function eventFor(result){
 function markAnnounced(state,event){const audit=state.dispatchAudit||{};const values=new Set(audit.announced||[]);for(const key of event.dispatchIssueKeys||[])values.add(key);audit.announced=[...values];state.dispatchAudit=audit;}
 function releaseAnnounced(state,event){const keys=new Set(event.dispatchIssueKeys||[]),audit=state.dispatchAudit||{};audit.announced=(audit.announced||[]).filter(key=>!keys.has(key));state.dispatchAudit=audit;}
 function stillCurrent(run,binding,state,event){const result=inspect(run,binding,state);const active=new Set(result.issues.map(item=>item.key));return {current:event.dispatchIssueKeys?.every(key=>active.has(key)),result};}
-module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,docBudgetStage,DOC_BUDGET_RATIO};
+module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,docBudgetStage,trackDocTime,DOC_BUDGET_RATIO};

@@ -1,12 +1,13 @@
 // Rate-limit model fallback (Jay 2026-10-11): when the supervisor, the executor or one of its subagents is refused
-// for quota, switch to the next model in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-5.6-sol, and switch
+// for quota, switch to the next model in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol, and switch
 // back when the limit resets. opencodex records every request in usage.jsonl with conversationId =
 // sha256(Codex thread id)[:32], so a 429 maps to the exact thread (2026-10-11 05:04: this research chat on
 // anthropic/claude-opus-5-5, "All Anthropic OAuth accounts are temporarily rate-limited").
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const pace=require('./pace.cjs');
 const FALLBACK_MS=5*60*60*1000;
-const LAST_RESORT='gpt-5.6-sol';
+// The last stop moved from gpt-5.6-sol to the current GPT model (Jay 2026-10-29: 「限速後換模型換成你的推薦的那個 SOL」).
+const LAST_RESORT='gpt-6.1-sol';
 const home=()=>process.env.OPENCODEX_HOME||path.join(os.homedir(),'.opencodex');
 const usageFile=()=>process.env.OPENCODEX_USAGE_FILE||path.join(home(),'usage.jsonl');
 const quotaFile=()=>process.env.OPENCODEX_QUOTA_FILE||path.join(home(),'provider-account-quota-cache.json');

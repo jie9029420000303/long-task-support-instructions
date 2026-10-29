@@ -5,14 +5,14 @@ const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
 const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,IDLE_WORK_MS,
-  NO_EVENT_REVIEW_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,OVERDUE_TIERS,OVERDUE_NEAR,overdueTier,awakeSince,inputSource,deliveredText,subagentActivityAt}=require('./guard.cjs');
+  NO_EVENT_REVIEW_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,OVERDUE_TIERS,OVERDUE_NEAR,overdueTier,awakeSince,inputSource,deliveredText,subagentActivityAt,executorBusy}=require('./guard.cjs');
 const {holdAlive}=require('./claude-hold.cjs');
 const signals=require('./signals.cjs');
 const login=require('./login-check.cjs');
 const dashboard=require('./dashboard.cjs');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage}=require('./dispatch-audit.cjs');
+const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage,trackDocTime}=require('./dispatch-audit.cjs');
 const {digest,promoteNext,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
@@ -107,7 +107,7 @@ function trackTools(row){
       const items=state.callItems||={};items[block.id]=signals.workItem(block);
       const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     }
-    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]={command:block.input.command.replace(/\s+/g,' ').trim().slice(0,300),at:row.timestamp||now(),background:Boolean(block.input.run_in_background)};
+    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]={command:block.input.command.replace(/\s+/g,' ').trim().slice(0,300),at:row.timestamp||now(),background:Boolean(block.input.run_in_background),poll:signals.pollOnly(block)};
     if(row.type==='user'&&block?.type==='tool_result'){
       // The auto-mode classifier's refusal: forwarded authorization does not satisfy it; only Jay switching the chat does.
       const reason=signals.refusalOf(block);
@@ -283,9 +283,10 @@ function supervisorClock(){
   const idleSince=Math.max(state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
-  const idle=awake(idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser&&!limited;
+  const idle=awake(idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser&&!limited&&!executorBusy(state);
   const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round(awake(idleSince)/60000),openCriteria,readyPackages}:null;
-  // An open criterion no live package names (acceptanceIds) for 10 minutes: the supervisor names the packages to dispatch.
+  // An open criterion no live package names (acceptanceIds) for 30 minutes while the executor is idle: the supervisor
+  // names the packages to dispatch (Jay 2026-10-29: 30-minute grace, only when idle).
   const live=['ready','inFlight','blocked','returned'].flatMap(key=>snapshot?.packages?.[key]||[]);
   const covered=new Set(live.flatMap(item=>Array.isArray(item.acceptanceIds)?item.acceptanceIds:[]));
   const uncovered=snapshot?openCriteria.filter(id=>!covered.has(id)).sort():[];
@@ -294,7 +295,7 @@ function supervisorClock(){
   for(const id of uncovered)plan[id]??=Date.now();
   const longUncovered=uncovered.filter(id=>awake(plan[id])>=UNPLANNED_MS);
   let unplanned=null;
-  if(longUncovered.length&&!waitingUser&&!limited&&once('unplanned:'+longUncovered.join(','))){
+  if(longUncovered.length&&idle&&once('unplanned:'+longUncovered.join(','))){
     const seats=Number(snapshot?.capacity?.verified)||0,inFlight=(snapshot?.packages?.inFlight||[]).length;
     unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awake(plan[id])))/60000)};
   }
@@ -329,10 +330,11 @@ function supervisorClock(){
   for(const [,item] of repeated)item.announced=now();
   // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time): one wake at half to see
   // whether round trips eat the time, one when spent to put the status and options to Jay. A new budget re-arms both.
-  const budget=snapshot?.docBudget,budgetFrom=Date.parse(budget?.startedAt);
-  const budgetStage=budget&&!limited&&!waitingUser?docBudgetStage(budget,awake(budgetFrom)):null;
+  // Only time spent writing documents counts (Jay 2026-10-29), not the wall clock since the budget started.
+  const budget=snapshot?.docBudget,usedMs=trackDocTime(state,snapshot,Math.max(state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0));
+  const budgetStage=budget&&!limited&&!waitingUser?docBudgetStage(budget,usedMs):null;
   const docBudget=budgetStage&&once('doc_budget:'+budget.startedAt+'/'+budget.minutes+':'+budgetStage)?{stage:budgetStage,startedAt:budget.startedAt,
-    devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(awake(budgetFrom)/60000),basis:budget.basis}:null;
+    devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(usedMs/60000),basis:budget.basis,estimate:budget.estimate||null}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(idleWork?['idle_with_work']:[]),
     ...(noEventHour?['no_event_hour']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
@@ -379,6 +381,9 @@ async function watch(){
     fs.unlinkSync(lockPath);
   }
   fs.writeFileSync(lockPath,JSON.stringify({pid:process.pid,run,at:now()}),{flag:'wx'});ownsLock=true;
+  // The system guard (watch-guard.cjs, launchd) checks registered runs every 3 minutes and pushes Jay when a watch that
+  // should run has been gone or failing for 10 minutes (Jay 2026-10-29).
+  try{require('./watch-guard.cjs').register(run,{platform:'claude-code'});}catch{}
   state=read(statePath);
   if(stopped()){state.phase='stopped';checkpoint();return;}
   if(state.pending||state.phase==='accepted')return;
@@ -513,7 +518,7 @@ async function watch(){
     // Quiet means nothing moves at all: the executor, its subagents and the test processes it runs. A pause or a
     // running rate limit is a known stop, not silence, and neither is waiting for the supervisor's ruling on an executor
     // event (lastDecisionAt, set by supervise.cjs decision; absent in older state, it counts as 0).
-    const silent=!held&&!isPaused&&!rateLimited()&&(hadCheckedWait||Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);
+    const silent=!held&&!isPaused&&!rateLimited()&&(hadCheckedWait||!executorBusy(state)&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);
     if(silent||clock){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
       const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[])];
