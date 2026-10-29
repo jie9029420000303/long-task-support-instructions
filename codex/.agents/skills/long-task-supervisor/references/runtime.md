@@ -47,7 +47,9 @@ node <installed-skill>/scripts/supervise.cjs shown RUN KEY...
 node <installed-skill>/scripts/supervise.cjs stop RUN "<使用者原話>"
 ```
 
-`run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。等待期間是本機程式而非模型。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
+`run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。等待期間是本機程式而非模型：每 3 分鐘用 `read_thread` 讀一次執行對話與監督對話（使用者 2026-10-29 定案），不用 `wait_threads`（它綁在監督當下的回合，回合一結束就失敗）。同一 run 已有活著的父程序時，第二次啟動直接退出並印出 `alreadyRunning`，不會搶鎖。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
+
+開工時（續接也一樣）跑 `node <installed-skill>/scripts/watch-guard.cjs status`：`loaded` 不是 true 就跑一次 `watch-guard.cjs install`（系統排程，launchd 每 3 分鐘、不叫模型，見下方「監看中斷」）；`notify.configured` 不是 true 時小秘書推播不會送出，登記待決帳（`user_action`）請使用者提供推播設定，其餘照常開工。
 
 綁定既有執行對話時，先以 `wait_threads({targets:[{threadId:executorId}],timeoutMs:0})` 同時取當前 `cursor` 與 `latestTurn.id`，分別寫入 `executorCursor`、`executorBaselineTurnId`，從下一個新回合才開始監看；通知 API 即使游標未變仍會附上舊的 latestTurn，因此必須以 ID 排除它。新建執行對話須監看其第一個完成回合，不填這兩欄。
 
@@ -66,7 +68,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，到期前不發續接，結果變化或到期才產生 `continue` 事件。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。事件標記那一行本身是完整 JSON 即可，標記後面另起一行的文字會被忽略。新事件先持久保存完整原文，喚醒只傳事件識別、雜湊及 `supervise.cjs context RUN EVENT_ID`；不附整段處理規則或歷史。context 只接受目前待決事件，一次提供 brief 與授權來源；送驗才載完整有效契約。舊版未確認送達的 prompt 保留原文對帳，不在升級時改寫或重送。
 
-監督一次只處理一個事件。等待 API 只回報最新回合，所以背景程式每讀到一個新的完成回合，就從對話紀錄往回補讀（最多 8 個回合，到上一個已處理回合為止）：前一事件未決期間或兩次讀取之間完成的提問、阻塞、送驗、無標記或格式錯誤的回合，依完成先後排進 `eventQueue`，前一事件決策後依序成為待決事件，排在派工檢查與進度時鐘前面；已被後續回合取代的一般進度與等待、沒有最終回覆的回合只記為已處理，不再續接。brief 的 `eventQueue` 列出排隊事件，儀表板顯示件數。佇列裡有較新的送驗時不能接受目前這份（程式會拒絕）：用 observe 寫明「被排隊中的送驗 <id> 取代」，再處理那一份。佇列裡沒有送驗、只有提問或阻塞等事件時，送驗的 context 另附它們的完整原文（`queued`），接受照常；背景程式把它們記為驗收時一併結案（resolved 的 `closedWithAcceptance`），監督把它們列進給使用者的收尾清單。
+監督一次只處理一個事件。每次讀取只看最新回合，所以背景程式每讀到一個新的完成回合，就從對話紀錄往回補讀（最多 8 個回合，到上一個已處理回合為止）：前一事件未決期間或兩次讀取之間完成的提問、阻塞、送驗、無標記或格式錯誤的回合，依完成先後排進 `eventQueue`，前一事件決策後依序成為待決事件，排在派工檢查與進度時鐘前面；已被後續回合取代的一般進度與等待、沒有最終回覆的回合只記為已處理，不再續接。brief 的 `eventQueue` 列出排隊事件，儀表板顯示件數。佇列裡有較新的送驗時不能接受目前這份（程式會拒絕）：用 observe 寫明「被排隊中的送驗 <id> 取代」，再處理那一份。佇列裡沒有送驗、只有提問或阻塞等事件時，送驗的 context 另附它們的完整原文（`queued`），接受照常；背景程式把它們記為驗收時一併結案（resolved 的 `closedWithAcceptance`），監督把它們列進給使用者的收尾清單。
 
 送驗前用 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...` 產生候選清單及**可直接貼在最終回覆末尾的完整事件行**；不要手寫或截短雜湊。清單至少列一個檔案，包含本次候選版所有直接修改的交付檔。監督接收時會重算清單及每個候選檔，變動後必須另建清單並重交；舊證據只能附沿用核對後沿用（[換版與有效證據](acceptance.md#換版與有效證據)），不得未經核對拼接。
 
@@ -101,11 +103,11 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
  "answer":[{"key":"r24-r21-relogin","choice":"A","quote":"R24R21: A 兩個都重登"}]}
 ```
 
-- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人動手）、major_change（上層規則要先確認的重大變更）；其他類程式拒收，由監督自己決定。kind 只逼監督寫出理由，不證明真的該問。`ask`、`recommend`、`why` 必填，`options` 選填。
+- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人動手）、major_change（上層規則要先確認的重大變更）；其他類程式拒收，由監督自己決定。kind 只逼監督寫出理由，不證明真的該問。 依[預設類別授權](authorization.md#長任務預設類別授權)，有推薦、Git 操作、標明測試的對外發送、開工已授權的帳號密碼／付費／正式部署、開發過程產物的刪除都不登記：paid、credential 只用在開工沒授權的部分，irreversible 只用在改寫 Git 歷史或未授權的正式部署，delete 只用在既有資料，external 只用在不是測試的正式發送。`ask`、`recommend`、`why` 必填，`options` 選填。
 - 同一 key 再 raise 是更新原項；kind、ask、recommend、why、options 完全相同時不算變動，不留歷史、不需重列。已回答或已撤下的 key 只能用 `reopen` 附改變題目的新事實重開，舊答案留在 history。問題文字和任何一項相同（不論狀態）的會被拒：未決的請更新那個 key，已結的請 reopen 那個 key。換了說法的重複，由監督對照 context 附的完整清單自己判斷。
 - 使用者的回答要登記成授權或驗收修訂（同意某動作、給授權範圍、改驗收條文）時，唯一做法是 `supervise.cjs amend RUN FILE`，在修訂 JSON 加 `pendingKeys`（它回答的待決 key，每項是 key 字串或 `{"key":…,"choice":…}`）：一步登記修訂並以修訂 id 結案這些項（`answer.amendmentId`），不再另跑 `pending` 的 `answer`。任一 key 不在待決帳、已撤下或已由別的回答結案時整筆不寫，修訂帳與待決帳都不變；同一修訂重送只結案仍未決的項，修訂不重複登記。先 `answer` 原話再另做 `amend`，兩邊會連不起來（2026-10-15 IA 10 項待決的 `answer.amendmentId` 全空）。`pending` 的 `answer` 只用於不需登記修訂的回答（例如本人已切好權限選單），或結掉已被先前登記的修訂解決的項目（附那筆 `amendmentId`）。
 - `answer` 的 `quote` 是本回合收到的使用者原話（本對話輸入或別的對話轉來，規則同 pause）；不是本回合收到的，另附 `source:{path,sha256}` 指向允許根目錄內、含這句原話的已存原文快照，或改用已登記修訂的 `amendmentId`。`withdraw` 寫明為什麼監督能自己決定、依據哪份授權或修訂，或哪個事件讓它不再需要（例如 `permission_changed` 的事件識別）。
-- 問使用者：`supervise.cjs ask RUN` 只讀，回 `{items,new,repeat}`：`items` 是全部未決項，全部寫在同一則回覆；`new` 是還沒列過或列過後改過的 key；`repeat:true` 表示全都列過且沒變，不再問。列出的同一回合執行 `supervise.cjs shown RUN <key…>`，key 必須正好是全部未決項才記為已列，少列、多列都拒絕。
+- 問使用者：`supervise.cjs ask RUN` 只讀，回 `{items,new,repeat}`：`items` 是全部未決項，全部寫在同一則回覆；`new` 是還沒列過或列過後改過的 key；`repeat:true` 表示全都列過且沒變，不再問。列出的同一回合執行 `supervise.cjs shown RUN <key…>`，key 必須正好是全部未決項才記為已列，少列、多列都拒絕。記為已列時程式同時用「Jay的小秘書」推播一則「【開發任務需要你決定】『對話標題』有 N 題要你回答，請打開該監督對話查看。」，同一組待決只推一次、不重複催；推播失敗不影響記錄（收件設定見 runtime「監看中斷」）。
 - `context` 與 `brief` 的 `pendingDecisions` 有 `open`（完整未決項）、`closed`（已答／已撤下的 key、問題與答案）、`unpresented`（還沒列給使用者的 key）；檔案損壞時改附 `error`，修好前 `pending` 拒絕寫入。`監督儀表板.md` 的「待你決定」節顯示同一份未決清單，`pending`、`shown` 寫入後立即更新。
 - 舊版 run 的待決帳檔還沒建立時，`pendingDecisions.legacy` 列出歷次決策的 pendingApprovals 文字；監督依決策帳與現況把仍未決的以新格式登記一次（都已解決就送 `{"raise":[]}`），之後不再出現。舊文字有的是全表、有的是增量，所以程式不自動匯入。
 
@@ -115,7 +117,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 ## 主動進度查核
 
-監督有自己的進度時鐘，不以執行者說的等待或步調為準。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題，另列 `open`：當下仍未解決的問題，包括已通報過的）；只有發現問題才產生 `progress_review` 送進本對話，`reasons` 標明原因：
+監督有自己的進度時鐘，不以執行者說的等待或步調為準。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題，另列 `open`：當下仍未解決的問題，包括已通報過的）；只有發現問題才產生 `progress_review` 送進本對話，`reasons` 標明原因。執行端忙碌時（有指令在跑，只輪詢或背景執行的不算；或正在等監督核對過的外部結果 `external_result`。執行端自己宣告的 `waitMinutes` 不算忙碌，監督照樣用自己的時鐘，使用者 2026-10-07 定案），`silence`、`idle_with_work`、`unplanned_criteria` 不發，`overdue`、`executor_blocked`、`process_stalled`、`no_event_hour` 照發（使用者 2026-10-29 定案：GDB V32 監督被誤報叫醒 23 次）。
 
 - `executor_blocked`：執行對話的指令發出 5 分鐘仍沒有結果、這段期間沒有任何指令跑完，程序清單裡也找不到它在跑，這只是可能卡住的線索。先核對原工具結果及上層授權；沒有明確拒絕不得推定需要本人處理。工具確實要求本人確認時才用 `observe` 記錄拒絕原文與受阻動作，集中交由原監督向使用者說明。
 - `machine_slept`：綁定後電腦睡眠 5 分鐘以上，例如用電池闔蓋，整場因此停住。監督請使用者接電源、不要闔蓋，用 `observe`，並把停擺時長記進決策帳與驗收報告。綁定前的睡眠不算。
@@ -128,8 +130,8 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有依賴已全部完成、可立即開跑的包在等同一個資源；監督評估能否並行。可立即開跑＝就緒包須 `independent`、`safe`、依賴全部完成、排他資源沒被在途包占用；受阻包只算 kind 為 `resource_conflict` 的；且它用到的每個已宣告資源空位都夠它的 units。`resourceUnderused[].waiting` 只列這些包；依賴還沒完成或實際互斥的等待包不算。同一資源的可派包集合沒變就不再叫醒，包開始或結束只改變已用名額時不重叫（2026-10-15 IA 19 次叫醒中 15 次監督判 observe，因為舊去重以已用數與等待清單為準）。
 - `repeat`：綁定後同一條指令連續失敗 3 次。處理過一次進度查核後重新計數。
 - `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠；停頓從執行端最後活動或監督對它事件的判定套用時（`lastDecisionAt`）起算，取較晚者），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
-- `unplanned_criteria`：未通過的驗收條件 10 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），執行端在忙也照樣觸發。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
-- `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）從 `startedAt` 起算、扣掉電腦睡眠，用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；等使用者核准時不發。
+- `unplanned_criteria`：未通過的驗收條件 30 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），而且執行端正閒置（同 `idle_with_work` 的判斷）；執行端在忙時不發（2026-10-29 由 10 分鐘、在忙也發改成這樣：排下一包常超過 10 分鐘，多半是誤報）。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
+- `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）只算真正在寫文件的時間：有標 `"doc":true`（或 id 以 DOC 開頭）的文件包在途，且執行端或子代理 5 分鐘內有活動，兩次檢查相隔超過 5 分鐘的那段不算（使用者 2026-10-29 定案：V32 把等待也算進去，誤報用了 728 分鐘）。用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis,estimate}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；等使用者核准時不發。
 
 事件附 `pace`（每個在途包的開始時間、扣掉睡眠後的經過分鐘、睡眠分鐘、基準分鐘、比值、是否已做完、程序是否還活著、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`executorBlocked`、`machineSlept`、`overdue`、`nearOverdue`、`baselineMissing`、`processStalled`、`resourceUnderused`、`failedCommands` 與各類最後活動時間（含監督最近一次判定套用的 `lastDecisionAt`）。
 
@@ -148,6 +150,16 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 ### 延遲收件恢復
 
 App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，以既有退避重啟只讀對帳；送達對帳時若目標對話正在跑回合（訊息排在回合後面），每 15 秒再查一次，等回合結束收進去為止，不判為無法確認、不重開監看。該 delivery 預設不再送第二次。唯一例外是能證明遺失：目標對話在本機有紀錄檔、目前閒置、送出後已有回合結束，所有紀錄段落卻都沒有該送達標記（例如訊息排在進行中的回合後面，該回合被中斷而丟失）。這時重送一次並記入 `lostDeliveries`；重送後仍對不到，或缺任何一項證據，照舊停在 needs_reconcile。沒有 inflight、STOP、stopped、accepted 不自動復活。外部操作只有排隊時仍不可聲稱模型已讀。恢復不代表整個 App 父程序可自行復活。
+
+### 監看中斷
+
+使用者 2026-10-29 定案：監看停住要在 10 分鐘內讓他知道（先前三次停擺都是幾小時後才被發現，合計空等約 18 小時）。
+
+- 判定：只有成功讀到執行對話才算監看在運作。連續讀不到（`daemon-state` 的 `appHealth.failingSince`）、程式反覆出錯、父程序 `run-watch.cjs` 整個消失（`runtime-state.json` 的 PID 不在、心跳停了），都算沒在運作。
+- 通知：滿 10 分鐘時，`watch-health.cjs`（父程序每分鐘、系統排程 `watch-guard.cjs` 每 3 分鐘各查一次）用「Jay的小秘書」推一則「【開發任務中止，需要開啟查看】…請打開監督對話『…』查看」，並在儀表板最上方標示；同一次中斷只推一則，恢復時再推一則「【已恢復，不用處理】」。推播失敗重試一次，仍失敗就寫在儀表板。App 還收得到訊息時，監督對話另外收到一則 `LONG_TASK_WATCH_ALERT`；恢復後收到 `LONG_TASK_WATCH_RECOVERED`，用一句話結束回合即可。
+- 推播設定：Telegram bot 金鑰在鑰匙圈，收件對象在 `~/.config/long-task-supervisor/notify.json`（`notify.cjs status` 檢查、`notify.cjs configure` 設定）；兩者都不寫進 run 或技能 repo。訊息不放按鈕。
+- 重開：子程序 `native-watch.cjs` 掛掉由父程序自動重開。父程序整個消失時，系統排程無法從 App 外重開它（2026-10-29 實測：App 只接受它自己啟動的程式連線），所以只推播；監督在下一個回合重掛。
+- **監督每個回合結束前**跑 `supervise.cjs status RUN`：`active` 為 true 才結束回合。不是 true 且 run 沒有 STOP／accepted／stopped 時，先看 `watch` 欄位：`parentAlive` 為 false 就依上方啟動指令在本對話用背景命令重掛 `run-watch.cjs`（`restartCommand`），等到 `active` 為 true；父程序還在但 `appHealth` 顯示讀不到，依 `lastError` 處理（例如執行對話被封存或刪除就登記待決帳），不另開第二組監看。
 
 ## 原契約、使用者修訂與舊 run 接入
 

@@ -2,9 +2,17 @@ const fs=require('node:fs');
 const readline=require('node:readline');
 const data=JSON.parse(fs.readFileSync(process.env.MOCK_CODEX_FIXTURE,'utf8'));
 const sentFile=process.env.MOCK_CODEX_SENT;
-let waitCount=0,currentTurn=0;
+let waitCount=0,currentTurn=0,executorPollReads=0;
 const reply=value=>({content:[{type:'text',text:JSON.stringify(value)}]});
+// What wait_threads used to report as the next poll; since v0.34.0 the watcher polls with read_thread(turnLimit:1),
+// so the first such read (the startup proof) leaves the turn alone and each later one advances it the same way.
+function advance(){
+  const gateClosed=data.secondTurnGate && !fs.existsSync(data.secondTurnGate);
+  const next=data.secondTurnGate ? (waitCount++ + 1) : waitCount++;
+  currentTurn=gateClosed?0:Math.min(next,Math.max(0,(data.finals?.length||1)-1));
+}
 function call(name,args) {
+  if (sentFile) fs.appendFileSync(sentFile+'.tools',name+'\n');
   if (name==='wait_threads') {
     if(data.waitError)throw Object.assign(Error(data.waitError.message),{code:data.waitError.code});
     if(args.targets.some(target=>target.threadId===data.supervisorId)) throw Error('wait_threads cannot wait on the calling thread.');
@@ -26,13 +34,19 @@ function call(name,args) {
   if (name==='read_thread') {
     if(data.readErrorFile&&fs.existsSync(data.readErrorFile)){
       const left=Number(fs.readFileSync(data.readErrorFile,'utf8'));
-      if(left>0){fs.writeFileSync(data.readErrorFile,String(left-1));throw Object.assign(Error('MCP error -32000: Codex app tool request failed'),{code:-32000});}
+      if(left>0){fs.writeFileSync(data.readErrorFile,String(left-1));throw Object.assign(Error(data.readErrorMessage||'MCP error -32000: Codex app tool request failed'),{code:-32000});}
     }
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
+    // The App refuses a read whose reply would be too large, every time with the same arguments.
+    if (data.sizeLimitChars && args.turnLimit*args.maxOutputCharsPerItem>data.sizeLimitChars) return {isError:true,content:[{type:'text',text:'Tool response exceeds the size limit'}]};
     if (args.threadId===data.executorId) {
+      if (args.turnLimit===1 && executorPollReads++>0) advance();
       const finals=data.finals||[data.final],turnId='executor-turn-'+(currentTurn+1);
       const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);
-      return reply({thread:{id:data.executorId},turns:[{id:turnId,status:data.readTurnStatus||'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]},...sends.map(text=>({type:'userMessage',text}))]}]});
+      const activity=data.activityGate && fs.existsSync(data.activityGate);
+      if (data.noTurn && args.turnLimit===1) return reply({thread:{id:data.executorId},turns:activity?[{id:'executor-active-turn',status:'inProgress',items:[{type:'agentMessage',id:'executor-new-activity',text:'working'}]}]:[]});
+      return reply({thread:{id:data.executorId},turns:[{id:turnId,status:data.readTurnStatus||'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]},...sends.map(text=>({type:'userMessage',text})),
+        ...(activity?[{type:'agentMessage',id:'executor-new-activity',text:'working'}]:[])]}]});
     }
     const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);
     const activity=data.supervisorActivityGate && fs.existsSync(data.supervisorActivityGate);

@@ -43,6 +43,26 @@ test('a document budget is checked against 1.5x the development time and its sta
   assert.throws(()=>parse(snapshot('x',{docBudget:{...budget,startedAt:'soon'}}),binding),/startedAt/);
   assert.deepEqual([0.4,0.5,0.99,1,2].map(ratio=>docBudgetStage(budget,ratio*114*60000)),[null,'half','half','spent','spent']);
   assert.equal(docBudgetStage(undefined,1e9),null);
+  assert.throws(()=>parse(snapshot('x',{docBudget:{...budget,estimate:[{item:'.md',minutes:0}]}}),binding),/estimate/);
+  assert.equal(parse(snapshot('x',{docBudget:{...budget,estimate:[{item:'.md',minutes:40},{item:'Archify 流程圖與圖片檢查',minutes:60}]}}),binding).docBudget.estimate.length,2);
+});
+
+// V32 (2026-10-18/19) counted the wall clock from the budget's start and reported 728 used minutes, waits and stalls
+// included. Jay 2026-10-29: only the time actually spent writing documents counts.
+test('document time counts only while a document package is in flight and someone works on it',()=>{
+  const {trackDocTime}=require(path.join(codex,'dispatch-audit.cjs'));
+  const startedAt='2026-10-29T01:00:00Z',t0=Date.parse('2026-10-29T02:00:00Z'),minute=60000;
+  const docs={docBudget:{startedAt,devMinutes:76,minutes:114,basis:'x'},packages:{inFlight:[{id:'WP-MD',doc:true}]}};
+  const other={docBudget:docs.docBudget,packages:{inFlight:[{id:'WP-FIX'}]}};
+  const state={};
+  assert.equal(trackDocTime(state,docs,t0,t0),0,'the first check only starts the clock');
+  assert.equal(trackDocTime(state,docs,t0+3*minute,t0+3*minute),3*minute,'writing for 3 minutes');
+  assert.equal(trackDocTime(state,other,t0+6*minute,t0+6*minute),3*minute,'other work is not document time');
+  assert.equal(trackDocTime(state,docs,t0,t0+9*minute),3*minute,'nobody worked in the last 5 minutes: a wait');
+  assert.equal(trackDocTime(state,docs,t0+30*minute,t0+30*minute),3*minute,'a 21-minute gap (sleep, a stopped watch) never counts');
+  assert.equal(trackDocTime(state,{...docs,packages:{inFlight:[{id:'DOC-SLIDES'}]}},t0+33*minute,t0+33*minute),6*minute,'an id starting DOC is document work too');
+  assert.equal(trackDocTime(state,{...docs,docBudget:{...docs.docBudget,minutes:150,approval:'A'}},t0+36*minute,t0+36*minute),9*minute,'added minutes keep the time already used');
+  assert.equal(trackDocTime(state,{...docs,docBudget:{...docs.docBudget,startedAt:'2026-10-30T00:00:00Z'}},t0+39*minute,t0+39*minute),0,'a new budget starts from zero');
 });
 
 // Bookkeeping by script (Jay 2026-10-15): in GDB v1.2.0 the main line spent 99 minutes and 506 turns only on records,
@@ -77,6 +97,36 @@ test('work-package files become the snapshot, one mark per state change, and a r
     fs.writeFileSync(path.join(wp,'B3.md'),'[工作包] id=B3；依賴：無\n');
     assert.throws(()=>run(['from-wp',f.run,state]),error=>/B3\.md/.test(error.stderr));
     assert.equal(fs.readFileSync(path.join(f.run,'dispatch-history.jsonl'),'utf8').trim().split('\n').length,2);
+  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+});
+
+// 收包 (Jay 2026-10-29): taking a package back took four separate rounds of hand-written JSON (status line, evidence,
+// acceptance table, snapshot). One result file now does them together, and a wrong path or ID changes nothing.
+test('collect takes a package back with its evidence and acceptance results in one step, or not at all',()=>{
+  const f=fixture('dispatch-collect-','codex'),state=path.join(f.root,'state'),wp=path.join(state,'wp');fs.mkdirSync(wp,{recursive:true});
+  const script=path.join(codex,'dispatch.cjs'),run=args=>execFileSync(process.execPath,[script,...args],{stdio:'pipe',encoding:'utf8'});
+  fs.writeFileSync(path.join(wp,'B1.md'),'[工作包] id=B1；依賴：無\n[狀態] {"list":"inFlight","handle":"agent:abc","baseline":{"minutes":20,"startedAt":"2026-10-29T01:00:00Z","basis":"pace"}}\n[驗收條目] A1\n');
+  const report=path.join(f.root,'B1-report.md');fs.writeFileSync(report,'A1 passed\n');
+  const criteria=JSON.parse(fs.readFileSync(path.join(f.run,'contract.json'),'utf8')).criteria.map(item=>item.id);
+  const base=path.join(f.root,'base.json');save(base,{capacity:{verified:3,evidence:['platform:list_agents']},
+    acceptance:{revision:'r1',items:criteria.map(id=>({id,status:'PENDING',evidence:['plan']}))}});
+  try{
+    run(['from-wp',f.run,state,'--base',base,'--revision','p1']);
+    const result=path.join(f.root,'result.json');
+    save(result,{status:{list:'completed',handle:'agent:abc',evidence:[report]},acceptance:[{id:criteria[0],status:'PASS',evidence:[report]},{id:'NOPE',status:'PASS',evidence:[report]}]});
+    const snapBefore=fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'),wpBefore=fs.readFileSync(path.join(wp,'B1.md'),'utf8');
+    assert.throws(()=>run(['collect',f.run,state,'B1',result]),error=>/NOPE/.test(error.stderr));
+    save(result,{status:{list:'completed',handle:'agent:abc',evidence:[path.join(f.root,'missing.md')]},acceptance:[]});
+    assert.throws(()=>run(['collect',f.run,state,'B1',result]),error=>/does not exist/.test(error.stderr));
+    assert.equal(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'),snapBefore);assert.equal(fs.readFileSync(path.join(wp,'B1.md'),'utf8'),wpBefore);
+    save(result,{status:{list:'completed',handle:'agent:abc',evidence:[report]},acceptance:[{id:criteria[0],status:'PASS',evidence:[report]}]});
+    const out=JSON.parse(run(['collect',f.run,state,'B1',result]));
+    assert.deepEqual(out.acceptance,[{id:criteria[0],status:'PASS'}]);assert.equal(out.packages.completed,1);
+    const snap=JSON.parse(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'));
+    assert.equal(snap.acceptance.items.find(item=>item.id===criteria[0]).status,'PASS');
+    assert.ok(snap.packages.completed[0].evidence.includes(report));
+    assert.match(fs.readFileSync(path.join(wp,'B1.md'),'utf8'),/^\[狀態\] \{"list":"completed"/m);
+    assert.ok(fs.readFileSync(path.join(f.run,'acceptance-history.jsonl'),'utf8').includes('"status":"PASS"'),'the acceptance history records the new status');
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 

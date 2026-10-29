@@ -10,7 +10,8 @@ const path=require('node:path');
 // time): median output tokens per second of turn time and median output tokens, n = 60, 31 and 11.
 const DEFAULTS={'gpt-5.6-sol':{tokensPerSecond:34.9,outputTokens:19817},'gpt-5.6-terra':{tokensPerSecond:42.2,outputTokens:14627},
   'gpt-6.1-sol':{tokensPerSecond:25.7,outputTokens:9554}};
-const FALLBACK=DEFAULTS['gpt-5.6-sol'];
+// Unmeasured models use the rate-limit fallback's last stop (gpt-6.1-sol since 2026-10-29).
+const FALLBACK=DEFAULTS['gpt-6.1-sol'];
 const MIN_SAMPLES=3;
 const median=values=>{const sorted=[...values].sort((a,b)=>a-b),mid=sorted.length>>1;return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;};
 const round=value=>Math.round(value*10)/10;
@@ -104,7 +105,7 @@ function speed(runs){
 function rate(model,measured){
   if(measured[model])return measured[model];
   const known=DEFAULTS[model]||FALLBACK;
-  return {...known,samples:0,source:DEFAULTS[model]?'default for '+model:'default (gpt-5.6-sol) for unmeasured '+(model||'model')};
+  return {...known,samples:0,source:DEFAULTS[model]?'default for '+model:'default (gpt-6.1-sol) for unmeasured '+(model||'model')};
 }
 function baseline({model,estimatedOutputTokens,toolMinutes=0},measured){
   const known=rate(model,measured);

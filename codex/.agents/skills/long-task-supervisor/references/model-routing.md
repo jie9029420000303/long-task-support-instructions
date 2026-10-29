@@ -48,7 +48,7 @@ Claude 路線參照 Claude 側既有分工：
 
 ## 額度限速時自動換模型（使用者 2026-10-11 定案，預設開啟）
 
-上面「不在 anthropic 與 anthropic-apikey 之間互換、不換 GPT」的規則，只有在撞到額度限速時有例外。順序固定為 `anthropic/` → `anthropic-apikey/` → `gpt-5.6-sol`，跳過目前正在用的和仍在限速中的系列，Claude 維持同層級（Opus 換 Opus、Sonnet 換 Sonnet）。
+上面「不在 anthropic 與 anthropic-apikey 之間互換、不換 GPT」的規則，只有在撞到額度限速時有例外。順序固定為 `anthropic/` → `anthropic-apikey/` → `gpt-6.1-sol`（最後一站使用者 2026-10-29 由 gpt-5.6-sol 改定），跳過目前正在用的和仍在限速中的系列，Claude 維持同層級（Opus 換 Opus、Sonnet 換 Sonnet）。
 
 - 監督與執行對話：背景程式看到 opencodex 記錄的 429／rate-limit，就送一則短訊並帶 `model` 參數，讓該對話改用下一個模型接續原工作。恢復時間到了，下一則送給它的訊息會帶回原模型。
 - 平台限制（2026-10-11 實測）：所有 OAuth 帳號都被限速時，App 會照 opencodex 給的最早恢復時間，讓當下的回合原地等待；帶 `model` 的訊息會立即改掉該對話的模型設定，但不會中斷正在等待的回合，新模型從下一個回合起生效，排隊的訊息在回合恢復後照常收進去。App 工具沒有中斷別的對話回合的功能，所以已在等待的回合無法提早改用新模型。

@@ -55,7 +55,8 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},now=
   return lines.join('\n')+'\n';
 }
 function write(run,args){
-  const file=path.join(run,FILE),body=render({ledger:pending.view(run,args.state),...args});
+  // An outage notice from watch-health.cjs stays at the top until the watch works again.
+  const file=path.join(run,FILE),body=require('./watch-health.cjs').withBanner(render({ledger:pending.view(run,args.state),...args}),run);
   fs.writeFileSync(file+'.tmp',body);fs.renameSync(file+'.tmp',file);
   return file;
 }

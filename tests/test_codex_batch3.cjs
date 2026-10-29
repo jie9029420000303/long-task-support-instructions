@@ -119,13 +119,14 @@ test('a refused executor continues on the next model in Jay\'s order and gets it
   }finally{await f.stop();fs.rmSync(gate,{force:true});}
 });
 
-test('model fallback follows anthropic/ -> anthropic-apikey/ -> gpt-5.6-sol and skips what is still limited',()=>{
+// Jay 2026-10-29: the last stop is gpt-6.1-sol (was gpt-5.6-sol).
+test('model fallback follows anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol and skips what is still limited',()=>{
   const fallback=require(path.join(scripts,'model-fallback.cjs'));
   const state={rateLimits:{'anthropic/':{until:Date.now()+60000}}};
   assert.equal(fallback.next('anthropic/claude-opus-5-5','anthropic/claude-opus-5-5','executor',state),'anthropic-apikey/claude-opus-5-5');
   state.rateLimits['anthropic-apikey/']={until:Date.now()+60000};
-  assert.equal(fallback.next('anthropic/claude-sonnet-5-5','anthropic/claude-sonnet-5-5','subagent',state),'gpt-5.6-sol');
-  state.rateLimits['gpt-5.6-sol']={until:Date.now()+60000};
+  assert.equal(fallback.next('anthropic/claude-sonnet-5-5','anthropic/claude-sonnet-5-5','subagent',state),'gpt-6.1-sol');
+  state.rateLimits['gpt-6.1-sol']={until:Date.now()+60000};
   assert.equal(fallback.next('anthropic/claude-opus-5-5','anthropic/claude-opus-5-5','executor',state),null,'all limited is reported, not guessed');
   assert.equal(fallback.next('gpt-6-luna','gpt-6-luna','executor',{}),'anthropic/claude-opus-5-5','a GPT thread goes to Anthropic first');
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'batch3-quota-'));
@@ -186,21 +187,27 @@ test('waiting on Jay\'s approval stops the hourly and idle reminders that only r
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('an open criterion no package covers for 10 minutes wakes the supervisor once; a package naming it clears it',()=>{
+// Jay 2026-10-29: 30 minutes of grace (was 10), and only while the executor is idle.
+test('an open criterion no package covers for 30 minutes wakes the supervisor once while the executor is idle; a package naming it clears it',()=>{
   const f=fixture();
   try{
     f.binding.dispatchAudit={enabled:true,snapshot:'dispatch.json'};
     const snapshot=covered=>({schemaVersion:1,executorId:'executor-qa',planningRevision:'p1',activity:'working',capacity:{verified:4,evidence:['spawn_agent tool']},
       packages:{ready:[],inFlight:[{id:'W1',handle:'/root/w1',exclusiveResources:[],evidence:['wp/W1.md'],acceptanceIds:covered}],returned:[],blocked:[],completed:[],recurringRework:[]},
       acceptance:{revision:'r1',items:[{id:'A1',status:'PENDING',evidence:['wp/A1.md']}]}});
-    // A busy executor keeps the other clock reasons quiet, so only the uncovered criterion can wake.
-    const state={lastRealEventAt:Date.now(),lastExecutorActivityAt:Date.now()};
+    // An executor idle for 6 minutes: the uncovered criterion may wake once its grace is over.
+    const state={lastRealEventAt:Date.now(),lastExecutorActivityAt:Date.now()-6*60000};
     const check=()=>withEnv({CODEX_HOME:f.home},()=>freshClock().check(f.run,f.binding,state));
     save(path.join(f.run,'dispatch.json'),snapshot([]));
     assert.equal(check()?.reasons.includes('unplanned_criteria')||false,false,'a criterion between two packages is not news yet');
     assert.ok(state.unplanned.A1,'the clock starts timing A1 as soon as nobody covers it');
-    // Ten minutes later it is still uncovered.
     state.unplanned.A1-=10*60000;
+    assert.equal(check()?.reasons.includes('unplanned_criteria')||false,false,'ten minutes is inside the 30-minute grace');
+    // Thirty minutes later it is still uncovered, but a command of the executor is still running.
+    state.unplanned.A1-=20*60000;state.openTools={call:{commands:['npm test'],at:new Date().toISOString()}};
+    assert.equal(check()?.reasons.includes('unplanned_criteria')||false,false,'a running command means the executor is not idle');
+    delete state.openTools;
+    // The grace is over and the executor is idle.
     const found=check();
     assert.ok(found.reasons.includes('unplanned_criteria'));
     assert.deepEqual(found.unplannedCriteria.criteria,['A1']);assert.equal(found.unplannedCriteria.freeCapacity,3,'three seats sit free beside it');

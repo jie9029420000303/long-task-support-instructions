@@ -368,9 +368,12 @@ test('free slots on a declared test resource while work waits on it are surfaced
 // Document time budget (Jay 2026-10-15): the GDB v1.2.0 documents took more than 12 hours after 76 minutes of development,
 // with 11 supervisor round trips nobody stopped to question. The clock wakes the supervisor once at half the budget and
 // once when it is spent; under half it stays quiet.
+// Since v0.34.0 only document-writing time counts (Jay 2026-10-29); the fixtures start from time already used.
+const usedDoc=(f,startedAt,minutes)=>{const state=JSON.parse(fs.readFileSync(f.statePath));state.docTime={key:startedAt,ms:minutes*60000,at:Date.now()};save(f.statePath,state);};
 test('a document budget past half wakes the supervisor once with the budget numbers',async()=>{
   const f=fixture();
-  save(path.join(f.run,'dispatch.json'),{docBudget:{startedAt:minutesAgo(60),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
+  const started=minutesAgo(200);usedDoc(f,started,60);
+  save(path.join(f.run,'dispatch.json'),{docBudget:{startedAt:started,devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
   const child=start(f);
   try{
     await until(()=>pending(f)?.kind==='progress_review');
@@ -382,9 +385,11 @@ test('a document budget past half wakes the supervisor once with the budget numb
 
 test('a spent document budget wakes as spent, and one under half stays quiet',async()=>{
   const spent=fixture();
-  save(path.join(spent.run,'dispatch.json'),{docBudget:{startedAt:minutesAgo(120),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
+  const spentAt=minutesAgo(300);usedDoc(spent,spentAt,120);
+  save(path.join(spent.run,'dispatch.json'),{docBudget:{startedAt:spentAt,devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
   const quiet=fixture();
-  save(path.join(quiet.run,'dispatch.json'),{docBudget:{startedAt:minutesAgo(20),devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
+  const quietAt=minutesAgo(300);usedDoc(quiet,quietAt,20);
+  save(path.join(quiet.run,'dispatch.json'),{docBudget:{startedAt:quietAt,devMinutes:76,minutes:114,basis:'開發 76 分鐘 × 1.5'},packages:{inFlight:[]}});
   const children=[start(spent),start(quiet)];
   try{
     await until(()=>pending(spent)?.kind==='progress_review');

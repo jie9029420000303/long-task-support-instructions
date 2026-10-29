@@ -1013,6 +1013,8 @@ class SharedSpecTests(unittest.TestCase):
         # 研究的來源與截止時點）一定要追，但執行端不整套重跑，最終由監督分功能段落全套驗收一次。
         # 沒追連帶範圍，程式與研究的沿用就沒有依據；執行端與監督各跑一次全套，最後一關等於做兩遍；
         # 像素比對只寫在規則裡、沒有工具，執行端每次換版都得臨時自製；只改一個平台，另一個平台照舊流程跑。
+        # v0.34.0（使用者 2026-10-29）：GDB V32 整套自動化測試每版跑 3～4 次；改成每版只跑受影響範圍，
+        # 整套只在最終候選的乾淨匯出跑一次，監督核對紀錄、做突變抽查與主機讀回，不再重跑整套。
         spec = (REPOSITORY / "SPEC.md").read_text(encoding="utf-8")
         for marker in (
             "執行端只重驗受影響範圍、其連帶範圍及既定必要回歸",
@@ -1021,25 +1023,27 @@ class SharedSpecTests(unittest.TestCase):
             "截止時點往後移時",
             "改到共用基礎",
             "判斷不出影響時，重驗該功能段落",
-            "自動化測試每版整套跑",
+            "整套自動化測試只在最終候選版的乾淨匯出跑一次",
+            "突變抽查與主機讀回",
             "scripts/pixel-diff.js",
             "分功能段落做一次全套驗收",
             "執行端不另跑全套人工回歸",
         ):
             self.assertIn(marker, spec, marker)
-        for gone in ("未變依賴的舊證據只能在契約或最新使用者授權允許", "對最終候選版做一次完整同版回歸", "該範圍整套重驗"):
+        for gone in ("未變依賴的舊證據只能在契約或最新使用者授權允許", "對最終候選版做一次完整同版回歸", "該範圍整套重驗", "自動化測試每版整套跑"):
             self.assertNotIn(gone, spec, gone)
         codex = REPOSITORY / "codex" / ".agents" / "skills"
         claude = ADAPTER / "skills"
         for orchestrator in (claude / "long-task-orchestrator", codex / "goal-orchestrator"):
             text = "".join((orchestrator / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md"))
-            for marker in ("附沿用核對後沿用", "連帶範圍", "pixel-diff.js capture", "pixel-diff.js compare", "needsReverify", "沿用核對", "主線不另跑全套人工回歸"):
+            for marker in ("附沿用核對後沿用", "連帶範圍", "pixel-diff.js capture", "pixel-diff.js compare", "needsReverify", "沿用核對", "主線不另跑全套人工回歸", "整套只在最終候選的乾淨匯出跑一次"):
                 self.assertIn(marker, text, f"{orchestrator.name}: {marker}")
             self.assertNotIn("做一次完整同版回歸", text, orchestrator.name)
+            self.assertNotIn("自動化測試每版整套跑", text, orchestrator.name)
             self.assertTrue((orchestrator / "scripts" / "pixel-diff.js").is_file(), orchestrator.name)
         for supervisor in (claude / "long-task-supervisor", codex / "long-task-supervisor"):
             acceptance = (supervisor / "references" / "acceptance.md").read_text(encoding="utf-8")
-            for marker in ("未受影響案例的舊證據預設沿用", "影響清單漏追連帶範圍就退件", "needsReverify", "沿用項不必重開瀏覽器重驗", "分功能段落做一次全套獨立驗收"):
+            for marker in ("未受影響案例的舊證據預設沿用", "影響清單漏追連帶範圍就退件", "needsReverify", "沿用項不必重開瀏覽器重驗", "分功能段落做一次全套獨立驗收", "突變抽查"):
                 self.assertIn(marker, acceptance, f"{supervisor}: {marker}")
             review = (supervisor / "references" / "event-review.md").read_text(encoding="utf-8")
             self.assertIn("換版沿用的項目查影響清單", review, str(supervisor))

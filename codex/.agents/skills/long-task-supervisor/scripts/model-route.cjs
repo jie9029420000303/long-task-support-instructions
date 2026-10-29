@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Resolve only the roles needed now from the actual tool inventories. This does not change a running model or
 // infer user authorization. It substitutes another provider only for a recorded rate limit (input.fallback =
-// RUN/model-fallback.json), in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-5.6-sol (2026-10-11).
+// RUN/model-fallback.json), in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol (2026-10-11; last stop 2026-10-29).
 const fs=require('node:fs');
 const {keyOf,LAST_RESORT}=require('./model-fallback.cjs');
 const roles={executor:{tier:'opus',effort:'high',catalog:'executor'},general:{tier:'sonnet',effort:'medium',catalog:'subagent'},ui:{tier:'sonnet',effort:'low',catalog:'subagent'}};

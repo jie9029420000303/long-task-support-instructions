@@ -8,7 +8,9 @@ const contractState=require('./contract-state.cjs');
 const FILE='pending-decisions.json';
 // Only these wait on Jay (event-review gate 1, SPEC 16); the supervisor decides everything else itself. The kind makes
 // the supervisor say why Jay must decide; it does not prove it.
-const KINDS={irreversible:'不可逆',paid:'付費',delete:'刪除（測試中間產物除外）',credential:'帳號或憑證',external:'對外發送',
+// Jay 2026-10-29: development leftovers are deleted without asking; Git work, test-labelled sends and anything he
+// authorized at the start go ahead. What still waits on him is named by these labels on his dashboard.
+const KINDS={irreversible:'不可逆（改寫 Git 歷史、未授權的正式部署等）',paid:'付費（開工時沒授權的）',delete:'刪除或永久改動既有資料（開發過程產物除外）',credential:'帳號或憑證（開工時沒授權的）',external:'正式對外發送（非測試）',
   prohibition:'推翻你的禁令',acceptance:'改驗收條文',user_action:'要你本人操作',major_change:'上層規則要先確認的重大變更'};
 const FIELDS=['kind','ask','recommend','why','options'],OPS=['raise','reopen','withdraw','answer'];
 const KEY=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -165,4 +167,10 @@ function shown(run,keys,{binding,at=new Date().toISOString()}={}){
   store(run,ledger);
   return {shown:open,at};
 }
-module.exports={FILE,KINDS,load,view,apply,amend,ask,shown};
+// One push through 「Jay的小秘書」 per batch put to Jay (Jay 2026-10-29); the same set of open items is never pushed twice.
+async function pushShown(run,result,title){
+  const keys=[...result.shown].sort(),key='pending-'+require('node:crypto').createHash('sha256').update(keys.join(',')).digest('hex').slice(0,16);
+  const sent=await require('./notify.cjs').sendOnce(run,key,'【開發任務需要你決定】『'+(title||'監督對話')+'』有 '+keys.length+' 題要你回答，請打開該監督對話查看。');
+  return {...result,push:{ok:sent.ok===true,skipped:Boolean(sent.skipped),error:sent.error||null}};
+}
+module.exports={FILE,KINDS,load,view,apply,amend,ask,shown,pushShown};

@@ -22,7 +22,11 @@ const client = createClient({nodePath:process.execPath});
 const meta = {'x-codex-turn-metadata':{thread_id:binding.supervisorId,turn_id:binding.callerTurnId}};
 const SUPERVISOR_WAKE_MS = Number(process.env.CODEX_SUPERVISOR_WAKE_MS) || 45000;
 const DECISION_POLL_MS = Number(process.env.CODEX_SUPERVISOR_DECISION_POLL_MS) || 15000;
-const WATCH_IDLE_SLEEP_MS = Number(process.env.CODEX_WATCH_IDLE_SLEEP_MS) || 15000;
+// The executor is read every 3 minutes (Jay 2026-10-29: 「拉長成180秒好了」). A read is a local program call, no model
+// and no tokens; an executor event is noticed at most 3 minutes late.
+const WATCH_IDLE_SLEEP_MS = Number(process.env.CODEX_WATCH_IDLE_SLEEP_MS) || 180000;
+// After 10 minutes without a working watch the supervisor gets one warning and Jay one push (Jay 2026-10-29).
+const OUTAGE_MS = Number(process.env.LONG_TASK_OUTAGE_MS) || 10 * 60000;
 const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
 // The App unloads a chat idle for about three hours and ends the processes it started, this watcher included
 // (2026-10-12: research chat idle 02:16→05:33, both watchers gone; every chat in the log unloaded after ~3h idle).
@@ -42,39 +46,88 @@ function unpack(result) {
   const block = result.content && result.content.find(item => item.type === 'text');
   return block ? JSON.parse(block.text) : result;
 }
-const TRANSIENT_APP_ERROR='MCP error -32000: Codex app tool request failed';
+// The App bridge has returned this error both with and without the "MCP error -32000: " prefix (2026-10-29: only the
+// bare text, so the old read_thread fallback never engaged and the run reconnected for 9 hours). Match either form.
+const isAppToolFailure=error=>error?.code===-32000&&String(error.message||'').replace(/^MCP error -32000: /,'')==='Codex app tool request failed';
 // A read is safe to repeat; one transient bridge failure stopped a live run for 35 minutes (2026-10-11 equity
 // re-review). Sends are never retried here: a repeated send needs receipt reconciliation, not a blind resend.
 const READ_RETRY_MS=[2000,5000,15000];
+// A read_thread over the bridge size limit fails every time with the same arguments (2026-10-19 V32: the executor's
+// last 8 turns at 20000 chars per item no longer fit, and the watcher stopped after 3 hours of reconnects). Shrink the
+// read instead: fewer turns first, then shorter items. Callers only scan recent turns, so a smaller window is safe.
+const SIZE_LIMIT_TEXT='Tool response exceeds the size limit';
+function smallerRead(args){
+  if((args.turnLimit||1)>1)return {...args,turnLimit:Math.max(1,Math.floor(args.turnLimit/2))};
+  if((args.maxOutputCharsPerItem||500)>500)return {...args,maxOutputCharsPerItem:Math.max(500,Math.floor(args.maxOutputCharsPerItem/4))};
+  return null;
+}
+// Whether the watch works, kept across restarts in daemon-state: watch-health.cjs (the parent each minute, the system
+// guard every 3 minutes) pushes Jay after 10 minutes. Only a successful read of the bound executor counts as working;
+// a send that gets through while reads fail does not end the outage.
+function appOk(){
+  const health=state.appHealth||={};
+  health.lastOkAt=now();
+  if(!health.failingSince)return;
+  if(health.warnedFor===health.failingSince&&health.warnedOk)health.recoveryNotice=health.failingSince;
+  (health.history||=[]).push({since:health.failingSince,until:now(),kind:health.kind,lastError:health.lastError});
+  if(health.history.length>10)health.history.splice(0,health.history.length-10);
+  delete health.failingSince;delete health.kind;delete health.lastError;
+  checkpoint();
+}
+function appFailing(kind,message){
+  const health=state.appHealth||={};
+  if(!health.failingSince){health.failingSince=now();health.kind=kind;}
+  health.lastError=String(message||'').slice(0,300);
+  checkpoint();
+}
 async function rpc(name, args, timeout = 75000) {
   for(let attempt=0;;attempt++){
     const response = await client.request('tools/call',{name,arguments:args,_meta:meta},timeout);
-    if (!(response.error || response.result?.isError)) return response.result;
-    const transient=name==='read_thread'&&response.error?.code===-32000&&response.error.message===TRANSIENT_APP_ERROR;
+    if (!(response.error || response.result?.isError)) {
+      if(name==='read_thread'&&args.threadId===binding.executorId)appOk();
+      return response.result;
+    }
+    const oversized=name==='read_thread'&&response.result?.isError&&JSON.stringify(response.result).includes(SIZE_LIMIT_TEXT);
+    const smaller=oversized?smallerRead(args):null;
+    if(smaller){
+      (state.readShrinks||=[]).push({from:{turnLimit:args.turnLimit,maxOutputCharsPerItem:args.maxOutputCharsPerItem},to:{turnLimit:smaller.turnLimit,maxOutputCharsPerItem:smaller.maxOutputCharsPerItem},at:now()});
+      if(state.readShrinks.length>20)state.readShrinks.splice(0,state.readShrinks.length-20);
+      args=smaller;attempt--;continue;
+    }
+    const transient=name==='read_thread'&&isAppToolFailure(response.error);
     if(transient&&attempt<READ_RETRY_MS.length){
       (state.readRetries||=[]).push({tool:name,attempt:attempt+1,at:now()});if(state.readRetries.length>20)state.readRetries.splice(0,state.readRetries.length-20);
       await sleep(Number(process.env.LONG_TASK_READ_RETRY_MS)||READ_RETRY_MS[attempt]);continue;
     }
     const error=Error(name + ': ' + JSON.stringify(response.error || response.result));
-    error.rpcError=response.error;throw error;
+    error.rpcError=response.error;appFailing('read',error.message);throw error;
   }
 }
-// A bridge-internal wait failure must not strand the run in a reconnect loop.
-// Read the same bound thread through its working read API; keep decisions and receipts unchanged.
-let readPolling=false;
-async function waitExecutor(timeoutMs) {
-  if(!readPolling){
-    try{return unpack(await rpc('wait_threads',{
-      targets:[{threadId:binding.executorId,...(state.cursor?{afterCursor:state.cursor}:{})}],timeoutMs}));}
-    catch(error){
-      if(error.rpcError?.code!==-32000 || error.rpcError.message!=='MCP error -32000: Codex app tool request failed')throw error;
-      readPolling=true;
-      state.waitFallback={tool:'wait_threads',error:error.message,at:now()};checkpoint();
-    }
-  }
+// Every executor read goes through read_thread. wait_threads belongs to the supervisor's live turn: once that turn
+// ends the App answers it with "Codex app tool request failed" (App log 2026-10-28 23:11, the call handed to a hidden
+// window), and when that error text changed the run reconnected for 9 hours. read_thread keeps working between turns.
+async function waitExecutor() {
   const detail=unpack(await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
-  need(detail.thread?.id===binding.executorId,'Bound executor missing from fallback read');
+  need(detail.thread?.id===binding.executorId,'Bound executor missing from read');
   return {polls:[{thread:detail.thread,...supervisorPollFromThread(detail)}]};
+}
+// The 3 minutes between reads still end at once on STOP, and the dashboard stays current.
+async function idle(ms){
+  const end=Date.now()+ms;
+  while(Date.now()<end&&!fs.existsSync(path.join(run,'STOP'))){writeDashboard();await sleep(Math.min(5000,end-Date.now()));}
+}
+// One warning in the supervisor chat per outage, when the App still takes a message (a read can fail while sends work).
+// It is marked before sending, so a lost reply never repeats it; Jay's push comes from watch-health.cjs either way.
+async function warnSupervisor(){
+  const health=state.appHealth;
+  if(!health?.failingSince||health.warnedFor===health.failingSince||Date.now()-Date.parse(health.failingSince)<OUTAGE_MS)return;
+  health.warnedFor=health.failingSince;health.warnedOk=false;checkpoint();
+  const minutes=Math.round((Date.now()-Date.parse(health.failingSince))/60000);
+  const prompt='LONG_TASK_WATCH_ALERT：背景監看已 '+minutes+' 分鐘沒在運作（最後錯誤：'+String(health.lastError||'').slice(0,160)+'）。背景程式仍在自動重試，並另外用小秘書推播通知使用者。'+
+    '請跑 node '+path.join(__dirname,'supervise.cjs')+' status '+run+'：active 為 true 就用一句話結束回合；不是就依 runtime「監看中斷」處理完再結束回合。';
+  try{await rpc('send_message_to_thread',{threadId:binding.supervisorId,prompt},20000);health.warnedOk=true;}
+  catch(error){health.warnError=String(error.message).slice(0,200);}
+  checkpoint();
 }
 function contains(value, needle) {
   if (typeof value === 'string') {
@@ -354,7 +407,7 @@ async function pendingDecision() {
     if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
   }
   if(event.kind==='progress_review'){
-    const fresh=await waitExecutor(0);
+    const fresh=await waitExecutor();
     const poll=fresh.polls?.find(item=>item.thread?.id===binding.executorId);
     need(poll,'Bound executor missing from progress preflight');
     // Silence ends with new activity; overdue, blocked and the other clock reasons are meant for a busy executor
@@ -419,7 +472,7 @@ function writeDashboard() {
 }
 const clockText = ms => new Date(ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 // Rate limits (Jay 2026-10-11, default on): a refused supervisor or executor is told to continue on the next model
-// in anthropic/ -> anthropic-apikey/ -> gpt-5.6-sol; a refused subagent makes the executor re-dispatch on the next one.
+// in anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol; a refused subagent makes the executor re-dispatch on the next one.
 async function handleRateLimits() {
   if (binding.modelFallback === false) return;
   const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path}));
@@ -471,7 +524,7 @@ async function watch() {
   if (initialized.error) throw Error(JSON.stringify(initialized.error));
   client.notify('notifications/initialized');
   const available = await require('./mcp-client.cjs').listTools(client,meta);
-  for (const name of ['wait_threads','read_thread','send_message_to_thread']) need(available.has(name),'Missing Codex App tool ' + name);
+  for (const name of ['read_thread','send_message_to_thread']) need(available.has(name),'Missing Codex App tool ' + name);
   const proof = await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500});
   need(contains(proof,binding.executorId),'Cannot read bound executor conversation');
   try {
@@ -490,6 +543,14 @@ async function watch() {
   while (!fs.existsSync(path.join(run,'STOP'))) {
     await handleRateLimits();
     writeDashboard();
+    // The supervisor saw an outage warning: one short note once reads work again, so it does not act on a stale alarm.
+    if (state.appHealth?.recoveryNotice && !state.inflight && !state.pending) {
+      const since = state.appHealth.recoveryNotice;
+      await sendAndRead(binding.supervisorId,'LONG_TASK_WATCH_RECOVERED：背景監看已恢復讀取執行對話（'+clockText(Date.parse(since))+' 起中斷）。不用處理，用一句話結束回合即可。',
+        'watch-recovered-'+require('node:crypto').createHash('sha256').update(since).digest('hex').slice(0,12));
+      delete state.appHealth.recoveryNotice; checkpoint();
+      continue;
+    }
     if (state.pending) {
       await pendingDecision();
       if (state.phase === 'accepted') break;
@@ -515,14 +576,13 @@ async function watch() {
     }
     const auditEvent=paused?null:dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
-    const started = Date.now();
     const hostIdle = Date.now() - Math.max(state.lastSupervisorActivityAt || 0, state.lastKeepaliveAt || 0, watchStartedAt);
     if (hostIdle >= KEEPALIVE_MS && !state.inflight) {
       state.lastKeepaliveAt = Date.now(); state.keepalives = (state.keepalives || 0) + 1; checkpoint();
       await sendAndRead(binding.supervisorId, KEEPALIVE_TEXT, 'keepalive-' + state.keepalives);
       continue;
     }
-    const response = await waitExecutor(45000);
+    const response = await waitExecutor();
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
     const supervisorDetail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
@@ -596,7 +656,7 @@ async function watch() {
         continue;
       }
       checkpoint();
-      if (readPolling || Date.now() - started < 1000) await sleep(WATCH_IDLE_SLEEP_MS);
+      await idle(WATCH_IDLE_SLEEP_MS);
     }
   }
   if (state.phase !== 'accepted') {state.phase = 'stopped';state.stoppedAt = now();checkpoint();}
@@ -607,6 +667,10 @@ async function watch() {
     if(fs.existsSync(path.join(run,'STOP'))){
       state.phase='stopped';state.stoppedAt=now();delete state.error;checkpoint();
     }else{
+      // A second watcher on the same run means the run is watched; anything else means it is not.
+      if(!/Another watcher owns this executor/.test(error.message))
+        appFailing(error.rpcError||/timed out|MCP child|Codex app/.test(error.message)?'read':'error',error.message);
+      await warnSupervisor().catch(()=>{});
       state.phase = error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
       state.error = {message:error.message,at:now()};checkpoint();
       console.error(error.stack || error);process.exitCode = 1;

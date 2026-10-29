@@ -5,7 +5,7 @@ const path=require('node:path');
 const {parse}=require('./dispatch-audit.cjs');
 const acceptance=require('./acceptance-audit.cjs');
 const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
-const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [same options]';
+const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [same options]';
 
 // Work-package files are the bookkeeping (Jay 2026-10-15). In GDB v1.2.0 the main line spent 99 minutes and 506 turns
 // on records alone, rewriting snapshot JSON and a generator of its own by hand. Each wp/<id>.md carries one
@@ -22,6 +22,30 @@ function status(value,where){
   let state;try{state=typeof value==='string'?JSON.parse(value):value;}catch{throw Error(where+': the status must be one JSON object, for example {"list":"inFlight","handle":"agent:abc"}');}
   if(!state||typeof state!=='object'||!(LISTS.includes(state.list)||state.list==='archived'))throw Error(where+': status list must be one of '+LISTS.join(', ')+' or archived');
   return state;
+}
+// 收包 (Jay 2026-10-29): taking a package back was four separate steps (status line, evidence, acceptance table,
+// snapshot), each a round of hand-written JSON. One result file now does all four: {"status":{list,...,evidence},
+// "acceptance":[{id,status,evidence,lastAttempt?}]}. Every path and ID is checked before anything is written.
+function collected(file){
+  let input;try{input=JSON.parse(fs.readFileSync(file,'utf8'));}catch(error){throw Error('RESULT_JSON: '+error.message);}
+  const state=status(input?.status,'RESULT_JSON status');
+  const updates=input.acceptance===undefined?[]:input.acceptance;
+  if(!Array.isArray(updates))throw Error('RESULT_JSON acceptance must be a list of {id,status,evidence}');
+  const paths=[...(state.evidence||[]),...updates.flatMap(item=>item?.evidence||[])].filter(item=>typeof item==='string'&&item.startsWith('/'));
+  const missing=paths.filter(item=>!fs.existsSync(item));
+  if(missing.length)throw Error('RESULT_JSON evidence does not exist: '+missing.join(', '));
+  return {state,updates};
+}
+function applyAcceptance(value,updates){
+  if(!updates.length)return;
+  if(!value.acceptance)throw Error('The snapshot has no acceptance table yet; write it once with --base before collecting results into it');
+  const items=value.acceptance.items=value.acceptance.items.map(item=>({...item}));
+  for(const update of updates){
+    const item=items.find(entry=>entry.id===update?.id);
+    if(!item)throw Error('RESULT_JSON acceptance names '+(update?.id||'no id')+', which is not in the acceptance table');
+    item.status=update.status;item.evidence=update.evidence;
+    if(update.lastAttempt)item.lastAttempt=update.lastAttempt;
+  }
 }
 function packagesFrom(stateDir,override){
   const dir=path.join(stateDir,'wp');
@@ -80,7 +104,8 @@ const flag=name=>{const at=args.indexOf('--'+name);return at>=0?args[at+1]:undef
 try{
   const absolute=value=>path.isAbsolute(value||'');
   const positional=args.filter((value,at)=>!value.startsWith('--')&&!(at>0&&args[at-1].startsWith('--')));
-  const valid={write:absolute(positional[2]),summary:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4]}[command];
+  const valid={write:absolute(positional[2]),summary:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
+    collect:absolute(positional[2])&&positional[3]&&absolute(positional[4])}[command];
   if(!valid||!absolute(runArg)||(flag('base')!==undefined&&!absolute(flag('base'))))throw Error(USAGE);
   const run=path.resolve(runArg),binding=JSON.parse(fs.readFileSync(path.join(run,'binding.json'),'utf8'));
   if(!binding.dispatchAudit?.enabled&&!fs.existsSync(path.join(run,'DISPATCH_AUDIT')))throw Error('Dispatch auditing is not attached to this run');
@@ -90,9 +115,10 @@ try{
     console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision}));}
   else{
     const stateDir=path.resolve(positional[2]),options={activity:flag('activity'),revision:flag('revision'),base:flag('base')};
-    let override,wpFile,wpText;
-    if(command==='mark'){
-      const id=positional[3],state=status(positional[4],'STATUS_JSON'),dir=path.join(stateDir,'wp');
+    let override,wpFile,wpText,updates=[];
+    if(command==='mark'||command==='collect'){
+      const result=command==='collect'?collected(positional[4]):{state:status(positional[4],'STATUS_JSON'),updates:[]};
+      const id=positional[3],state=result.state,dir=path.join(stateDir,'wp');updates=result.updates;
       wpFile=[path.join(dir,id+'.md'),...fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>path.join(dir,name))]
         .find(file=>fs.existsSync(file)&&packageId(fs.readFileSync(file,'utf8'),file)===id);
       if(!wpFile)throw Error('No work-package file for '+id+' under '+dir);
@@ -101,10 +127,12 @@ try{
       override={file:wpFile,state};
     }
     // Validate the whole snapshot before touching the package file, so a rejected change leaves both as they were.
-    const value=checked(run,binding,build(run,binding,stateDir,options,override));
+    const draft=build(run,binding,stateDir,options,override);applyAcceptance(draft,updates);
+    const value=checked(run,binding,draft);
     if(wpFile){const temporary=wpFile+'.tmp-'+process.pid;fs.writeFileSync(temporary,wpText,{flag:'wx'});fs.renameSync(temporary,wpFile);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
-    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,activity:value.activity,packages:counts}));
+    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,activity:value.activity,packages:counts,
+      ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}
 finally{if(lock)fs.unlinkSync(lock);}
