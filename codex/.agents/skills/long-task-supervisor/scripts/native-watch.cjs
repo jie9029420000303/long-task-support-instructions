@@ -144,12 +144,11 @@ function lock() {
   need(!fs.existsSync(path.join(run,'contract-update.lock')),'Contract update is in progress');
   if (fs.existsSync(lockPath)) {
     const old = read(lockPath);
-    let alive = false;
-    try { process.kill(old.pid, 0); alive = true; } catch {}
-    need(!alive, 'Another watcher owns this executor');
+    const alive = require('./process-probe.cjs').probe(old.pid);
+    need(alive === false, 'Another watcher owns this executor or its PID cannot be verified');
     fs.unlinkSync(lockPath);
   }
-  fs.writeFileSync(lockPath, JSON.stringify({pid:process.pid,run,at:now()}),{flag:'wx'});
+  fs.writeFileSync(lockPath, JSON.stringify({pid:process.pid,run,at:now(),decisionProtocol:'explicit-decision-v1'}),{flag:'wx'});
   ownsLock = true;
 }
 function markSent(target, key) {
@@ -363,8 +362,8 @@ async function refuseDecision(event,file,error){
   const known=errors[event.id];
   if(!known.notifiedAt&&Date.now()-known.at>=SUPERVISOR_WAKE_MS&&!fs.existsSync(path.join(run,'STOP'))){
     await sendAndRead(binding.supervisorId,
-      `決策未套用 ${event.id}：${file} 沒通過檢查，背景監看沒有套用它、照常監看，這個事件仍待決（原檔保留）。錯誤原文：${known.message}\n`+
-      `修正後覆寫同一個決策檔，先用 supervise.cjs decision 檢查通過再結束回合；不要重建或重送業務事件。原事件：\n`+require('./review-context.cjs').prompt(run,event),
+      `決策未套用 ${event.id}：已提交版本沒通過檢查，背景監看沒有套用它、照常監看，這個事件仍待決（提交快照保留）。錯誤原文：${known.message}\n`+
+      `請修正草稿 ${require('./decision-commit.cjs').draft(run,event.id)}，再用 supervise.cjs decision 明確提交；不要修改已提交快照或指標，不要重建或重送業務事件。原事件：\n`+require('./review-context.cjs').prompt(run,event),
       'decision-error-'+event.id+'-'+sha256.slice(0,12));
     known.notifiedAt=Date.now();checkpoint();return;
   }
@@ -381,7 +380,7 @@ async function pendingDecision() {
     state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),wakeSentAt:null};checkpoint();
   }
   await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
-  const file = path.join(run,'decision-' + event.id + '.json');
+  const file = require('./decision-commit.cjs').file(run,event.id);
   const armed=state.supervisorWake[event.id];
   if(!armed.deliveredAt){armed.deliveredAt=Date.now();checkpoint();}
   if (!fs.existsSync(file)) {
@@ -400,11 +399,19 @@ async function pendingDecision() {
   }
   const contract = checkSources();
   let decision;
-  try { decision = validateDecision(binding,contract,event,read(file),state.eventQueue); }
+  let submitted;
+  try { submitted = require('./decision-commit.cjs').load(run,binding,contract,event);
+    decision = validateDecision(binding,contract,event,submitted.decision,state.eventQueue); }
   catch (error) { await refuseDecision(event,file,error); return; }
   if(event.kind==='dispatch_review'){
     const preflight=stillCurrent(run,binding,state,event);checkpoint();
-    if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
+    // An unreadable source is unknown. Defer this review without blocking new executor events; keep the submitted
+    // decision and evidence, but require a fresh review when the source becomes readable again.
+    if(preflight.current===null){
+      (state.deferredDispatch||={})[event.id]={event,decisionSha256:submitted.decisionSha256};
+      state.pending=null;state.phase='watching';checkpoint();return;
+    }
+    if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:submitted.decisionSha256};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
   }
   if(event.kind==='progress_review'){
     const fresh=await waitExecutor();
@@ -414,12 +421,13 @@ async function pendingDecision() {
     // (rule A, Jay 2026-10-13: an overdue check asks about the baseline and scope, so fresh output does not void it).
     if(fs.existsSync(path.join(run,'STOP'))||quietReview(event)&&activityMarker(poll)!==event.activityMarker){
       observeActivity(state,poll,binding);
-      (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:hash(file)};
+      (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:submitted.decisionSha256};
       state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;
     }
   }
   if (decision.disposition === 'needs_user') {
     state.phase = 'needs_user'; checkpoint();
+    state.waitingDecisionSha256 = submitted.decisionSha256; checkpoint();
     const previousDecision = hash(file);
     await changed(run,()=>!fs.existsSync(file) || hash(file)!==previousDecision);
     return;
@@ -433,7 +441,7 @@ async function pendingDecision() {
     }
     state.lastProgressReviewAt=Date.now();ruled(event);
     if(event.kind==='progress_review')state.failedCommands={};
-    (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
+    (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:submitted.decisionSha256};
     state.seen.push(event.id); state.pending = null;
     state.phase = 'watching'; checkpoint(); return;
   }
@@ -443,7 +451,7 @@ async function pendingDecision() {
     // so the queue is the one the supervisor saw.
     for (const item of state.eventQueue || []) { (state.resolved ||= {})[item.id] = {event:item,closedWithAcceptance:event.id}; state.seen.push(item.id); }
     state.eventQueue = [];
-    (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
+    (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:submitted.decisionSha256};
     state.seen.push(event.id); state.pending = null;
     state.phase = 'accepted'; state.acceptedAt = now(); checkpoint(); return;
   }
@@ -454,11 +462,28 @@ async function pendingDecision() {
   state.instruction = {eventId:event.id,what:given?.what || decision.reply.replace(/\s+/g,' ').slice(0,200),doneWhen:given?.doneWhen || null,
     sentAt:Date.now(),deadlineMs:(given?.deadlineMinutes || 30)*60000,misses:0};
   if(event.kind==='progress_review'){state.lastProgressReviewAt=Date.now();state.failedCommands={};}
-  (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:hash(file)};
+  (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:submitted.decisionSha256};
   state.seen.push(event.id); state.pending = null;
   state.phase = 'watching'; checkpoint();
 }
 const isPaused = () => fs.existsSync(path.join(run,'PAUSED.json'));
+// Recheck deferred reviews only after reading and queuing any new executor event.
+async function recheckDeferred(){
+  if(isPaused())return false;
+  for(const [id,deferred] of Object.entries(state.deferredDispatch||{})){
+      const preflight=stillCurrent(run,binding,state,deferred.event);
+      if(preflight.current===null)continue;
+      delete state.deferredDispatch[id];
+      if(!preflight.current){releaseAnnounced(state,deferred.event);(state.resolved||={})[id]={event:deferred.event,obsolete:true,decisionSha256:deferred.decisionSha256};state.seen.push(id);checkpoint();continue;}
+      const keys=new Set(deferred.event.dispatchIssueKeys||[]),items=preflight.result.issues.filter(item=>keys.has(item.key)).map(item=>({...item,occurrence:state.dispatchAudit?.occurrences?.[item.key]}));
+      const event=dispatchEvent({newIssues:items,file:preflight.result.file});
+      event.id='dispatch-recheck-'+require('node:crypto').randomBytes(12).toString('hex');event.previousEventId=id;
+      (state.resolved||={})[id]={event:deferred.event,deferredTo:event.id,decisionSha256:deferred.decisionSha256};state.seen.push(id);
+      state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
+      await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);return true;
+    }
+  return false;
+}
 let lastDashboardAt = 0;
 function writeDashboard() {
   if (Date.now() - lastDashboardAt < 60000) return;
@@ -535,6 +560,13 @@ async function watch() {
   if (state.error) {
     (state.history ||= []).push({error:state.error,at:state.endedAt});
     delete state.error; delete state.endedAt;
+  }
+  if (state.inflight && state.inflight.key.startsWith('answer-')) {
+    const event = state.pending, contract = checkSources();
+    let submitted = null;
+    try { if (event) submitted = require('./decision-commit.cjs').load(run,binding,contract,event); } catch {}
+    need(submitted && state.inflight.key === 'answer-' + event.id && submitted.decision.reply === state.inflight.prompt,
+      'Legacy or mismatched in-flight answer requires manual receipt reconciliation; no resend');
   }
   if (state.inflight) await reconcile(state.inflight);
   if (state.phase === 'accepted') return;
@@ -631,6 +663,7 @@ async function watch() {
       state.cursor=nextCursor;checkpoint();
     } else {
       state.cursor=nextCursor;
+      if(await recheckDeferred())continue;
       if(state.progressWait&&Date.now()>=state.progressWait.deadline){
         const event={...state.progressWait.event,kind:'continue',declaredAt:state.progressWait.event.at,
           dueAt:new Date(state.progressWait.deadline).toISOString(),at:now()};
@@ -664,20 +697,22 @@ async function watch() {
 (async () => {
   try {await watch();}
   catch (error) {
-    if(fs.existsSync(path.join(run,'STOP'))){
+    if(!ownsLock){
+      console.error(error.stack || error);process.exitCode=1;
+    }else if(fs.existsSync(path.join(run,'STOP'))){
       state.phase='stopped';state.stoppedAt=now();delete state.error;checkpoint();
     }else{
       // A second watcher on the same run means the run is watched; anything else means it is not.
       if(!/Another watcher owns this executor/.test(error.message))
         appFailing(error.rpcError||/timed out|MCP child|Codex app/.test(error.message)?'read':'error',error.message);
       await warnSupervisor().catch(()=>{});
-      state.phase = error.message.startsWith('Delivery uncertain:') ? 'needs_reconcile' : 'error';
+      state.phase = /^(Delivery uncertain:|Legacy or mismatched in-flight answer requires manual receipt reconciliation)/.test(error.message) ? 'needs_reconcile' : 'error';
       state.error = {message:error.message,at:now()};checkpoint();
       console.error(error.stack || error);process.exitCode = 1;
     }
   } finally {
-    state.endedAt = now();checkpoint();
     if (ownsLock) {
+      state.endedAt = now();checkpoint();
       try {
         if (read(lockPath).pid === process.pid) fs.unlinkSync(lockPath);
       } catch {}

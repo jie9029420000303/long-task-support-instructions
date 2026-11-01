@@ -3,6 +3,7 @@
 // recorded in clock.jsonl even when nothing is wrong, so the clock can be audited without a model turn.
 const fs=require('node:fs');
 const path=require('node:path');
+const crypto=require('node:crypto');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const {docBudgetStage,trackDocTime}=require('./dispatch-audit.cjs');
@@ -43,19 +44,25 @@ function pollOnly(payload){
 // What a call works on, for telling a new blocked item from another refusal of the same one: the first program and
 // its subcommand (cd/export prefixes skipped), or the tool name when the call runs no shell command.
 function workItem(payload){
-  for(const command of commandsOf(payload))for(const part of command.split(/&&|\|\||;|\|/)){
-    const words=part.trim().split(/\s+/).filter(word=>word&&!/^-/.test(word)&&!/^[A-Z_]+=/.test(word));
-    if(!words.length||['cd','export','set','source','.'].includes(words[0]))continue;
-    return words.slice(0,2).map(word=>word.split('/').pop()).join(' ').slice(0,60);
-  }
-  const input=typeof payload.input==='string'?payload.input:'';
-  return /tools\.(?!exec_command\b)([A-Za-z_]+)/.exec(input)?.[1]||payload.name||'unknown';
+  return commandsOf(payload).length?'指令操作':'工具操作';
 }
-function trackTools(state,row,boundAt=0){
+const commandKey=command=>'sha256:'+crypto.createHash('sha256').update(command).digest('hex');
+function safeRejection(item){
+  const source=item.source?{path:item.source.path,callId:item.source.callId,outputSha256:item.source.outputSha256}:null;
+  return {callId:item.callId,at:item.at,item:'工具操作',...(source?{source}:{})};
+}
+function migrateFailedCommands(state){
+  const failed=state.failedCommands||{},converted={};
+  for(const [key,value] of Object.entries(failed)){
+    const safe=/^sha256:[a-f0-9]{64}$/.test(key)?key:commandKey(key);
+    const existing=converted[safe];
+    converted[safe]=existing?{...existing,count:Math.max(existing.count||0,value.count||0),lastAt:existing.lastAt>value.lastAt?existing.lastAt:value.lastAt}:value;
+  }
+  state.failedCommands=converted;
+}
+function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   const payload=row.payload||{},at=row.timestamp||now();
-  // The executor's permission mode and model, as each turn applies them. Under "auto review" the platform reviewer
-  // only trusts Jay's own words in that chat, so forwarded authorization is refused (2026-10-11: A's Git and Docker
-  // 3 times, GDB's Jira read once, half a day lost). Only switching the chat to full access clears it.
+  // A permission mode is context, not evidence that any operation was rejected.
   const applied=row.type==='turn_context'?payload:row.type==='event_msg'&&payload.type==='thread_settings_applied'?payload.thread_settings||{}:null;
   if(applied&&(applied.approval_policy||applied.model))state.executorSettings={approvalPolicy:applied.approval_policy||state.executorSettings?.approvalPolicy||null,
     reviewer:applied.approvals_reviewer||state.executorSettings?.reviewer||null,model:applied.model||state.executorSettings?.model||null,
@@ -66,8 +73,10 @@ function trackTools(state,row,boundAt=0){
     // (2026-10-11 GDB: cat of the skill notes, git log) does not.
     const refused=/Auto-review denied/i.test(output)||/rejected due to unacceptable risk/i.test(output)&&/Reason:/.test(output);
     if(refused&&!(state.reviewRejections||[]).some(item=>item.callId===payload.call_id)){
-      const reason=/Reason:\s*([\s\S]{0,400}?)(?:\\n|\n|The agent must|$)/.exec(output)?.[1]||output.slice(0,300);
-      (state.reviewRejections||=[]).push({callId:payload.call_id,at,item:state.callItems?.[payload.call_id]||'unknown',reason:reason.replace(/\\+"?/g,'').trim()});
+      // Keep the original in the executor transcript; the event carries a locator and digest, not potentially secret output.
+      const outputSha256=require('node:crypto').createHash('sha256').update(output).digest('hex');
+      (state.reviewRejections||=[]).push({callId:payload.call_id,at,item:state.callItems?.[payload.call_id]||'unknown',
+        ...(sourceFile?{source:{path:sourceFile,callId:payload.call_id,outputSha256}}:{})});
       if(state.reviewRejections.length>10)state.reviewRejections.splice(0,state.reviewRejections.length-10);
       state.rejectionCount=(state.rejectionCount||0)+1;
     }
@@ -82,7 +91,7 @@ function trackTools(state,row,boundAt=0){
     const items=state.callItems||={};items[payload.call_id]=workItem(payload);
     const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
-    if(commands.length)(state.openTools||={})[payload.call_id]={commands,at,poll:pollOnly(payload)};
+    if(commands.length)(state.openTools||={})[payload.call_id]={source:{path:sourceFile,offset:sourceOffset,callId:payload.call_id},at,poll:pollOnly(payload)};
   }else if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type))delete state.openTools?.[payload.call_id];
   else if(row.type==='event_msg'&&['task_complete','turn_aborted'].includes(payload.type)){
     state.openTools={};
@@ -100,8 +109,9 @@ function trackTools(state,row,boundAt=0){
     // A command that ran while a call was open means that call is not frozen behind a prompt.
     for(const open of Object.values(state.openTools||{}))open.ran=true;
     if(Date.parse(at)>=boundAt && command){
-      if(item.status==='failed'||Number.isInteger(item.exit_code)&&item.exit_code!==0){const value=((state.failedCommands||={})[command]||={count:0});value.count++;value.lastAt=at;}
-      else if(item.exit_code===0)delete state.failedCommands?.[command];
+      const key=commandKey(command);
+      if(item.status==='failed'||Number.isInteger(item.exit_code)&&item.exit_code!==0){const value=((state.failedCommands||={})[key]||={count:0});value.count++;value.lastAt=at;value.source={path:sourceFile,offset:sourceOffset,at};}
+      else if(item.exit_code===0)delete state.failedCommands?.[key];
     }
   }
 }
@@ -113,9 +123,20 @@ function readExecutor(state,binding){
   const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(size-state.executorOffset);
   try{fs.readSync(fd,buffer,0,buffer.length,state.executorOffset);}finally{fs.closeSync(fd);}
   const complete=buffer.lastIndexOf(10);if(complete<0)return;
-  state.executorOffset+=complete+1;
+  const start=state.executorOffset;state.executorOffset+=complete+1;
   const boundAt=Date.parse(binding.createdAt)||0;
-  for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){try{trackTools(state,JSON.parse(line),boundAt);}catch{}}
+  let offset=0;
+  for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){try{trackTools(state,JSON.parse(line),boundAt,file,start+offset);}catch{}offset+=Buffer.byteLength(line)+1;}
+}
+function commandsAt(source){
+  if(!source?.path||!Number.isInteger(source.offset))return [];
+  try{
+    const fd=fs.openSync(source.path,'r');let pos=source.offset,parts=[];
+    try{for(;;){const buffer=Buffer.alloc(65536),n=fs.readSync(fd,buffer,0,buffer.length,pos);if(!n)break;const end=buffer.subarray(0,n).indexOf(10);parts.push(buffer.subarray(0,end<0?n:end));if(end>=0)break;pos+=n;}}
+    finally{fs.closeSync(fd);}
+    const row=JSON.parse(Buffer.concat(parts).toString('utf8'));if(row.payload?.call_id!==source.callId)return [];
+    return commandsOf(row.payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
+  }catch{return [];}
 }
 // A command with no result after 5 minutes, none of whose commands ran or is running, never started: on the GDB
 // run it sat behind a permission prompt for 93 minutes. Only the user can clear that, so it is told at once.
@@ -124,8 +145,8 @@ function blockedTools(state){
   if(!old.length)return [];
   let processes='';try{processes=execFileSync('ps',['-axo','command'],{encoding:'utf8',maxBuffer:32*1024*1024});}catch{return [];}
   const piece=command=>command.split(/[^\x20-\x7e]|['"\\]/).map(value=>value.trim()).sort((a,b)=>b.length-a.length)[0]||'';
-  return old.filter(([,item])=>item.commands.every(command=>piece(command).length>=12&&!processes.includes(piece(command))))
-    .map(([id,item])=>({id,command:item.commands.join(' ; ').slice(0,300),since:item.at}));
+  return old.filter(([,item])=>{const commands=item.commands||commandsAt(item.source);return commands.length&&commands.every(command=>piece(command).length>=12&&!processes.includes(piece(command)));})
+    .map(([id,item])=>({id,summary:'指令操作尚未開始',source:item.source||{path:state.executorLog||null,callId:id},since:item.at}));
 }
 // The machine's monotonic clock stops while it sleeps; the wall clock does not. A gap between them is sleep.
 let lastTick=null;
@@ -164,6 +185,7 @@ let lastClockAt=0;
 function check(run,binding,state){
   if(Date.now()-lastClockAt<60000)return null;
   lastClockAt=Date.now();
+  migrateFailedCommands(state);
   readExecutor(state,binding);
   // A watcher restarted on an existing run starts reading at its saved offset; take the current mode from the tail once.
   if(!state.executorSettings){const found=require('./model-fallback.cjs').settingsOf(binding.executorId);if(found)state.executorSettings=found;}
@@ -222,7 +244,7 @@ function check(run,binding,state){
   const longUncovered=uncovered.filter(id=>awakeSince(state,plan[id])>=UNPLANNED_MS);
   let unplanned=null;
   if(longUncovered.length&&idle&&once('unplanned:'+longUncovered.join(','))){
-    const seats=Number(snapshot?.capacity?.verified)||0,inFlight=(snapshot?.packages?.inFlight||[]).length;
+    const seats=Number(snapshot?.capacity?.verified)||0,inFlight=require('./dispatch-audit.cjs').agentSeatCount(snapshot?.packages?.inFlight||[]);
     unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awakeSince(state,plan[id])))/60000)};
   }
   // A supervisor instruction not acted on by its deadline: no real event and no snapshot update since it was sent.
@@ -239,15 +261,13 @@ function check(run,binding,state){
       if(sent.misses>=2)state.instruction=null;
     }
   }
-  // Permission mode: tell the supervisor once while the executor runs under auto review, again only when a refusal
-  // blocks a work item not refused before, and once more when Jay switches it to full access so blocked work resumes
-  // without anyone asking. Repeat refusals of the same item are kept for the dashboard (2026-10-11 GDB: four wakes in
-  // 100 minutes, each answered "still waiting for the switch").
+  // A candidate refusal, not the approval mode, wakes the supervisor. Only the same call is deduplicated: a quoted
+  // example must not suppress a later actual refusal of the same command before the supervisor checks either one.
   const settings=state.executorSettings,autoReview=Boolean(settings?.approvalPolicy&&settings.approvalPolicy!=='never');
-  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId)&&once('rejected-item:'+(item.item||item.callId)));
+  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId)).map(safeRejection);
   let permission=null,permissionChanged=null;
-  if(autoReview&&(once('permission:'+settings.approvalPolicy+':'+settings.reviewer)||rejections.length)){
-    permission={approvalPolicy:settings.approvalPolicy,reviewer:settings.reviewer,since:settings.at,newRejections:rejections,title:state.threadTitles?.executor||null};
+  if(rejections.length){
+    permission={approvalPolicy:settings?.approvalPolicy||null,reviewer:settings?.reviewer||null,since:settings?.at||null,newRejections:rejections,title:state.threadTitles?.executor||null};
     state.permissionWarned=true;
   }else if(!autoReview&&settings&&state.permissionWarned){state.permissionWarned=false;permissionChanged={approvalPolicy:settings.approvalPolicy,at:settings.at};}
   let automationFound=[];
@@ -280,14 +300,14 @@ function check(run,binding,state){
       processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
       problems:reasons,open:[...paced.packages.filter(item=>overdueTier(item)).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
         ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
-        ...stuck.map(item=>'executor_blocked:'+item.command.slice(0,60)),...(quietEvent?['no_event_hour']:[]),...(idle?['idle_with_work']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
+        ...stuck.map(item=>'executor_blocked:'+item.id),...(quietEvent?['no_event_hour']:[]),...(idle?['idle_with_work']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
-    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
+    failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:state.executorLog||null,at:item.lastAt}})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
     ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
     ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{}),
     ...(docBudget?{docBudget}:{})};
 }
-module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince};
+module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince,safeRejection};

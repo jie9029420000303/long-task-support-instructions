@@ -17,14 +17,14 @@
 
 ## 監督
 
-- 處理事件：`node <skill>/supervise.cjs context RUN <事件 ID>`，決策寫到它給的 `decisionPath`，寫完跑 `supervise.cjs decision RUN <決策檔>`，通過才結束回合。
+- 處理事件：`node <skill>/supervise.cjs context RUN <事件 ID>`，決策寫到它給的 `decisionPath`；reply／reject 傳訊前先依 runtime 執行只讀 `decision-preflight`，核對同一事件、契約／授權及待送內容，通過後才用原生工具傳送、記回執，再跑 `supervise.cjs decision RUN <決策檔>`。預檢不是平台層傳訊強制閘。
 - 決策檔（`eventId` 與事件相同）：
   - 代答或退件：`{"eventId":"…","disposition":"reply","reply":"具體指示","instruction":{"what":"…","doneWhen":"…","deadlineMinutes":30}}`；退件把 disposition 換成 `reject`。
   - 記錄後繼續：`{"eventId":"…","disposition":"observe","reason":"…"}`。進度查核另加 `"progressCheck":{"evidence":["查了什麼"],"finding":"結論"}`；靜默類只剩已知等待時再加 `"wait":{"kind":"user_approval","conditions":[]}`（外部結果用 `external_result`，附條件檔或 `resumeAt`）。
   - 進度查核要執行端動作：`disposition` 用 `reply`，`progressCheck` 加 `guidance`，`reply` 要包含這句 guidance。
   - 驗收：`{"eventId":"…","disposition":"accept","revision":"sha256:…","contractStateSha256":"<有修訂時必填>","results":[{"id":"A1","status":"PASS","method":"…","expected":"…","actual":"…","evidence":[{"path":"/絕對路徑","sha256":"…"}]}]}`，每條驗收都要列。
-- 有推薦就照推薦直接回覆執行端；只有推薦的那條路本身要改驗收條件、刪除或永久改動既有資料，或碰到開工時沒授權的付費、帳號密碼、正式部署，以及改寫 Git 歷史、非測試的正式對外發送，才登記待決帳問使用者。
+- 有推薦且在本案授權範圍內、不受禁令或適用專案規則限制時就照推薦直接回覆執行端；只有推薦的那條路本身要改驗收條件、刪除或永久改動既有資料，或碰到開工時沒授權的付費、帳號密碼、正式部署，以及改寫 Git 歷史、非測試的正式對外發送、推翻使用者禁令、本人須動手，或實際適用規則須先確認的重大內容／設計／資訊架構變更，或本案有效授權與專案規則要求確認時，才登記待決帳問使用者。既定目標與授權內的技術路線由監督依使用者禁令及專案既有授權自行比較、測試並判定。
 - 待決帳：`supervise.cjs pending RUN <變更檔>`，變更檔 `{"raise":[{"key":"k","kind":"acceptance","ask":"…","recommend":"…","why":"…","options":["…"]}],"reopen":[{"key":"k","fact":"新事實"}],"withdraw":[{"key":"k","reason":"…"}],"answer":[{"key":"k","choice":"A","quote":"使用者原話"}]}`。kind：irreversible、paid、delete、credential、external、prohibition、acceptance、user_action、major_change。
-- 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，同回合跑 `supervise.cjs shown RUN <全部 key>`（程式同時用小秘書推播一則）。
+- 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，先前已列而未答的可簡述題意、推薦與後果；背景事件沒有新進展或新決定時不重問，回合結尾只用一句話說明仍在監看或等待。出卡的同回合跑 `supervise.cjs shown RUN <全部 key>`（程式同時用小秘書推播一則）。
 - 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<ISO 時間>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。
 - 每次決策後重掛唯一的背景接收器 `claude-watch.cjs RUN`（沒有活的才掛），結束回合前 `supervise.cjs status RUN` 的 `active` 要是 true。

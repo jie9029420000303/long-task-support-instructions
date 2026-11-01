@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const contractState = require('./contract-state.cjs');
 const checkedWait = require('./checked-wait.cjs');
 const path = require('node:path');
@@ -160,7 +161,7 @@ function executorTail(file, count = 3) {
   try {fs.readSync(fd, buffer, 0, length, size - length);} finally {fs.closeSync(fd);}
   const texts = [];
   for (const line of buffer.toString('utf8').split('\n')) {
-    try {const row = JSON.parse(line); if (row.type !== 'assistant' || row.isSidechain) continue;
+    try {const row = JSON.parse(line); if (row.type !== 'assistant' || row.isSidechain || row.isApiErrorMessage) continue;
       const text = (row.message?.content || []).filter(block => block.type === 'text').map(block => block.text).join('\n').trim();
       if (text) texts.push({at: row.timestamp, text: text.slice(-600)});} catch {}
   }
@@ -180,13 +181,13 @@ function brief() {
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
   const pausedFile = path.join(run, 'PAUSED.json');
-  return {status:status(), pending:review.summary(state.pending), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt),
+  return {status:status(), pending:review.summary(state.pending,binding), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt),
     sleeps:(state.sleeps || []).slice(-5),
     // Jay is online for 10 minutes after typing in the supervisor chat: then ask every open ledger item at once.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
-    paused:fs.existsSync(pausedFile) ? read(pausedFile) : null, reviewRejections:(state.reviewRejections || []).slice(-3),
-    instruction:state.instruction || null, rateLimit:state.rateLimit ? {...state.rateLimit, since:iso(state.rateLimit.since), until:iso(state.rateLimit.until)} : null,
-    platformError:state.platformError ? {...state.platformError, since:iso(state.platformError.since)} : null,
+    paused:fs.existsSync(pausedFile) ? read(pausedFile) : null, reviewRejections:(state.reviewRejections || []).slice(-3).map(item=>require('./clock-safety.cjs').rejection(item,binding)),
+    instruction:state.instruction || null, rateLimit:state.rateLimit ? {...require('./clock-safety.cjs').platformError(state.rateLimit,binding), since:iso(state.rateLimit.since), until:iso(state.rateLimit.until)} : null,
+    platformError:state.platformError ? {...require('./clock-safety.cjs').platformError(state.platformError,binding), since:iso(state.platformError.since)} : null,
     automations:(state.automations || []).slice(-3), dashboard:path.join(run, require('./dashboard.cjs').FILE),
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, subagentActivityAt(binding))),
       lastProcessActivityAt:iso(state.lastProcessActivityAt), lastWorkAt:iso(state.lastExecutorWorkAt), lastRealEventAt:iso(state.lastRealEventAt),
@@ -218,7 +219,7 @@ function context() {
         : 'No event is pending: if status shows no live watcher, re-arm it (watchArgv) and it promotes this event at once; never start a second watcher.',
       watchArgv:[node,path.join(__dirname,'claude-watch.cjs'),run]};
   }
-  const saved = review.persist(run, event), operational = ['progress_review','dispatch_review','continue'].includes(event.kind);
+  const saved = review.persistSafe(run, event, binding), operational = ['progress_review','dispatch_review','continue'].includes(event.kind);
   // Reviewing a submission, the supervisor reads what the executor queued behind it: a newer submission is reviewed
   // first, and questions or blocks close with an acceptance and go on Jay's closing list.
   const queue = event.kind === 'submission' ? executorQueue().map(({id, kind, at, event:body}) => ({id, kind, at, text:body?.text ?? null})) : [];
@@ -230,6 +231,34 @@ function context() {
     instructions:fs.readFileSync(path.join(__dirname,'../references/event-review.md'),'utf8'),
     decisionPath:path.join(run,'decision-' + event.id + '.json'),
     watchArgv:[node,path.join(__dirname,'claude-watch.cjs'),run], holdArgv:[node,path.join(__dirname,'claude-hold.cjs'),run]};
+}
+// Read-only check before the supervisor calls the native desktop messaging tool. It cannot control that tool.
+function decisionPreflight() {
+  need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute decision draft path');
+  const expectedEvent = process.argv[5], expectedContract = process.argv[6], expectedState = process.argv[7];
+  need(/^[a-f0-9]{64}$/.test(expectedEvent || ''), 'Expected event hash is required');
+  need(/^[a-f0-9]{64}$/.test(expectedContract || ''), 'Expected locked contract hash is required');
+  need(expectedState === '-' || /^[a-f0-9]{64}$/.test(expectedState || ''), 'Expected effective contract hash or - is required');
+  need(!fs.existsSync(path.join(run, 'STOP')) && !fs.existsSync(path.join(run, 'PAUSED.json')), 'Run was stopped or paused');
+  const {binding, contract} = load();
+  need(binding.contractSha256 === expectedContract && (contract.contractStateSha256 || '-') === expectedState,
+    'Contract or authorization state changed; refresh context');
+  const state = read(path.join(run, 'daemon-state.json'));
+  need(!['stopped', 'accepted'].includes(state.phase), 'Run was stopped or accepted');
+  const input = read(inputArgument), event = state.pending;
+  need(event && event.id === input.eventId && !state.resolved?.[input.eventId], 'Pending event changed');
+  const eventSha256 = crypto.createHash('sha256').update(JSON.stringify(require('./clock-safety.cjs').event(event,binding)) + '\n', 'utf8').digest('hex');
+  need(eventSha256 === expectedEvent, 'Pending event content changed; refresh context');
+  need(['reply','reject'].includes(input.disposition), 'Preflight is only for reply or reject');
+  need(!Object.prototype.hasOwnProperty.call(input, 'delivery'), 'Draft must not contain a delivery receipt');
+  const value = validateDecision(binding, contract, event, input);
+  if (event.kind === 'progress_review') need(state.progressReviewPreflight === event.id, 'Run progress-preflight first');
+  if (event.kind === 'dispatch_review') {const current=stillCurrent(run, binding, state, event).current;
+    need(current===true,current===null?'Dispatch sources unavailable; retain the event and retry after sources recover':'Dispatch event is no longer current');}
+  const message = 'LONG_TASK_DELIVERY:' + event.id + '\n' + value.reply;
+  return {eventId:event.id, eventSha256, disposition:value.disposition, contractSha256:binding.contractSha256,
+    contractStateSha256:contract.contractStateSha256 || null, decisionSha256:hash(inputArgument),
+    messageSha256:crypto.createHash('sha256').update(message, 'utf8').digest('hex')};
 }
 function decision() {
   need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute decision path');
@@ -271,6 +300,17 @@ function decision() {
       sentAt:Date.now(), deadlineMs:(given?.deadlineMinutes || INSTRUCTION_DEADLINE_MS / 60000) * 60000, misses:0};
   }
   checkedWait.remember(state,value,binding);
+  // Consume only write-attempt clues actually shown in this reviewed event. Later transcript rows remain queued.
+  if(event.kind==='dispatch_review'&&state.activityAudit?.mainWrites){
+    const reviewed=new Set((event.issues||[]).filter(item=>item.kind==='main_write_review')
+      .flatMap(item=>(item.detail?.observations||[]).map(value=>value.callId)));
+    state.activityAudit.mainWrites=state.activityAudit.mainWrites.filter(item=>!reviewed.has(item.callId));
+    const keys=new Set((event.issues||[]).filter(item=>item.kind==='main_write_review').map(item=>item.key));
+    if(state.dispatchAudit){
+      state.dispatchAudit.active=(state.dispatchAudit.active||[]).filter(key=>!keys.has(key));
+      state.dispatchAudit.announced=(state.dispatchAudit.announced||[]).filter(key=>!keys.has(key));
+    }
+  }
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
   if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();state.failedCommands={};}
@@ -356,7 +396,15 @@ function relocateSources() {
   return {run, relocated:manifest.entries.length, manifest:path.join(run, 'source-relocations.json')};
 }
 function attachDispatch(){const {binding}=load();binding.dispatchAudit={enabled:true,snapshot:'dispatch.json',attachedAt:now()};save(path.join(run,'binding.json'),binding);fs.writeFileSync(path.join(run,'DISPATCH_AUDIT'),now()+'\n');return {run,dispatchAudit:true,snapshot:path.join(run,'dispatch.json')};}
-function dispatchPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');const result=stillCurrent(run,binding,state,state.pending);if(!result.current){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};}
+function dispatchPreflight(){
+  const {binding}=load(),state=read(path.join(run,'daemon-state.json'));
+  need(state.pending?.id===inputArgument&&state.pending.kind==='dispatch_review','No matching pending dispatch review');
+  const result=stillCurrent(run,binding,state,state.pending);
+  if(result.current===false){releaseAnnounced(state,state.pending);(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.phase='watching';}
+  else if(result.current===null){(state.deferredDispatchEvents||={})[state.pending.id]=state.pending;state.pending=null;state.phase='watching';}
+  save(path.join(run,'daemon-state.json'),state);
+  return {eventId:inputArgument,current:result.current,...(result.current===null?{deferred:true,reason:'Source unavailable; event saved for automatic recheck while other events continue.'}:{}),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};
+}
 function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const processAt=pace.inFlight(binding,snapshotOf(binding),Date.now(),state.sleeps).processActivityAt||0;
   // Only silence and a changed wait end with new activity; overdue, like the other clock reasons, asks about the
   // baseline and scope of a package that is still busy (rule A, Jay 2026-10-13).
@@ -370,13 +418,13 @@ function progressPreflight(){const {binding}=load(),state=read(path.join(run,'da
       :command==='brief'?brief():command==='context'?context()
       :command==='authorization'?(()=>{const {binding,contract}=load();return review.authorization(contract,binding);})()
       :command==='pause'?pause():command==='resume'?resume():command==='relocate-sources'?relocateSources()
-      :command==='decision'?decision():command==='stop'?stop()
+      :command==='decision-preflight'?decisionPreflight():command==='decision'?decision():command==='stop'?stop()
       :command==='pending'?pendingChange():command==='ask'?(load(),pending.ask(run))
       // Jay hears about the batch on his phone too (Jay 2026-10-29), one push per batch.
       :command==='shown'?await pending.pushShown(run,pending.shown(run,process.argv.slice(4),{binding:load().binding}),'Claude 的監督對話')
       :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()
-      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
+      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision-preflight RUN FILE EVENT_HASH CONTRACT_HASH STATE_HASH_OR_DASH, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));
   } catch(error) {console.error(error.message);process.exitCode=1;}
 })();

@@ -36,7 +36,7 @@ function platformErrorOf(row){
   if(row?.type!=='assistant'||!row.isApiErrorMessage)return null;
   const at=Date.parse(row.timestamp)||Date.now(),text=textOf(row).slice(0,300);
   const reset=row.error==='rate_limit'?resetAfter(text,at):null;
-  return {since:at,kind:row.error||'unknown',status:row.apiErrorStatus??null,text,...(reset||{})};
+  return {since:at,kind:row.error||'unknown',status:row.apiErrorStatus??null,text:'平台回報錯誤，請查原始紀錄',textSha256:require('./clock-safety.cjs').digest(text),...(reset||{})};
 }
 // A rate limit that names its reset is a known wait (Jay 2026-10-13: no model or account switch, wait for the reset).
 function rateLimitOf(row){const error=platformErrorOf(row);return error?.until?error:null;}

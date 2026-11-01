@@ -8,6 +8,7 @@ const {spawn}=require('node:child_process');
 const scripts=process.env.CODEX_SUPERVISOR_SCRIPTS||path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
+function submit(run,decision){const file=path.join(run,'draft-decision-'+decision.eventId+'.json');save(file,decision);return require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',run,file],{encoding:'utf8'});}
 async function until(check,ms=12000) {
   const end=Date.now()+ms;
   while(Date.now()<end) {if(check()) return;await new Promise(resolve=>setTimeout(resolve,80));}
@@ -41,7 +42,7 @@ test('resident Codex watcher reads exact final, confirms one delivery, and accep
     const receipt=JSON.parse(fs.readFileSync(path.join(run,'receipt-review-executor-turn-1.json')));
     assert.equal(receipt.confirmed,true);
     assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
-    save(path.join(run,'decision-executor-turn-1.json'),{eventId:'executor-turn-1',disposition:'accept',revision:state.pending.revision,
+    submit(run,{eventId:'executor-turn-1',disposition:'accept',revision:state.pending.revision,
       results:[{id:'A1',status:'PASS',method:'Read exact bytes',expected:'alpha LF beta LF',actual:'alpha LF beta LF',evidence:[{path:candidate,sha256:sha(candidate)}]}]});
     try {
       await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).phase==='accepted');
@@ -49,7 +50,7 @@ test('resident Codex watcher reads exact final, confirms one delivery, and accep
       throw Error(error.message+'; state='+fs.readFileSync(path.join(run,'daemon-state.json'),'utf8')+'; stderr='+stderr);
     }
     const checked=JSON.parse(require('node:child_process').execFileSync(process.execPath,
-      [path.join(scripts,'supervise.cjs'),'decision',run,path.join(run,'decision-executor-turn-1.json')],{encoding:'utf8'}));
+      [path.join(scripts,'supervise.cjs'),'decision',run,path.join(run,'draft-decision-executor-turn-1.json')],{encoding:'utf8'}));
     assert.equal(checked.valid,true);
     assert.equal(checked.processed,true);
     assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
@@ -78,7 +79,8 @@ test('Codex observe sends no executor reply, preserves approval, and continues t
   let child=start(),stderr='';child.stderr.on('data',chunk=>stderr+=chunk.toString());
   try {
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id==='executor-turn-1');
-    save(path.join(run,'decision-executor-turn-1.json'),{eventId:'executor-turn-1',disposition:'observe',reason:'This exact merge approval is already pending; do not repeat it to the executor.',pendingApprovals:['Merge PR #26 into develop']});
+    save(path.join(run,'pending-decisions.json'),{schema:1,items:[{key:'merge-pr-26',status:'open',ask:'Merge PR #26 into develop'}]});
+    submit(run,{eventId:'executor-turn-1',disposition:'observe',reason:'This exact merge approval is already pending; do not repeat it to the executor.'});
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).resolved?.['executor-turn-1']);
     child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));
     const observed=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
@@ -91,7 +93,7 @@ test('Codex observe sends no executor reply, preserves approval, and continues t
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.pending.kind,'submission');
     assert.equal(state.resolved['executor-turn-1'].decision.disposition,'observe');
-    assert.deepEqual(state.resolved['executor-turn-1'].decision.pendingApprovals,['Merge PR #26 into develop']);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(run,'pending-decisions.json'))).items[0].status,'open');
     const sends=JSON.parse(fs.readFileSync(sentFile));
     assert.equal(sends.length,2);
     assert.equal(sends.some(message=>message.includes('LONG_TASK_DELIVERY:answer-executor-turn-1')),false);
@@ -113,7 +115,7 @@ test('Codex observe honors an existing STOP and does not restart watching',async
   try {
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id==='executor-turn-1');
     fs.writeFileSync(path.join(run,'STOP'),'stop\n');
-    save(path.join(run,'decision-executor-turn-1.json'),{eventId:'executor-turn-1',disposition:'observe',reason:'Record the known approval while honoring STOP.',pendingApprovals:['Merge PR #26 into develop']});
+    save(path.join(run,'draft-decision-executor-turn-1.json'),{eventId:'executor-turn-1',disposition:'observe',reason:'Record the known approval while honoring STOP.'});
     await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Watcher did not stop')),6000);child.once('exit',()=>{clearTimeout(timer);resolve();});});
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.phase,'stopped');assert.equal(state.pending.id,'executor-turn-1');

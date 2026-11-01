@@ -12,7 +12,10 @@ const login=require('./login-check.cjs');
 const dashboard=require('./dashboard.cjs');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
-const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage,trackDocTime}=require('./dispatch-audit.cjs');
+const activityCorrelation=require('./activity-correlation.cjs');
+const clockSafety=require('./clock-safety.cjs');
+const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage,trackDocTime,freeCapacity}=require('./dispatch-audit.cjs');
+const deferredDispatch=require('./deferred-dispatch.cjs');
 const {digest,promoteNext,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
 const binding=read(path.join(run,'binding.json'));
@@ -64,8 +67,9 @@ function readNew(){
       let start=0,newline;
       while((newline=joined.indexOf(10,start))!==-1){
         const lineEnd=position-joined.length+newline+1;
-        try{rows.push({row:JSON.parse(joined.subarray(start,newline).toString('utf8')),end:lineEnd});}
-        catch{rows.push({row:null,end:lineEnd});}
+        const lineStart=position-joined.length+start;
+        try{rows.push({row:JSON.parse(joined.subarray(start,newline).toString('utf8')),start:lineStart,end:lineEnd});}
+        catch{rows.push({row:null,start:lineStart,end:lineEnd});}
         start=newline+1;
       }
       carry=joined.subarray(start);
@@ -100,38 +104,39 @@ function waitingHasBlocker(text){
 }
 // Count failing commands the executor repeats; three identical failures mean it is retrying instead of changing approach.
 // A success of the same command clears its count: only uninterrupted failures are a repeat.
-function trackTools(row){
+function trackTools(row,offset){
   if(row.isSidechain||!Array.isArray(row.message?.content))return;
   for(const block of row.message.content){
     if(row.type==='assistant'&&block?.type==='tool_use'){
-      const items=state.callItems||={};items[block.id]=signals.workItem(block);
+      const items=state.callItems||={};items[block.id]='sha256:'+clockSafety.digest(signals.workItem(block));
       const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     }
-    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]={command:block.input.command.replace(/\s+/g,' ').trim().slice(0,300),at:row.timestamp||now(),background:Boolean(block.input.run_in_background),poll:signals.pollOnly(block)};
+    if(row.type==='assistant'&&block?.type==='tool_use'&&typeof block.input?.command==='string')(state.openTools||={})[block.id]={commandHash:clockSafety.commandKey(block.input.command),source:{path:binding.executorLog,offset,callId:block.id},at:row.timestamp||now(),background:Boolean(block.input.run_in_background),poll:signals.pollOnly(block)};
     if(row.type==='user'&&block?.type==='tool_result'){
       // The auto-mode classifier's refusal: forwarded authorization does not satisfy it; only Jay switching the chat does.
       const reason=signals.refusalOf(block);
       if(reason&&!(state.reviewRejections||[]).some(item=>item.callId===block.tool_use_id)){
-        (state.reviewRejections||=[]).push({callId:block.tool_use_id,at:row.timestamp||now(),item:state.callItems?.[block.tool_use_id]||'unknown',reason});
+        (state.reviewRejections||=[]).push({callId:block.tool_use_id,at:row.timestamp||now(),item:'工具操作',itemKey:state.callItems?.[block.tool_use_id]||'sha256:'+clockSafety.digest(block.tool_use_id),reasonSha256:clockSafety.digest(reason),source:{path:binding.executorLog,offset,callId:block.tool_use_id,outputSha256:clockSafety.digest(typeof block.content==='string'?block.content:JSON.stringify(block.content||''))}});
         if(state.reviewRejections.length>10)state.reviewRejections.splice(0,state.reviewRejections.length-10);
         state.rejectionCount=(state.rejectionCount||0)+1;
       }
     }
     if(row.type==='user'&&block?.type==='tool_result'&&state.openTools?.[block.tool_use_id]!==undefined){
-      const open=state.openTools[block.tool_use_id],command=typeof open==='string'?open:open.command;delete state.openTools[block.tool_use_id];
-      if(block.is_error||/Exit code [1-9]/.test(JSON.stringify(block.content||'').slice(0,80))){const item=((state.failedCommands||={})[command]||={count:0});item.count++;item.lastAt=row.timestamp||now();}
-      else delete state.failedCommands?.[command];
+      const open=state.openTools[block.tool_use_id],key=open.commandHash;delete state.openTools[block.tool_use_id];
+      if(!key)continue;
+      if(block.is_error||/Exit code [1-9]/.test(JSON.stringify(block.content||'').slice(0,80))){const item=((state.failedCommands||={})[key]||={count:0});item.count++;item.lastAt=row.timestamp||now();item.source={path:binding.executorLog,offset,callId:block.tool_use_id};}
+      else delete state.failedCommands?.[key];
     }
   }
 }
 // What each executor row says beyond its text: who sent a user turn and under which permission mode, the model and
 // effort an assistant turn ran on, real work versus polling one background job, and a turn the platform ended.
-function trackExecutor(row){
+function trackExecutor(row,offset){
   const source=inputSource(row),at=Date.parse(row.timestamp)||Date.now();
   if(source&&row.permissionMode)state.executorSettings={...state.executorSettings,permissionMode:row.permissionMode,at:row.timestamp||now()};
   if(source==='scheduled')noteAutomation('executor',row,at);
   const error=signals.platformErrorOf(row);
-  if(error&&!row.isSidechain)notePlatformError({who:'executor',...error});
+  if(error&&!row.isSidechain)notePlatformError({who:'executor',...error,source:{path:binding.executorLog,offset,...(row.uuid?{messageId:row.uuid}:{})}});
   if(row.type!=='assistant'||row.isSidechain||!row.message||row.isApiErrorMessage)return;
   if(row.message.model&&row.message.model!=='<synthetic>')state.executorSettings={...state.executorSettings,model:row.message.model,effort:row.effort||state.executorSettings?.effort||null};
   const content=Array.isArray(row.message.content)?row.message.content:[];
@@ -193,9 +198,10 @@ function blockedTools(){
   if(!old.length)return [];
   let processes='';try{processes=execFileSync('ps',['-axo','command'],{encoding:'utf8',maxBuffer:32*1024*1024});}catch{return [];}
   return old.filter(([,item])=>{
-    const piece=item.command.split(/[^\x20-\x7e]|['"\\]/).map(value=>value.trim()).sort((a,b)=>b.length-a.length)[0]||'';
+    const command=clockSafety.commandAt(item.source,binding);if(!command)return false;
+    const piece=command.split(/[^\x20-\x7e]|['"\\]/).map(value=>value.trim()).sort((a,b)=>b.length-a.length)[0]||'';
     return piece.length>=12&&!processes.includes(piece);
-  }).map(([id,item])=>({id,command:item.command,since:item.at}));
+  }).map(([id,item])=>({id,summary:'指令操作尚未開始',source:item.source,since:item.at}));
 }
 // The machine's monotonic clock stops while it sleeps; the wall clock does not. A gap between them is sleep.
 let lastTick=null;
@@ -274,7 +280,7 @@ function supervisorClock(){
   // what the run waits on: once per error, with the error text.
   const failed=state.platformError;
   const platformError=failed&&!limited&&!waitingUser&&awake(Math.max(failed.since,failed.rearmedAt||0))>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?
-    {who:failed.who,since:new Date(failed.since).toISOString(),kind:failed.kind,status:failed.status,text:failed.text}:null;
+    {who:failed.who,since:new Date(failed.since).toISOString(),kind:failed.kind,status:failed.status,text:failed.text,textSha256:failed.textSha256,source:failed.source}:null;
   // The hour counts from the executor's last event or the supervisor's ruling on one, whichever is later (lastDecisionAt).
   const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awake(lastEvent)>=NO_EVENT_REVIEW_MS;
   const noEventHour=quietEvent&&!waitingUser&&!limited&&once('no_event_hour:'+lastEvent);
@@ -296,8 +302,7 @@ function supervisorClock(){
   const longUncovered=uncovered.filter(id=>awake(plan[id])>=UNPLANNED_MS);
   let unplanned=null;
   if(longUncovered.length&&idle&&once('unplanned:'+longUncovered.join(','))){
-    const seats=Number(snapshot?.capacity?.verified)||0,inFlight=(snapshot?.packages?.inFlight||[]).length;
-    unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awake(plan[id])))/60000)};
+    unplanned={criteria:longUncovered,freeCapacity:freeCapacity(snapshot),minutes:Math.round(Math.min(...longUncovered.map(id=>awake(plan[id])))/60000)};
   }
   // A supervisor instruction not acted on by its deadline: no completed executor turn and no snapshot update since it
   // was sent. Action closes it even while Jay's approval is awaited; only the overdue notice waits.
@@ -314,11 +319,11 @@ function supervisorClock(){
   }
   // Auto mode: tell the supervisor once while the executor runs under it, again only when a refusal blocks a work item
   // not refused before, and once more when Jay switches the chat to bypass permissions so blocked work resumes.
-  const settings=state.executorSettings,autoMode=settings?.permissionMode==='auto';
-  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId)&&once('rejected-item:'+(item.item||item.callId)));
+  const settings=state.executorSettings;
+  const rejections=(state.reviewRejections||[]).filter(item=>once('rejected:'+item.callId)&&once('rejected-item:'+(item.itemKey||item.callId)));
   let permission=null,permissionChanged=null;
-  if(autoMode&&(once('permission:auto')||rejections.length)){
-    permission={permissionMode:settings.permissionMode,since:settings.at,newRejections:rejections.map(({item,reason,at})=>({item,reason,at}))};state.permissionWarned=true;
+  if(rejections.length){
+    permission={permissionMode:settings?.permissionMode||null,since:settings?.at||null,newRejections:rejections.map(item=>clockSafety.rejection(item,binding))};state.permissionWarned=true;
   }else if(settings?.permissionMode==='bypassPermissions'&&state.permissionWarned){state.permissionWarned=false;permissionChanged={permissionMode:settings.permissionMode,at:settings.at};}
   const automations=(state.automations||[]).filter(item=>once('automation:'+item.key));
   const loggedOut=paused()?[]:login.due(state,run)||[];
@@ -347,12 +352,12 @@ function supervisorClock(){
       processAt:iso(state.lastProcessActivityAt),packages:paced.packages.map(({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})=>({id,elapsedMinutes,baselineMinutes,ratio,lastActivityAt,finished,alive})),
       problems:reasons,open:[...paced.packages.filter(item=>overdueTier(item)).map(item=>'overdue:'+item.id),...paced.packages.filter(item=>item.baselineMissing).map(item=>'baseline_missing:'+item.id),
         ...paced.packages.filter(quietProcess).map(item=>'process_stalled:'+item.id),...paced.packages.filter(item=>item.finished).map(item=>'snapshot_stale:'+item.id),
-        ...blockedTools().map(item=>'executor_blocked:'+item.command.slice(0,60)),...(idle?['idle_with_work']:[]),...(quietEvent&&!limited?['no_event_hour']:[]),
+        ...blockedTools().map(item=>'executor_blocked:'+item.id),...(idle?['idle_with_work']:[]),...(quietEvent&&!limited?['no_event_hour']:[]),
         ...(limited?['rate_limited']:[]),...(state.platformError?['platform_error']:[])]})+'\n');
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
-    failedCommands:repeated.map(([command,item])=>({command,count:item.count,lastAt:item.lastAt})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
+    failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:binding.executorLog}})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awake(lastEvent)/60000)}}:{}),
     ...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
     ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(platformError?{platformError}:{}),...(executorModel?{executorModel}:{}),
@@ -386,6 +391,7 @@ async function watch(){
   try{require('./watch-guard.cjs').register(run,{platform:'claude-code'});}catch{}
   state=read(statePath);
   if(stopped()){state.phase='stopped';checkpoint();return;}
+  clockSafety.migrate(state,binding);
   if(state.pending||state.phase==='accepted')return;
   need(binding.platform==='claude-code'&&binding.executorDesktopId,'Desktop executor binding required');
   need(hash(contractPath)===binding.contractSha256,'Locked contract changed');
@@ -440,9 +446,10 @@ async function watch(){
     tickSleep();
     if(handoffRequest()){wake(state.pending);return;}
     const rows=readNew();
+    const dispatchHistory=rows.length&&state.executorKnowsRun?activityCorrelation.readHistory(run):null;
     if(rows.length)lastGrowthAt=Date.now();
     let finalized=false;
-    for(const {row,end} of rows){
+    for(const {row,start,end} of rows){
       const toolResult=row?.type==='user'&&Array.isArray(row.message?.content)&&
         row.message.content.some(block=>block?.type==='tool_result');
       if((row?.type==='assistant'&&!row.isSidechain)||toolResult){
@@ -465,7 +472,10 @@ async function watch(){
           delete state.unconfirmedDeliveries[id];
         }
       }
-      trackTools(row);trackExecutor(row);
+      if(state.executorKnowsRun)activityCorrelation.observeMainWrite(state,row,dispatchHistory);
+      trackTools(row,start);trackExecutor(row,start);
+      // Platform error rows are control signals, not assistant message text to assemble and persist.
+      if(row.type==='assistant'&&row.isApiErrorMessage)continue;
       if(row.type==='user'){state.message=null;continue;}
       if(!id||!row.uuid)continue;
       if(state.message?.id!==id){state.message={id,texts:[],finalId:null,finalEnd:null};
@@ -494,6 +504,14 @@ async function watch(){
       state.lastRealEventAt=at;state.lastExecutorWorkAt=at;state.lastProgressReviewAt=at;state.unplanned={};}
     state.pausedSeen=isPaused;
     writeDashboard();
+    // An unavailable source must not block other events. Recheck deferred reviews on the normal watcher cycle.
+    if(!isPaused&&!state.pending&&!state.message?.finalId){
+      const event=deferredDispatch.recheck(run,binding,state);
+      if(event){
+        state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;
+        state.pending=event;state.phase='awaiting_decision';checkpoint();wake(event);return;
+      }
+    }
     if(!isPaused&&!state.pending&&!state.message?.finalId){const audit=inspectDispatch(run,binding,state);
       if(!state.executorKnowsRun&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS)audit.newIssues=audit.newIssues.filter(item=>item.kind!=='snapshot_missing');
       const auditEvent=dispatchEvent(audit);if(auditEvent){

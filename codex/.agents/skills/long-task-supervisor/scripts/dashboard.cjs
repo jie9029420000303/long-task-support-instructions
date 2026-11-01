@@ -15,9 +15,8 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},now=
   const queued=(state.eventQueue||[]).length;
   const handling=(state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無')+
     (queued?'；另有 '+queued+' 個執行對話事件排隊，處理完依序送監督':'');
-  const refusedItems=[...new Set((state.reviewRejections||[]).map(item=>item.item).filter(Boolean))];
-  const permission=!settings?'尚未讀到':autoReview?'自動審查（Git、遠端連線等操作會被平台擋下；請在該對話的權限選單選「完全存取」，只切選單、不必打字，切好在監督對話說一聲，續接由監督送）'+
-    (state.rejectionCount?'，已被擋 '+state.rejectionCount+' 次'+(refusedItems.length?'，最近被擋：'+refusedItems.slice(-4).join('、'):''):''):'完全存取';
+  const permission=(!settings?'尚未讀到':(autoReview?'自動審查（是否允許依實際審查結果）':'不需逐項審查（是否可操作依實際工具結果）'))+
+    (state.rejectionCount?'，疑似審查拒絕紀錄 '+state.rejectionCount+' 次（待核對原始事件）':'');
   const models=switched.length?switched.map(([id,item])=>who(id,binding)+' 改用 '+item.current+'，'+clock(item.until)+' 換回 '+item.original).join('；'):'無';
   const failed=state.platformError?clock(state.platformError.since)+' 執行對話被平台錯誤中斷：'+String(state.platformError.text||'').slice(0,120)+'；2 分鐘內沒恢復就叫醒監督處理':'無';
   const lines=['# 監督儀表板','','更新時間：'+clock(now)+'（台北）','','## 監看','',

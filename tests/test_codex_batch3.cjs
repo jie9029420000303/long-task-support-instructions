@@ -64,14 +64,14 @@ test('Jay\'s pause stops every model wake that a quiet run would otherwise cause
     assert.equal(read(paused.statePath).pending,null,'a paused run asks the supervisor nothing');
     const board=path.join(paused.run,'監督儀表板.md');await until(()=>fs.existsSync(board));
     const text=fs.readFileSync(board,'utf8');
-    assert.match(text,/背景監看：運作中/);assert.match(text,/使用者暫停中/);assert.match(text,/執行對話權限：完全存取/);
+    assert.match(text,/背景監看：運作中/);assert.match(text,/使用者暫停中/);assert.match(text,/執行對話權限：不需逐項審查（是否可操作依實際工具結果）/);assert.doesNotMatch(text,/疑似審查拒絕紀錄/);
     const resumed=JSON.parse(execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'resume',paused.run],{env:paused.env,encoding:'utf8'}));
     assert.equal(resumed.resumed,true);assert.equal(fs.existsSync(path.join(paused.run,'PAUSED.json')),false);
     assert.equal(fs.readFileSync(path.join(paused.run,'pause-history.jsonl'),'utf8').includes('先暫停'),true,'the pause and its words stay on record');
   }finally{await quiet.stop();await paused.stop();}
 });
 
-test('auto review is reported once with the refusal text, so the supervisor asks for full access instead of pasted authorization',async()=>{
+test('an actual auto-review refusal wakes the supervisor with a verifiable safe source',async()=>{
   const f=fixture({settings:{...fullAccess,approval_policy:'on-request',approvals_reviewer:'auto_review'}});
   const refusal='Script error:\nexec_command failed: CreateProcess { message: "Rejected(\\"This action was rejected due to unacceptable risk.\\\\nReason: 此 SSH 動作會以 root 身分讀取遠端 Jira 憑證；未獲得該具體操作授權。\\\\nThe agent must not attempt\\")" }';
   line(f.executorLog,{timestamp:minutesAgo(0.5),type:'response_item',payload:{type:'custom_tool_call_output',call_id:'call_jira',output:[{type:'input_text',text:refusal}]}});
@@ -80,7 +80,7 @@ test('auto review is reported once with the refusal text, so the supervisor asks
     await until(()=>read(f.statePath).pending?.reasons?.includes('permission_review'));
     const event=read(f.statePath).pending;
     assert.equal(event.permission.approvalPolicy,'on-request');
-    assert.equal(event.permission.newRejections.length,1);assert.match(event.permission.newRejections[0].reason,/SSH/);
+    assert.equal(event.permission.newRejections.length,1);const source=event.permission.newRejections[0].source;assert.equal(source.path,f.executorLog);assert.equal(source.callId,'call_jira');assert.match(source.outputSha256,/^[a-f0-9]{64}$/);assert.match(fs.readFileSync(source.path,'utf8'),/SSH/);assert.ok(!JSON.stringify(event.permission).includes('SSH'),'raw refusal stays in source, not the event');
   }finally{await f.stop();}
 });
 

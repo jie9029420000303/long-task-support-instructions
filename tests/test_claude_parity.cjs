@@ -70,35 +70,27 @@ function observe(f,event){
   assert.equal(cmd(f,'decision',file).processed,true);
 }
 
-test('a slow package that still produces is recorded, not woken; once it goes quiet it wakes the supervisor once',async()=>{
-  const f=fixture();
-  agent(f.subagents,'slow',{minutes:30,tokens:30000,done:false,endedMinutesAgo:0});
+test('an overdue package is reviewed even when producing, once per tier',async()=>{
+  const f=fixture();agent(f.subagents,'slow',{minutes:30,tokens:30000,done:false,endedMinutesAgo:0});
   save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-SLOW',handle:'agent:slow',evidence:['wp/WP-SLOW.md'],baseline:{minutes:12,startedAt:minutesAgo(30)}}]}});
   let child=start(f);
   try{
-    await watching(f);await sleep(500);
-    assert.equal(pending(f),null,'2.5x its baseline but producing: Jay 2026-10-11 wants it recorded, not interrupted');
-    await stopWatch(child);
-    agent(f.subagents,'slow',{minutes:30,tokens:30000,done:false,endedMinutesAgo:16});
-    child=start(f);
-    await until(()=>pending(f)?.kind==='progress_review');
-    assert.deepEqual(pending(f).reasons,['overdue']);assert.deepEqual(pending(f).overdue,['WP-SLOW']);
-    assert.match(child.out,/LONG_TASK_WAKE .*"context":/,'the wake carries a context locator');
-    assert.doesNotMatch(child.out,/"pace":/,'the wake no longer pastes the whole event');
+    await until(()=>pending(f)?.kind==='progress_review');const event=pending(f);
+    assert.deepEqual(event.reasons,['overdue']);assert.deepEqual(event.overdue,['WP-SLOW']);
+    await stopWatch(child);observe(f,event);
+    agent(f.subagents,'slow',{minutes:30,tokens:30000,done:false,endedMinutesAgo:16});child=start(f);
+    await watching(f);await sleep(500);assert.equal(pending(f),null,'one review per elapsed tier even when output later stops');
   }finally{await stopWatch(child);f.done();}
 });
 
-test('a pure overdue check becomes obsolete when its package produces again before the supervisor acts',async()=>{
-  const f=fixture();
-  agent(f.subagents,'slow',{minutes:30,tokens:30000,done:false,endedMinutesAgo:16});
+test('an overdue review stays current if the package produces again before the supervisor acts',async()=>{
+  const f=fixture();agent(f.subagents,'slow',{minutes:30,tokens:30000,done:false,endedMinutesAgo:16});
   save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-SLOW',handle:'agent:slow',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(30)}}]}});
   const child=start(f);
   try{
-    await until(()=>pending(f)?.kind==='progress_review');
-    const event=pending(f);await stopWatch(child);
+    await until(()=>pending(f)?.kind==='progress_review');const event=pending(f);await stopWatch(child);
     agent(f.subagents,'slow',{minutes:31,tokens:31000,done:false,endedMinutesAgo:0});
-    assert.equal(cmd(f,'progress-preflight',event.id).current,false,'no nudge for a package that recovered');
-    assert.equal(pending(f),null);
+    assert.equal(cmd(f,'progress-preflight',event.id).current,true,'fresh work does not void an overdue analysis');assert.equal(pending(f).id,event.id);
   }finally{await stopWatch(child);f.done();}
 });
 
@@ -202,7 +194,10 @@ test('a success of the same command clears its failure count, so only uninterrup
   try{
     await watching(f);
     run('a',true);run('b',true);run('c',false);run('d',true);
-    await until(()=>read(f.statePath).failedCommands?.['npm test']?.count===1);
+    const key='sha256:'+crypto.createHash('sha256').update('npm test').digest('hex');
+    await until(()=>read(f.statePath).failedCommands?.[key]?.count===1);
+    const item=read(f.statePath).failedCommands[key];assert.equal(item.count,1);assert.equal(item.source.path,f.executorLog);assert.ok(Number.isInteger(item.source.offset));
+    assert.equal(JSON.stringify(read(f.statePath).failedCommands).includes('npm test'),false,'persisted failure state must not expose command');
   }finally{await stopWatch(child);f.done();}
 });
 
@@ -270,25 +265,25 @@ test('pause and stop take only words received this turn, never a quote replayed 
   }finally{f.done();}
 });
 
-test('auto mode is reported once, a refusal of a new work item again, and the switch to bypass once more',async()=>{
+test('permission mode alone stays quiet, a real refusal is deduplicated, and the mode switch is reported',async()=>{
   const f=fixture({quietMinutes:0});
   line(f.executorLog,{type:'user',origin:{kind:'peer'},isMeta:true,permissionMode:'auto',message:{content:'continue'}});
   let child=start(f);
   try{
-    await until(()=>pending(f)?.kind==='progress_review');
-    assert.deepEqual(pending(f).reasons,['permission_review']);assert.equal(pending(f).permission.permissionMode,'auto');
-    await stopWatch(child);observe(f,pending(f));
-    assistant(f,[{type:'tool_use',id:'d1',name:'Bash',input:{command:'cd app && docker compose up -d'}}]);
-    line(f.executorLog,{type:'user',uuid:crypto.randomUUID(),message:{content:[{type:'tool_result',tool_use_id:'d1',is_error:true,
-      content:'Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Permission Grant]. If you have other tasks...'}]}});
-    child=start(f);
-    await until(()=>pending(f)?.kind==='progress_review');
-    assert.deepEqual(pending(f).reasons,['permission_review']);assert.equal(pending(f).permission.newRejections[0].item,'docker compose');
-    await stopWatch(child);observe(f,pending(f));
+    await watching(f);await sleep(300);assert.equal(pending(f),null,'auto mode alone is not a refusal');await stopWatch(child);
+    const marker='synthetic-secret-8a7b6c5d',command='cd app && docker compose up -d --token '+marker;
+    const denial='Permission for this action was denied by the Claude Code auto mode classifier. Reason: '+marker;
+    assistant(f,[{type:'tool_use',id:'d1',name:'Bash',input:{command}}]);
+    const result={type:'user',uuid:crypto.randomUUID(),timestamp:new Date().toISOString(),message:{content:[{type:'tool_result',tool_use_id:'d1',is_error:true,content:denial}]}};
+    line(f.executorLog,result);child=start(f);await until(()=>pending(f)?.kind==='progress_review');
+    let event=pending(f);assert.deepEqual(event.reasons,['permission_review']);assert.equal(event.permission.permissionMode,'auto');
+    const refusal=event.permission.newRejections[0];assert.equal(refusal.callId,'d1');assert.equal(refusal.item,'工具操作');assert.equal(refusal.source.path,f.executorLog);assert.ok(Number.isInteger(refusal.source.offset));
+    assert.equal(refusal.source.outputSha256,crypto.createHash('sha256').update(denial).digest('hex'));assert.equal(JSON.stringify(event).includes(marker),false);
+    const row=JSON.parse(fs.readFileSync(refusal.source.path).subarray(refusal.source.offset).toString().split('\n')[0]);assert.equal(row.message.content[0].tool_use_id,'d1');
+    await stopWatch(child);observe(f,event);
+    line(f.executorLog,result);child=start(f);await watching(f);await sleep(300);assert.equal(pending(f),null,'replayed refusal for the same call is not announced again');await stopWatch(child);
     line(f.executorLog,{type:'user',origin:{kind:'human'},permissionMode:'bypassPermissions',message:{content:'繼續'}});
-    child=start(f);
-    await until(()=>pending(f)?.kind==='progress_review');
-    assert.deepEqual(pending(f).reasons,['permission_changed']);
+    child=start(f);await until(()=>pending(f)?.kind==='progress_review');assert.deepEqual(pending(f).reasons,['permission_changed']);
   }finally{await stopWatch(child);f.done();}
 });
 
@@ -296,8 +291,10 @@ test('a rate limit is a known wait: no silence wake while it runs, one wake at i
   const f=fixture({quietMinutes:20,lastReviewMinutesAgo:20});
   // The run was bound before the limit hit; a limit from before the binding belongs to another run.
   const bindingFile=path.join(f.run,'binding.json'),binding=read(bindingFile);binding.createdAt=minutesAgo(40);save(bindingFile,binding);
+  const reset=new Date(Date.now()+120*60000),hour=reset.getUTCHours(),h12=hour%12||12;
+  const notice=`You've hit your session limit · resets ${h12}:${String(reset.getUTCMinutes()).padStart(2,'0')}${hour<12?'am':'pm'} (UTC)`;
   line(f.executorLog,{type:'assistant',isApiErrorMessage:true,error:'rate_limit',apiErrorStatus:429,timestamp:minutesAgo(20),
-    message:{id:'rl',model:'<synthetic>',stop_reason:'stop_sequence',content:[{type:'text',text:"You've hit your session limit"}]}});
+    message:{id:'rl',model:'<synthetic>',stop_reason:'stop_sequence',content:[{type:'text',text:notice}]}});
   let child=start(f);
   try{
     await watching(f);await sleep(500);
@@ -312,11 +309,23 @@ test('a rate limit is a known wait: no silence wake while it runs, one wake at i
   }finally{await stopWatch(child);f.done();}
 });
 
-test('the reset time is read from Claude\'s own notice, with five hours when it names none',()=>{
+test('the reset time is read from Claude\'s own notice, and no time is invented',()=>{
   const at=Date.parse('2026-08-13T19:20:36.664Z');
   assert.equal(new Date(signals.resetAfter("You've hit your session limit · resets 3:40am (Asia/Taipei)",at).until).toISOString(),'2026-08-13T19:40:00.000Z');
   assert.equal(new Date(signals.resetAfter("You've hit your limit · resets 8pm (Asia/Taipei)",at).until).toISOString(),'2026-08-14T12:00:00.000Z');
-  assert.equal(signals.resetAfter('no time',at).until,at+5*3600000);
+  assert.equal(signals.resetAfter('no time',at),null);
+  const error=signals.platformErrorOf({type:'assistant',isApiErrorMessage:true,error:'rate_limit',timestamp:new Date(at).toISOString(),message:{content:[{type:'text',text:'no time'}]}});
+  assert.equal(error.kind,'rate_limit');assert.equal(error.until,undefined);
+});
+
+test('a rate limit with no reset is reported as a platform error instead of an invented wait',async()=>{
+  const f=fixture({quietMinutes:20,lastReviewMinutesAgo:20});
+  const bindingFile=path.join(f.run,'binding.json'),binding=read(bindingFile);binding.createdAt=minutesAgo(40);save(bindingFile,binding);
+  line(f.executorLog,{type:'assistant',isApiErrorMessage:true,error:'rate_limit',apiErrorStatus:429,timestamp:minutesAgo(20),
+    message:{id:'rl-unknown',model:'<synthetic>',stop_reason:'stop_sequence',content:[{type:'text',text:'Synthetic rate limit without reset time'}]}});
+  const child=start(f);
+  try{await until(()=>pending(f)?.kind==='progress_review');assert.ok(pending(f).reasons.includes('platform_error'));assert.equal(pending(f).platformError.kind,'rate_limit');assert.ok(!read(f.statePath).rateLimit);}
+  finally{await stopWatch(child);f.done();}
 });
 
 test('a scheduled turn in a supervised chat is reported so the automation can be paused',async()=>{

@@ -128,7 +128,7 @@ test('one brief call gathers the event, pace, executor words and dispatch pictur
   const f=fixture(),log=path.join(f.root,'r40.log');fs.writeFileSync(log,'running\n');
   line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),timestamp:new Date().toISOString(),message:{id:'t1',stop_reason:'tool_use',content:[{type:'text',text:'Integrating B6 now.'}]}});
   save(path.join(f.run,'dispatch.json'),{activity:'working',packages:{ready:[],inFlight:[{id:'NB',handle:'resource:r40',evidence:[log]}],blocked:[{id:'C12',kind:'dependency'}]}});
-  let child=start(f);
+  let child=start(f),hold;
   try{
     await until(()=>pending(f)?.kind==='progress_review');
     await until(()=>!fs.existsSync(path.join(f.run,'watcher.lock')));
@@ -141,9 +141,17 @@ test('one brief call gathers the event, pace, executor words and dispatch pictur
     assert.equal(command(f,'progress-preflight',brief.pending.id).current,true);
     assert.equal(command(f,'decision',decision).processed,true);
     child=start(f);
+    await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
+    const withoutHold=command(f,'status');assert.equal(withoutHold.active,false,'a watcher without the desktop hold is not fully active');
+    hold=spawn(process.execPath,[path.join(scripts,'claude-hold.cjs'),f.run],{env:f.env,stdio:'ignore'});
+    await until(()=>fs.existsSync(path.join(f.run,'hold.json')));
     const value=JSON.parse(execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'status',f.run,'--wait-active','5'],{env:f.env,encoding:'utf8'}));
-    assert.equal(value.active,true);
-  }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+    assert.equal(value.hold,true);assert.equal(value.active,true);
+  }finally{
+    if(child?.exitCode===null&&child.signalCode===null){const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');await exited;}
+    if(hold?.exitCode===null&&hold.signalCode===null){const exited=new Promise(resolve=>hold.once('exit',resolve));hold.kill('SIGTERM');await exited;}
+    fs.rmSync(f.root,{recursive:true,force:true});
+  }
 });
 
 test('a quiet review still needs a verified wait to observe',()=>{
@@ -206,7 +214,11 @@ test('three identical failing commands are surfaced as repeated work',async()=>{
       await until(()=>pending(f)?.kind==='progress_review');
       const event=pending(f);
       assert.deepEqual(event.reasons,['repeat']);
-      assert.deepEqual(event.failedCommands.map(item=>[item.command,item.count]),[['python3 -m pytest tests/test_x.py',3]]);
+      const command='python3 -m pytest tests/test_x.py',key='sha256:'+crypto.createHash('sha256').update(command).digest('hex');
+      assert.deepEqual(event.failedCommands.map(item=>[item.commandHash,item.count]),[[key,3]]);
+      const source=event.failedCommands[0].source;assert.equal(source.path,f.executorLog);assert.ok(Number.isInteger(source.offset));
+      const row=JSON.parse(fs.readFileSync(source.path).subarray(source.offset).toString().split('\n')[0]);assert.equal(row.message.content[0].tool_use_id,'toolu_2');
+      assert.equal(JSON.stringify(event).includes(command),false);
     }finally{restarted.kill('SIGTERM');}
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
@@ -257,7 +269,9 @@ test('a command with no result and no process for 5 minutes is reported as needi
     await until(()=>pending(f)?.kind==='progress_review',15000);
     const event=pending(f);
     assert.deepEqual(event.reasons,['executor_blocked']);
-    assert.equal(event.executorBlocked[0].command,stuck);
+    const blocked=event.executorBlocked[0];assert.equal(blocked.summary,'指令操作尚未開始');assert.equal(blocked.source.path,f.executorLog);assert.ok(Number.isInteger(blocked.source.offset));
+    const row=JSON.parse(fs.readFileSync(blocked.source.path).subarray(blocked.source.offset).toString().split('\n')[0]);assert.equal(row.message.content[0].input.command,stuck);
+    assert.equal(JSON.stringify(event).includes(stuck),false);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 

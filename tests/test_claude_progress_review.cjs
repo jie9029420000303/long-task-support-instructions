@@ -122,7 +122,8 @@ test('one approval block cannot freeze the whole run without a user pause source
   const event={id:'question-1',kind:'question'},contract={criteria:[]},config={};
   assert.throws(()=>validateDecision(config,contract,event,{eventId:event.id,disposition:'needs_user'}),/Whole-run pause requires/);
   assert.equal(validateDecision(config,contract,event,{eventId:event.id,disposition:'needs_user',wholeRunPauseSource:'user message 123: pause this entire run'}).disposition,'needs_user');
-  assert.equal(validateDecision(config,contract,event,{eventId:event.id,disposition:'observe',reason:'Only one operation awaits approval.',pendingApprovals:['Merge PR #26']}).disposition,'observe');
+  assert.throws(()=>validateDecision(config,contract,event,{eventId:event.id,disposition:'observe',reason:'Only one operation awaits approval.',pendingApprovals:['Merge PR #26']}),/pending-decision ledger/);
+  assert.equal(validateDecision(config,contract,event,{eventId:event.id,disposition:'observe',reason:'Only one operation awaits approval.'}).disposition,'observe');
 });
 
 test('Claude checked wait keeps receiving events and wakes on a human approval without a timed prompt',async()=>{

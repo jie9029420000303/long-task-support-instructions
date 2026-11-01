@@ -77,27 +77,24 @@ function status() {
   const state = read(path.join(run, 'daemon-state.json'));
   const readyPath = path.join(run, 'native-ready.json');
   const ready = fs.existsSync(readyPath) ? read(readyPath) : null;
-  let alive = false;
-  if (ready && ready.pid === state.pid) {
-    try { process.kill(ready.pid, 0); alive = true; } catch {}
-  }
-  // The parent (run-watch.cjs) and the outage record, for the check the supervisor runs before ending each turn.
+  const probe = require('./process-probe.cjs').probe;
+  const alive = ready && ready.pid === state.pid ? probe(ready.pid) : null;
+  // A PID probe is not an App read; unknown means do not claim active or automatically restart.
   const runtimePath = path.join(run, 'runtime-state.json'), runtime = fs.existsSync(runtimePath) ? read(runtimePath) : null;
-  let parentAlive = false;
-  if (runtime) { try { process.kill(runtime.pid, 0); parentAlive = true; } catch {} }
+  const parentAlive = runtime ? probe(runtime.pid) : null;
   const outage = fs.existsSync(path.join(run, 'watch-health.json')) ? read(path.join(run, 'watch-health.json')).open || null : null;
   const health = state.appHealth || {};
   return {
     run, executorId: binding.executorId, supervisorId: binding.supervisorId,
-    phase: state.phase, active: alive && ['watching', 'awaiting_decision', 'needs_user'].includes(state.phase),
-    readVerified: Boolean(ready && ready.readVerified && ready.executorId === binding.executorId),
+    phase: state.phase, active: ['watching', 'awaiting_decision', 'needs_user'].includes(state.phase) ? alive : false,
+    readVerified: Boolean(ready && ready.readVerified && ready.executorId === binding.executorId), readVerifiedAt:ready?.at || null,
     reads: state.reads, messages: state.messages.length, acceptedAt: state.acceptedAt || null,
     // An amendment waits for both to be empty (contract-state safePoint).
     pending: state.pending?.id || null, inflight: state.inflight ? { key: state.inflight.key, phase: state.inflight.phase || null } : null,
     error: state.error || null,
     watch: { parentAlive, heartbeatAt: runtime?.heartbeatAt || null, lastReadAt: state.lastReadAt || null,
       appHealth: health.failingSince ? { failingSince: health.failingSince, kind: health.kind || null, lastError: health.lastError || null } : null,
-      outage, restartCommand: parentAlive ? null : '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ' + path.join(__dirname, 'run-watch.cjs') + ' ' + run }
+      outage, restartCommand: parentAlive !== false || alive !== false ? null : '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ' + path.join(__dirname, 'run-watch.cjs') + ' ' + run }
   };
 }
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
@@ -127,11 +124,13 @@ function brief() {
   const paced = pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt), iso = value => value ? new Date(value).toISOString() : null;
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
+  const checkCoverage = {};
+  const crossChecks = snapshot ? require('./dispatch-audit.cjs').crossCheck(run,binding,snapshot,state,pace.agentRuns(binding),checkCoverage) : [];
   return {status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
     // Jay is online for 10 minutes after typing in this chat: one of the two times to ask the whole pending ledger.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < require('./guard.cjs').ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
     threads:state.threadTitles || null, paused:fs.existsSync(path.join(run, 'PAUSED.json')) ? read(path.join(run, 'PAUSED.json')) : null,
-    executorPermission:state.executorSettings || null, reviewRejections:(state.reviewRejections || []).slice(-3),
+    executorPermission:state.executorSettings || null, reviewRejections:(state.reviewRejections || []).slice(-3).map(require('./supervisor-clock.cjs').safeRejection),
     instruction:state.instruction || null, modelSwitch:state.modelSwitch || null,
     rateLimits:Object.fromEntries(Object.entries(state.rateLimits || {}).filter(([, item]) => item.until > Date.now()).map(([key, item]) => [key, {until:iso(item.until), basis:item.basis}])),
     // An executor turn the platform ended and the executor has not left yet (Jay 2026-10-14): later wakes see it too.
@@ -143,6 +142,9 @@ function brief() {
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     // Executor events waiting behind the pending one, oldest first; native-watch hands them over one by one.
     eventQueue:(state.eventQueue || []).map(({id, kind, at}) => ({id, kind, at})),
+    dispatchCrossChecks:crossChecks,
+    dispatchSourceCoverage:{workPackages:checkCoverage.workPackages || 'unknown'},
+    deferredDispatch:Object.values(state.deferredDispatch || {}).map(item=>require('./review-context.cjs').summary(item.event)),
     // A decision file for the pending event that failed its checks: the watcher kept it unapplied and keeps watching.
     decisionError:(state.pending && state.decisionErrors?.[state.pending.id]) || null,
     // Every decision waiting on Jay, in full, so compaction loses none and a new question is matched against it first.
@@ -151,6 +153,7 @@ function brief() {
 }
 function context() {
   const {binding,contract}=load(),state=read(path.join(run,'daemon-state.json'));
+  require('./decision-commit.cjs').assertNoLegacyWatcher(run);
   const event=state.pending;
   need(event && event.id===other,'No matching pending event; do not replay an old review');
   const review=require('./review-context.cjs'),saved=review.persist(run,event);
@@ -162,14 +165,15 @@ function context() {
     // Questions and blocks queued behind a submission close with its acceptance: read them in full and list them for Jay.
     ...(event.kind==='submission'&&state.eventQueue?.length?{queued:state.eventQueue}:{}),
     instructions:fs.readFileSync(path.join(__dirname,'../references/event-review.md'),'utf8'),
-    decisionPath:path.join(run,'decision-'+event.id+'.json')};
+    decisionPath:require('./decision-commit.cjs').draft(run,event.id)};
 }
 
 function decision() {
   need(other && path.isAbsolute(other), 'Use absolute decision path');
   const { binding, contract } = load();
   const state = read(path.join(run, 'daemon-state.json'));
-  const input = read(other);
+  const bytes = fs.readFileSync(other);
+  const input = JSON.parse(bytes);
   const resolved = state.resolved?.[input.eventId];
   const event = state.pending?.id === input.eventId ? state.pending : resolved?.event;
   need(event, 'No matching pending or processed event');
@@ -177,7 +181,10 @@ function decision() {
   // A decision processed before v0.25.1 may carry pendingApprovals; it stays valid as recorded.
   const { pendingApprovals: _legacy, ...current } = input;
   const proposed = validateDecision(binding, contract, event, resolved ? current : input, resolved ? [] : state.eventQueue);
-  return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: Boolean(resolved), queued: resolved ? 0 : (state.eventQueue || []).length };
+  if (resolved) return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: true, queued: 0 };
+  need(path.resolve(other) === require('./decision-commit.cjs').draft(run,event.id), 'Use the new isolated draft path from context; reconcile old drafts before copying them');
+  const submitted = require('./decision-commit.cjs').submit(run,binding,contract,event,state,input,bytes);
+  return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: false, queued:(state.eventQueue || []).length, ...submitted };
 }
 function stop() {
   const {binding} = load();
@@ -288,7 +295,7 @@ function dispatchPreflight() {
   const {binding}=load(),state=read(path.join(run,'daemon-state.json'));
   need(state.pending?.id===other&&state.pending.kind==='dispatch_review','No matching pending dispatch review');
   const copy=JSON.parse(JSON.stringify(state)),result=stillCurrent(run,binding,copy,state.pending);
-  return {eventId:other,current:Boolean(result.current),snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};
+  return {eventId:other,current:result.current,snapshot:path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')};
 }
 try {
   const result = command === 'attach-acceptance' ? contractState.attachAcceptance(run,load().binding,read(other))

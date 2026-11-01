@@ -50,13 +50,12 @@ test('tool discovery follows pages with caller metadata and preserves actual err
   await assert.rejects(listTools({request:async()=>({result:{tools:[],nextCursor:'repeat'}})}),/Repeated/);
 });
 
-test('overdue activity filter uses the existing window and never hides missing activity',()=>{
-  const {overdueNeedsReview}=require(path.join(scripts,'supervisor-clock.cjs'));
-  const now=Date.now(),base={ratio:2};
-  assert.equal(overdueNeedsReview({...base,lastActivityAt:new Date(now-60000).toISOString()},now),false);
-  assert.equal(overdueNeedsReview({...base,lastActivityAt:new Date(now-16*60000).toISOString()},now),true);
-  assert.equal(overdueNeedsReview(base,now),true);
-  assert.equal(overdueNeedsReview({...base,lastActivityAt:'invalid'},now),true);
-  assert.equal(overdueNeedsReview({...base,lastActivityAt:new Date(now+60000).toISOString()},now),true);
-  assert.equal(overdueNeedsReview({...base,ratio:null},now),false,'completed package remains exempt');
+test('overdue tiers depend on elapsed baseline, not on recent output',()=>{
+  const {overdueTier}=require(path.join(scripts,'supervisor-clock.cjs'));
+  const now=Date.now();
+  assert.equal(overdueTier({ratio:1.49,lastActivityAt:new Date(now-60000).toISOString()}),null);
+  assert.equal(overdueTier({ratio:1.5,lastActivityAt:new Date(now-60000).toISOString()}),1.5);
+  assert.equal(overdueTier({ratio:2,lastActivityAt:new Date(now-16*60000).toISOString()}),1.5);
+  assert.equal(overdueTier({ratio:3,lastActivityAt:new Date(now).toISOString()}),3);
+  assert.equal(overdueTier({ratio:null}),null,'completed package remains exempt');
 });
