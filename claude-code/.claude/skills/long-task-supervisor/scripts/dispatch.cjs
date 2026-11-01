@@ -49,7 +49,9 @@ function applyAcceptance(value,updates){
 }
 function packagesFrom(stateDir,override){
   const dir=path.join(stateDir,'wp');
-  const files=fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>path.join(dir,name));
+  const realDir=fs.realpathSync(dir);
+  const files=fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>{const file=path.join(dir,name);
+    if(path.dirname(fs.realpathSync(file))!==realDir)throw Error('Work-package file leaves its trusted directory');return file;});
   const out=Object.fromEntries(LISTS.map(name=>[name,[]])),missing=[];
   for(const file of files){
     const text=fs.readFileSync(file,'utf8'),raw=override?.file===file?override.state:tagLine(text,'狀態');
@@ -68,7 +70,13 @@ function packagesFrom(stateDir,override){
   if(missing.length)throw Error('Add a [狀態] line to '+missing.join(', ')+' (packages that are no longer current take {"list":"archived"})');
   return out;
 }
-function build(run,binding,stateDir,options,override){
+function trustedPackageDir(binding,stateDir){
+  const dir=fs.realpathSync(path.join(stateDir,'wp'));
+  const roots=(binding.allowedRoots||[]).map(root=>fs.realpathSync(root));
+  if(!roots.some(root=>dir===root||dir.startsWith(root+path.sep)))throw Error('Work-package directory is outside allowed roots');
+  return dir;
+}
+function build(run,binding,stateDir,options,override,packageDir){
   const file=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
   const previous=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{},base=options.base?JSON.parse(fs.readFileSync(options.base,'utf8')):{};
   if(!previous.capacity&&!base.capacity)throw Error('The first snapshot needs --base ABSOLUTE_JSON with capacity (and acceptance when this run tracks it)');
@@ -76,7 +84,7 @@ function build(run,binding,stateDir,options,override){
   // Defaults keep missed dispatch visible: nothing in flight reads as waiting, so ready work still raises a review.
   const activity=options.activity||(packages.inFlight.length?'working':packages.returned.some(item=>!item.integrated)?'integrating':'waiting');
   return {...previous,...base,schemaVersion:1,executorId:binding.executorId,planningRevision:options.revision||base.planningRevision||previous.planningRevision||'wp',
-    activity,updatedAt:new Date().toISOString(),packages};
+    activity,updatedAt:new Date().toISOString(),packages,workPackageDirectory:packageDir};
 }
 function checked(run,binding,value){
   parse(value,binding);
@@ -85,10 +93,14 @@ function checked(run,binding,value){
   return value;
 }
 let lock;
-function save(run,binding,value){
-  const output=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),temporary=output+'.tmp-'+process.pid;
+function acquire(run){
+  if(lock)return;
   const lockFile=path.join(run,'dispatch-write.lock');
   try{fs.writeFileSync(lockFile,JSON.stringify({pid:process.pid,at:new Date().toISOString()})+'\n',{flag:'wx'});lock=lockFile;}catch(error){if(error.code==='EEXIST')throw Error('Dispatch writer is active or recovery is required: inspect '+lockFile+' and retry the same attempt IDs after the owner exits');throw error;}
+}
+function save(run,binding,value){
+  const output=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),temporary=output+'.tmp-'+process.pid;
+  acquire(run);
   acceptance.record(run,value.acceptance,output);
   fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{flag:'wx'});
   fs.renameSync(temporary,output);
@@ -115,19 +127,22 @@ try{
     console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision}));}
   else{
     const stateDir=path.resolve(positional[2]),options={activity:flag('activity'),revision:flag('revision'),base:flag('base')};
+    const packageDir=trustedPackageDir(binding,stateDir);
+    acquire(run);
     let override,wpFile,wpText,updates=[];
     if(command==='mark'||command==='collect'){
       const result=command==='collect'?collected(positional[4]):{state:status(positional[4],'STATUS_JSON'),updates:[]};
       const id=positional[3],state=result.state,dir=path.join(stateDir,'wp');updates=result.updates;
+      if(!/^[A-Za-z0-9_-]+$/.test(id))throw Error('Invalid work-package ID');
       wpFile=[path.join(dir,id+'.md'),...fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>path.join(dir,name))]
-        .find(file=>fs.existsSync(file)&&packageId(fs.readFileSync(file,'utf8'),file)===id);
+        .find(file=>fs.existsSync(file)&&path.dirname(fs.realpathSync(file))===packageDir&&packageId(fs.readFileSync(file,'utf8'),file)===id);
       if(!wpFile)throw Error('No work-package file for '+id+' under '+dir);
       const text=fs.readFileSync(wpFile,'utf8'),line='[狀態] '+JSON.stringify(state);
       wpText=/^\[狀態\].*$/m.test(text)?text.replace(/^\[狀態\].*$/m,()=>line):/^\[工作包\].*$/m.test(text)?text.replace(/^\[工作包\].*$/m,match=>match+'\n'+line):line+'\n'+text;
       override={file:wpFile,state};
     }
     // Validate the whole snapshot before touching the package file, so a rejected change leaves both as they were.
-    const draft=build(run,binding,stateDir,options,override);applyAcceptance(draft,updates);
+    const draft=build(run,binding,stateDir,options,override,packageDir);applyAcceptance(draft,updates);
     const value=checked(run,binding,draft);
     if(wpFile){const temporary=wpFile+'.tmp-'+process.pid;fs.writeFileSync(temporary,wpText,{flag:'wx'});fs.renameSync(temporary,wpFile);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));

@@ -65,7 +65,7 @@ function fixture({createdMinutesAgo=1,quietMinutes=0,dispatchAudit=false,final}=
 }
 const pending=f=>read(f.statePath).pending;
 const sends=f=>fs.existsSync(f.sent)?read(f.sent):[];
-function decide(f,event,decision){const file=path.join(f.run,'decision-'+event.id+'.json');save(file,{eventId:event.id,...decision});return file;}
+function decide(f,event,decision){const file=path.join(f.run,'draft-decision-'+event.id+'.json');save(file,{eventId:event.id,...decision});require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',f.run,file],{env:f.env,encoding:'utf8'});return file;}
 function withHome(home,fn){const old=process.env.CODEX_HOME;process.env.CODEX_HOME=home;try{return fn();}finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;}}
 
 test('subagent speed comes from this executor\'s own rollouts, counting turn time but not the waits between turns',()=>{
@@ -152,7 +152,9 @@ test('a command with no result and no process for 5 minutes is reported as needi
   try{
     await until(()=>pending(f)?.kind==='progress_review');
     const event=pending(f);
-    assert.deepEqual(event.reasons,['executor_blocked']);assert.equal(event.executorBlocked[0].command,stuck);
+    assert.deepEqual(event.reasons,['executor_blocked']);assert.equal(event.executorBlocked[0].summary,'指令操作尚未開始');
+    const source=event.executorBlocked[0].source;assert.equal(source.path,f.executorLog);assert.ok(Number.isInteger(source.offset));
+    const original=JSON.parse(fs.readFileSync(source.path).subarray(source.offset).toString().split('\n')[0]);assert.equal(original.payload.call_id,'call_stuck');assert.ok(original.payload.input.includes(stuck));assert.ok(!JSON.stringify(event).includes(stuck));
     await until(()=>sends(f).some(text=>text.includes(event.id)));
     assert.match(sends(f).at(-1),/executor_blocked/);
   }finally{await f.stop();}
@@ -186,7 +188,9 @@ test('the same command failing three times wakes the supervisor once, and a revi
   try{
     await until(()=>pending(f)?.kind==='progress_review');
     const event=pending(f);
-    assert.deepEqual(event.reasons,['repeat']);assert.deepEqual(event.failedCommands.map(item=>[item.command,item.count]),[[command,3]]);
+    assert.deepEqual(event.reasons,['repeat']);assert.deepEqual(event.failedCommands.map(item=>[item.commandHash,item.count]),[['sha256:'+crypto.createHash('sha256').update(command).digest('hex'),3]]);
+    const source=event.failedCommands[0].source;assert.equal(source.path,f.executorLog);assert.ok(Number.isInteger(source.offset));
+    assert.equal(JSON.parse(fs.readFileSync(source.path).subarray(source.offset).toString().split('\n')[0]).payload.item.command.at(-1),command);assert.ok(!JSON.stringify(event).includes(command));
     decide(f,event,{disposition:'reply',reply:'Progress check: stop rerunning the full checkout suite; read the first failure and fix it.',
       progressCheck:{evidence:['executor rollout'],finding:'Same failure three times',guidance:'stop rerunning the full checkout suite; read the first failure and fix it.'}});
     await until(()=>read(f.statePath).resolved?.[event.id]);
@@ -239,16 +243,16 @@ test('a missing snapshot waits until the executor has seen the run path, then is
   }finally{await f.stop();}
 });
 
-test('an overdue package with fresh output stays model-free, but silence on that package is still reviewed',async()=>{
+test('an overdue package with fresh output still wakes for the supervisor to assess',async()=>{
   const f=fixture({createdMinutesAgo:40});
   subagent(f.home,'executor-qa','/root/producing',{turns:[{start:minutesAgo(30),end:minutesAgo(0.3),tokens:12000},{start:minutesAgo(0.2),tokens:20}]});
   save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-PRODUCING',handle:'/root/producing',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(30),basis:'measured'}}]}});
   f.start();
   try{
-    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
-    assert.equal(pending(f),null);assert.equal(sends(f).length,0);
-    assert.ok(read(path.join(f.run,'clock.jsonl')).open.includes('overdue:WP-PRODUCING'),'overrun remains recorded for audit');
-    assert.equal(read(f.statePath).clockAnnounced?.['overdue:WP-PRODUCING@'+read(path.join(f.run,'dispatch.json')).packages.inFlight[0].baseline.startedAt],undefined,'fresh output must not consume the later stall notification');
+    await until(()=>pending(f)?.kind==='progress_review');const event=pending(f);
+    assert.ok(event.reasons.includes('overdue'));assert.deepEqual(event.overdue,['WP-PRODUCING']);
+    assert.ok(Date.parse(event.pace.packages[0].lastActivityAt)>Date.now()-60000,'the package was still producing');
+    await until(()=>sends(f).some(text=>text.includes(event.id)));
   }finally{await f.stop();}
 });
 
@@ -257,9 +261,9 @@ test('successful completion breaks a failure streak instead of waking on scatter
   for(const [minutes,exit_code] of [[9,1],[8,1],[7,0],[6,1]])line(f.executorLog,{timestamp:minutesAgo(minutes),type:'event_msg',payload:{type:'item_completed',item:{type:'CommandExecution',command:['/bin/zsh','-lc',command],exit_code,status:exit_code?'failed':'completed'}}});
   f.start();
   try{
-    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    await until(()=>read(f.statePath).failedCommands?.['sha256:'+crypto.createHash('sha256').update(command).digest('hex')]?.count===1);
     assert.equal(pending(f),null);assert.equal(sends(f).length,0);
-    assert.equal(read(f.statePath).failedCommands[command].count,1);
+    assert.equal(read(f.statePath).failedCommands['sha256:'+crypto.createHash('sha256').update(command).digest('hex')].count,1);
   }finally{await f.stop();}
 });
 
@@ -381,7 +385,7 @@ test('a real executor event restarts the hour, so a run that keeps reporting is 
   }finally{await f.stop();}
 });
 
-test('an overdue package whose process is still running and a quiet log does not wake the supervisor',async()=>{
+test('an overdue package with a running process still wakes for assessment',async()=>{
   const f=fixture({createdMinutesAgo:40}),{spawn:start}=require('node:child_process');
   const worker=start('sleep',['30'],{detached:true,stdio:'ignore'});
   const resources=path.join(f.run,'resources'),evidence=path.join(resources,'import.log');
@@ -391,9 +395,9 @@ test('an overdue package whose process is still running and a quiet log does not
   save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-IMPORT',handle:'resource:import',evidence:[evidence],baseline:{minutes:10,startedAt:minutesAgo(30),basis:'measured import'}}]}});
   f.start();
   try{
-    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
-    assert.equal(pending(f),null,'running work past its baseline is recorded, not interrupted');
-    assert.ok(read(path.join(f.run,'clock.jsonl')).open.includes('overdue:WP-IMPORT'));
+    await until(()=>pending(f)?.kind==='progress_review');const event=pending(f);
+    assert.ok(event.reasons.includes('overdue'));assert.deepEqual(event.overdue,['WP-IMPORT']);
+    assert.equal(event.pace.packages[0].alive,true,'the process is still alive at the overdue review');
   }finally{try{process.kill(-worker.pid);}catch{}await f.stop();}
 });
 

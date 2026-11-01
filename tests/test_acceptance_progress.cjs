@@ -32,17 +32,17 @@ for(const scripts of roots){
   });
   test(label+': changing plan wording and package IDs cannot conceal recurring failures; different cases stay separate',()=>{
     const f=fixture(scripts),audit=require(path.join(scripts,'dispatch-audit.cjs')),state={};
-    try{f.attempt('t1');f.attempt('t2','FAIL','Q10');assert.equal(audit.inspect(f.run,f.binding,state).issues.length,0);
-      f.snapshot.planningRevision='renamed';f.attempt('t3');const result=audit.inspect(f.run,f.binding,state);assert.equal(result.newIssues[0].kind,'acceptance_rework');assert.equal(result.newIssues[0].detail.caseId,'Q09');
+    try{f.attempt('t1');f.attempt('t2','FAIL','Q10');assert.equal(audit.inspect(f.run,f.binding,state).issues.filter(i=>i.kind.startsWith('acceptance_')).length,0);
+      f.snapshot.planningRevision='renamed';f.attempt('t3');const result=audit.inspect(f.run,f.binding,state);const rework=result.newIssues.find(i=>i.kind==='acceptance_rework');assert.ok(rework);assert.equal(rework.detail.caseId,'Q09');
       audit.markAnnounced(state,audit.eventFor(result));f.attempt('t4');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0);
-      f.attempt('t5','PASS');assert.equal(audit.inspect(f.run,f.binding,state).issues.length,0);
+      f.attempt('t5','PASS');assert.equal(audit.inspect(f.run,f.binding,state).issues.filter(i=>i.kind.startsWith('acceptance_')).length,0);
       f.attempt('t6');f.attempt('t7');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,1);
     }finally{f.close();}
   });
   test(label+': withdrawing PASS is actionable and stale advice is cancelled after evidence is restored',()=>{
     const f=fixture(scripts),audit=require(path.join(scripts,'dispatch-audit.cjs')),state={};
     try{f.snapshot.acceptance.items[0].status='PASS';f.attempt('t1','PASS');audit.inspect(f.run,f.binding,state);
-      f.snapshot.acceptance.items[0].status='PENDING';f.write();const e=audit.eventFor(audit.inspect(f.run,f.binding,state));assert.equal(e.issues[0].kind,'acceptance_withdrawn');audit.markAnnounced(state,e);
+      f.snapshot.acceptance.items[0].status='PENDING';f.write();const e=audit.eventFor(audit.inspect(f.run,f.binding,state));assert.ok(e.issues.some(i=>i.kind==='acceptance_withdrawn'));audit.markAnnounced(state,e);
       f.snapshot.acceptance.items[0].status='PASS';f.write();assert.equal(audit.stillCurrent(f.run,f.binding,state,e).current,false);
     }finally{f.close();}
   });
@@ -76,7 +76,7 @@ for(const scripts of roots){
       fs.unlinkSync(journal);assert.throws(()=>a.summarize(f.run,f.snapshot.acceptance),/history is missing/);assert.equal(audit.inspect(f.run,f.binding,{}).issues[0].kind,'snapshot_invalid');assert.throws(f.write,/Command failed/);assert.equal(fs.existsSync(journal),false);assert.deepEqual(fs.readFileSync(path.join(f.run,'dispatch.json')),snapshot);
       const progress=f.snapshot.acceptance;delete f.snapshot.acceptance;assert.throws(f.write,/Command failed/);f.snapshot.acceptance=progress;
       fs.writeFileSync(journal,saved.toString().split('\n').slice(0,2).join('\n')+'\n');assert.throws(()=>a.summarize(f.run,f.snapshot.acceptance),/does not cover saved attempt/);assert.throws(f.write,/Command failed/);
-      fs.writeFileSync(journal,saved);f.write();assert.equal(a.summarize(f.run,f.snapshot.acceptance).items[0].cases[0].attempts,2);assert.equal(audit.inspect(f.run,f.binding,{}).issues[0].kind,'acceptance_rework');
+      fs.writeFileSync(journal,saved);f.write();assert.equal(a.summarize(f.run,f.snapshot.acceptance).items[0].cases[0].attempts,2);assert.ok(audit.inspect(f.run,f.binding,{}).issues.some(i=>i.kind==='acceptance_rework'));
     }finally{f.close();}
   });
   test(label+': custom snapshot paths enforce the same impact mapping and recovery checks',()=>{
@@ -111,6 +111,6 @@ test('real Claude watcher emits a review for journal-derived rework with an empt
   const f=fixture(roots[0]),log=path.join(f.run,'executor.jsonl');fs.writeFileSync(log,'');f.binding.executorLog=log;save(path.join(f.run,'binding.json'),f.binding);save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:0,seen:[],pending:null,reads:0});
   f.attempt('t1');f.attempt('t2');
   const child=spawn(process.execPath,[path.join(roots[0],'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});let output='',errors='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>errors+=b);
-  try{await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill();reject(Error('watcher timeout'));},10000);child.once('exit',code=>{clearTimeout(timer);code===0?resolve():reject(Error('watcher failed '+code+': '+errors));});});assert.match(output,/LONG_TASK_WAKE/);assert.equal(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending.issues[0].kind,'acceptance_rework');}
+  try{await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill();reject(Error('watcher timeout'));},10000);child.once('exit',code=>{clearTimeout(timer);code===0?resolve():reject(Error('watcher failed '+code+': '+errors));});});assert.match(output,/LONG_TASK_WAKE/);assert.ok(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending.issues.some(i=>i.kind==='acceptance_rework'));}
   finally{child.kill();f.close();}
 });

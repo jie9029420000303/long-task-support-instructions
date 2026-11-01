@@ -64,15 +64,14 @@ for (const [platform,dir] of versions) {
   });
   test(platform+' observe records a reason without reply, delivery, or acceptance fields',()=>{
     const f=fixture(),event={id:'rillet-known-block',kind:'blocked'};
-    const observe={eventId:event.id,disposition:'observe',reason:'The merge remains pending explicit user approval; no repeated executor message is useful.',
-      pendingApprovals:['Merge PR #26 into develop']};
+    const observe={eventId:event.id,disposition:'observe',reason:'The merge remains pending explicit user approval; no repeated executor message is useful.'};
     assert.doesNotThrow(()=>guard.validateDecision(f.config,f.contract,event,observe));
     assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,reason:'  '}),/Missing observe reason/);
     for (const field of ['reply','delivery','revision','results']) {
       assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,[field]:field==='results'?[]:'x'}),/Observe cannot include/);
     }
-    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,pendingApprovals:[]}),/Invalid pending approvals/);
-    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,pendingApprovals:['']}),/Invalid pending approvals/);
+    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,pendingApprovals:[]}),/pendingApprovals moved/);
+    assert.throws(()=>guard.validateDecision(f.config,f.contract,event,{...observe,pendingApprovals:['approval']}),/pendingApprovals moved/);
     fs.rmSync(f.root,{recursive:true,force:true});
   });
   test(platform+' confirms the original observe decision and rejects later edits',()=>{

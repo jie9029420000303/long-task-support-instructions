@@ -238,13 +238,17 @@ test('Claude observe clears a known approval block without delivery and the next
   try {
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.id===first);
     await until(()=>!fs.existsSync(path.join(run,'watcher.lock')));
+    const ledgerChange=path.join(root,'ledger.json');
+    fs.writeFileSync(ledgerChange,JSON.stringify({raise:[{key:'merge-pr-26',kind:'user_action',ask:'Merge PR #26 into develop',recommend:'Wait for approval',why:'The fixture requires a human decision'}]}));
+    execFileSync(process.execPath,[script,'pending',run,ledgerChange],{env,stdio:'pipe'});
     const decision=path.join(root,'observe.json');
-    fs.writeFileSync(decision,JSON.stringify({eventId:first,disposition:'observe',reason:'Approval is already pending and no executor response is needed.',pendingApprovals:['Merge PR #26 into develop']}));
+    fs.writeFileSync(decision,JSON.stringify({eventId:first,disposition:'observe',reason:'Approval is already pending and no executor response is needed.'}));
     const result=JSON.parse(execFileSync(process.execPath,[script,'decision',run,decision],{env,encoding:'utf8'}));
     assert.equal(result.processed,true);
     let state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.pending,null);assert.equal(state.phase,'idle');
-    assert.deepEqual(state.resolved[first].decision.pendingApprovals,['Merge PR #26 into develop']);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(run,'pending-decisions.json'))).items[0].status,'open');
+    assert.equal(state.resolved[first].decision.disposition,'observe');
     assert.equal(fs.readFileSync(executorLog,'utf8').includes('LONG_TASK_DELIVERY:'+first),false);
     child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
     await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).phase==='watching');
@@ -276,7 +280,7 @@ test('Claude observe honors an existing STOP without consuming the pending event
     const before=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     fs.writeFileSync(path.join(run,'STOP'),'stop\n');
     const decision=path.join(root,'observe.json');
-    fs.writeFileSync(decision,JSON.stringify({eventId,disposition:'observe',reason:'Record the known approval while honoring STOP.',pendingApprovals:['Merge PR #26 into develop']}));
+    fs.writeFileSync(decision,JSON.stringify({eventId,disposition:'observe',reason:'Record the known approval while honoring STOP.'}));
     const result=JSON.parse(execFileSync(process.execPath,[script,'decision',run,decision],{env,encoding:'utf8'}));
     assert.equal(result.processed,false);assert.match(result.reason,/stopped/i);
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));

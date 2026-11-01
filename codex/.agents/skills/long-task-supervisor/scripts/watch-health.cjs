@@ -24,19 +24,24 @@ function outageOf(run,now=Date.now()){
     // A Claude watcher exits on purpose at each handoff ('awaiting_decision'); the supervisor starts the next one.
     if(state.phase==='error')return {...base,kind:'watcher_error',since:Date.parse(state.error?.at)||now,detail:state.error?.message};
     const lock=readJson(path.join(run,'watcher.lock'));
-    if(['watching','starting'].includes(state.phase)&&!alive(lock?.pid??state.pid))return {...base,kind:'watcher_dead',since:Date.parse(state.updatedAt)||now};
+    if(['watching','starting'].includes(state.phase)){
+      const processState=require('./process-probe.cjs').probe(lock?.pid??state.pid);
+      if(processState===false)return {...base,kind:'watcher_dead',since:Date.parse(state.updatedAt)||now};
+      if(processState===null)return {...base,processUnknown:true};
+    }
     return base;
   }
   // Codex: the App-owned parent restarts its child; if the parent itself is gone, nothing outside the App can restart
   // it (2026-10-29: the App tools pipe closes on a process the App did not start), so this is Jay's push.
   const runtime=readJson(path.join(run,'runtime-state.json'));
-  if(runtime&&!alive(runtime.pid)){
+  const parentState=runtime?require('./process-probe.cjs').probe(runtime.pid):null;
+  if(runtime&&parentState===false){
     const lastSeen=Math.max(Date.parse(runtime.heartbeatAt)||0,Date.parse(runtime.endedAt)||0,Date.parse(runtime.startedAt)||0);
     return {...base,kind:'watcher_dead',since:lastSeen||now,detail:runtime.phase};
   }
   const health=state.appHealth;
   if(health?.failingSince)return {...base,kind:health.kind==='read'?'read_failing':'watcher_error',since:Date.parse(health.failingSince)||now,detail:health.lastError};
-  return base;
+  return parentState===null?{...base,processUnknown:true}:base;
 }
 function names(run,{binding,state}){
   const titles=state?.threadTitles||{};
@@ -86,7 +91,7 @@ async function check(run,{now=Date.now()}={}){
     if(!record.open){record.open={key:'outage-'+outage.since,since:iso(outage.since),detectedAt:iso(now)};changed=true;}
     if(record.open.kind!==outage.kind||record.open.detail!==(outage.detail||null)){record.open.kind=outage.kind;record.open.detail=outage.detail||null;changed=true;}
     if(!notify.sent(run,record.open.key)){await notify.sendOnce(run,record.open.key,alertText(outage,run,now));changed=true;}
-  }else if(!outage.kind&&record.open){
+  }else if(!outage.kind&&!outage.processUnknown&&record.open){
     if(notify.sent(run,record.open.key)?.ok)await notify.sendOnce(run,'recovered-'+record.open.key,'【已恢復，不用處理】『'+names(run,outage).executor+'』的背景監看已恢復運作。');
     close('recovered');
   }

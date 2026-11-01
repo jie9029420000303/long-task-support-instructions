@@ -72,13 +72,23 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 送驗前用 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...` 產生候選清單及**可直接貼在最終回覆末尾的完整事件行**；不要手寫或截短雜湊。清單至少列一個檔案，包含本次候選版所有直接修改的交付檔。監督接收時會重算清單及每個候選檔，變動後必須另建清單並重交；舊證據只能附沿用核對後沿用（[換版與有效證據](acceptance.md#換版與有效證據)），不得未經核對拼接。
 
+## 開發期產品通知測試
+
+產品有向真人發送通知的功能時，開工依使用者原話、有效契約及任務設定，盤點通知類別、既有渠道與收件對象。產品通知和監督本身的待決／監看提醒是兩條不同路徑：以下僅安排產品通知測試，不調整監督提醒；監督提醒仍依本任務原有授權與通知規則處理。不同任務已有明示設定或禁令時照其設定與最新原話，不自行擴大渠道、收件對象或發送範圍。
+
+先在已授權的真人與渠道上，做確認產品通知功能所必要、盡可能少量的真實通知測試，不設固定次數；依既有測試標示規範操作，不擅改登入或產品指定訊息格式。在證據中標示測試，保存觸發情境、時間、渠道、發送結果及可取得的收件證據，不記秘密或驗證碼。尚未獲准真實發送的類別不發，記下未驗與原因；測試替身或 API 接收成功不得冒稱真人已收到。若真實測試失敗，保留證據並在保持狀態可查的條件下先暫停非必要發送，修正後再做必要的受控實測；不得把失敗記為通過。
+
+功能確認後，在已授權範圍內以可還原方式暫停開發迭代中對真人的非必要產品通知；依使用者指示保留登入驗證通知，其他必須本人動作的通知僅在該類通知及渠道均已獲准時保留。若當次任務明示只准登入通知，不自行新增其他推播例外。逐項記錄原設定、暫停設定及恢復步驟，並讀回確認；不能因暫停發送而關閉產品故障判斷、任務狀態或必要的內部告警紀錄，須確保開發中仍可查詢、追蹤及處理。若現有機制無法同時做到，記錄限制並先處理，不宣稱已安全暫停。
+
+上線前依任務有效契約與授權，按暫停清單恢復應啟用的產品通知，逐項讀回設定與狀態、確認渠道及收件對象，納入既有全系統驗收並保留實測結果；核對靜音期間尚未處置的事件與通知狀態，避免誤判為已通知或已解決。暫停不是刪除通知功能，也不改驗收標準；恢復範圍、真實收件與正式環境操作仍依該任務已有授權。
+
 ## 判定與收件
 
-監督收到事件後直接在 `RUN/decision-<eventId>.json` 寫決策。`disposition` 為 `accept`、`reject`、`reply`、`observe` 或 `needs_user`；`eventId` 必須精確相同。退件與代答有 `reply`；接受另有 `revision` 及逐條 `results`。每條結果含 `id`、`status:"PASS"`、`method`、`expected`、`actual` 與至少一個 `evidence:[{"path":"絕對路徑","sha256":"真實檔案雜湊"}]`。可用獨立測試輸出、瀏覽器／視覺證據或原始資料查核檔；只寫 PASS 不構成證據。執行上方 `decision` 命令檢查成功，才可宣稱全數通過。
+監督收到事件後只在 context 回傳的 `RUN/draft-decision-<eventId>.json` 寫草稿，絕不寫舊版監看會自動讀取的 `RUN/decision-<eventId>.json`。`disposition` 為 `accept`、`reject`、`reply`、`observe` 或 `needs_user`；`eventId` 必須精確相同。退件與代答有 `reply`；接受另有 `revision` 及逐條 `results`。每條結果含 `id`、`status:"PASS"`、`method`、`expected`、`actual` 與至少一個 `evidence:[{"path":"絕對路徑","sha256":"真實檔案雜湊"}]`。可用獨立測試輸出、瀏覽器／視覺證據或原始資料查核檔；只寫 PASS 不構成證據。執行上方 `decision` 命令提交後，還須查 `status` 確認 `phase:accepted`，才能宣稱已接受。
 
-監看可能在決策檔寫入後、`decision` 命令執行前就已處理它；此時命令仍須對保存的同一事件與決策雜湊回傳 `valid:true, processed:true`。若檔案事後改動則拒絕，不能把競速造成的「無待決事件」誤當驗收失敗。
+背景程式只讀 `decision` 命令成功提交的不可變快照，不讀決策草稿。命令會核對目前事件及契約，原子提交當下完整內容；同一份重送視為重複，不會再發一次。送出後改草稿不會改變已提交內容。平台拒絕提交時不得另行轉發或繞過。已處理後命令只能核對同一份草稿，改過的會拒絕。舊 run 遷移前必須先停舊版父程序和監看程序、停止舊版監督對話的進行中回合，再核對事件、草稿、送達及拒絕紀錄；新版 context 與提交會拒絕仍存活的舊監看或父程序；PID 無效或無法判定時不得視為已退出，檢查程序回 EPERM 時保守視為仍在。不得憑舊版 status 的 false 判定舊監看已停止。舊草稿不自動提交，核對後若仍適用須由監督重新寫進新版草稿再明確提交。若被平台拒絕，不得換路徑重送或繞過。若舊版已有送達中且無新提交快照，監督先自行核對收件，不可盲目重送。提交鎖殘留或提交快照遺失、損壞時，監督先自行核對：鎖檔記載的程序 PID 與監看父子程序是否仍在、當前事件與草稿、提交指標和快照、送達中狀態與收件紀錄、平台是否曾拒絕相關操作；先保存現有證據，不覆蓋或抹除受損快照，也不以草稿自行重建歷史。暫存鎖只有在確認持鎖程序已停止、沒有未對帳的在途或不明送達，且沒有仍有效的平台拒絕時，才由監督依適用規則處理；不得自動解鎖或直接重送。不能安全判定時只停受影響的操作，其他已授權工作繼續；不要一律轉問 Jay，只有確需本人決定或動手時才依原有規則提問。平台曾拒絕的動作不得藉重新提交或其他路徑繞過。
 
-決策檔沒通過檢查時，背景程式不套用也不結束：原檔保留，錯誤記在 daemon-state 的 `decisionErrors`（context 的 `brief.decisionError`），事件維持待決；同一版本 45 秒後仍在，就以原事件附錯誤原文喚醒監督一次。監督修正後覆寫同一個決策檔，先用 `decision` 命令檢查通過再結束回合。
+草稿由 `decision` 命令檢查；檢查失敗不提交、不送出。背景程式再校驗已提交快照；若快照不能套用，事件維持待決，錯誤記在 `decisionErrors`，45 秒後仍未修正則喚醒監督一次。修正草稿後重新提交；已處理的事件不得藉修改草稿重送。
 
 背景程式只把 `reject` 或 `reply` 傳給精確執行對話，並讀回完整訊息保存 receipt。執行者問到待核准動作而仍有其他工作可做時，監督用 `reply` 指明可逆方案、暫停的具體動作與繼續項目；**不可用 `needs_user` 凍結整條主線**。純確認、已知阻塞且無需再發訊時用 `observe`，即使當下只剩待核准事項也繼續接新事件。`needs_user` 保留當前 pending 並暫停消費新事件，只在已有使用者指示確實需要整體暫停時使用；不是一般待核准事項的預設。送達不明只讀回對帳，不重送。接受後關閉該 run 的監看；執行對話即使先自稱完成也不得讓監督狀態提前完成。
 
@@ -103,11 +113,11 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
  "answer":[{"key":"r24-r21-relogin","choice":"A","quote":"R24R21: A 兩個都重登"}]}
 ```
 
-- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人動手）、major_change（上層規則要先確認的重大變更）；其他類程式拒收，由監督自己決定。kind 只逼監督寫出理由，不證明真的該問。 依[預設類別授權](authorization.md#長任務預設類別授權)，有推薦、Git 操作、標明測試的對外發送、開工已授權的帳號密碼／付費／正式部署、開發過程產物的刪除都不登記：paid、credential 只用在開工沒授權的部分，irreversible 只用在改寫 Git 歷史或未授權的正式部署，delete 只用在既有資料，external 只用在不是測試的正式發送。`ask`、`recommend`、`why` 必填，`options` 選填。
+- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人動手）、major_change（上層規則要先確認的重大內容／設計／資訊架構變更；既定目標與授權內的技術路線由監督比較、測試並判定）；其他類程式拒收，由監督自己決定。kind 只逼監督寫出理由，不證明真的該問。 依[預設類別授權](authorization.md#長任務預設類別授權)，有推薦、Git 操作、標明測試的對外發送、開工已授權的帳號密碼／付費／正式部署、開發過程產物的刪除，須先確認預設授權適用且無本案限制，才不登記：paid、credential 只用在開工沒授權的部分，irreversible 用在改寫 Git 歷史、未授權的正式部署或本案須確認的其他不可逆操作，delete 只用在既有資料，external 用在非測試的正式發送或本案須確認的對外發送。`ask`、`recommend`、`why` 必填，`options` 選填。
 - 同一 key 再 raise 是更新原項；kind、ask、recommend、why、options 完全相同時不算變動，不留歷史、不需重列。已回答或已撤下的 key 只能用 `reopen` 附改變題目的新事實重開，舊答案留在 history。問題文字和任何一項相同（不論狀態）的會被拒：未決的請更新那個 key，已結的請 reopen 那個 key。換了說法的重複，由監督對照 context 附的完整清單自己判斷。
 - 使用者的回答要登記成授權或驗收修訂（同意某動作、給授權範圍、改驗收條文）時，唯一做法是 `supervise.cjs amend RUN FILE`，在修訂 JSON 加 `pendingKeys`（它回答的待決 key，每項是 key 字串或 `{"key":…,"choice":…}`）：一步登記修訂並以修訂 id 結案這些項（`answer.amendmentId`），不再另跑 `pending` 的 `answer`。任一 key 不在待決帳、已撤下或已由別的回答結案時整筆不寫，修訂帳與待決帳都不變；同一修訂重送只結案仍未決的項，修訂不重複登記。先 `answer` 原話再另做 `amend`，兩邊會連不起來（2026-10-15 IA 10 項待決的 `answer.amendmentId` 全空）。`pending` 的 `answer` 只用於不需登記修訂的回答（例如本人已切好權限選單），或結掉已被先前登記的修訂解決的項目（附那筆 `amendmentId`）。
 - `answer` 的 `quote` 是本回合收到的使用者原話（本對話輸入或別的對話轉來，規則同 pause）；不是本回合收到的，另附 `source:{path,sha256}` 指向允許根目錄內、含這句原話的已存原文快照，或改用已登記修訂的 `amendmentId`。`withdraw` 寫明為什麼監督能自己決定、依據哪份授權或修訂，或哪個事件讓它不再需要（例如 `permission_changed` 的事件識別）。
-- 問使用者：`supervise.cjs ask RUN` 只讀，回 `{items,new,repeat}`：`items` 是全部未決項，全部寫在同一則回覆；`new` 是還沒列過或列過後改過的 key；`repeat:true` 表示全都列過且沒變，不再問。列出的同一回合執行 `supervise.cjs shown RUN <key…>`，key 必須正好是全部未決項才記為已列，少列、多列都拒絕。記為已列時程式同時用「Jay的小秘書」推播一則「【開發任務需要你決定】『對話標題』有 N 題要你回答，請打開該監督對話查看。」，同一組待決只推一次、不重複催；推播失敗不影響記錄（收件設定見 runtime「監看中斷」）。
+- 問使用者：`supervise.cjs ask RUN` 只讀，回 `{items,new,repeat}`：`items` 是全部未決項，全部寫在同一則回覆；先前已列而未答的可簡述題意、推薦與後果；`new` 是還沒列過或列過後改過的 key；`repeat:true` 表示全都列過且沒變，不再問。列出的同一回合執行 `supervise.cjs shown RUN <key…>`，key 必須正好是全部未決項才記為已列，少列、多列都拒絕。記為已列時程式同時用「Jay的小秘書」推播一則「【開發任務需要你決定】『對話標題』有 N 題要你回答，請打開該監督對話查看。」，同一組待決只推一次、不重複催；推播失敗不影響記錄（收件設定見 runtime「監看中斷」）。
 - `context` 與 `brief` 的 `pendingDecisions` 有 `open`（完整未決項）、`closed`（已答／已撤下的 key、問題與答案）、`unpresented`（還沒列給使用者的 key）；檔案損壞時改附 `error`，修好前 `pending` 拒絕寫入。`監督儀表板.md` 的「待你決定」節顯示同一份未決清單，`pending`、`shown` 寫入後立即更新。
 - 舊版 run 的待決帳檔還沒建立時，`pendingDecisions.legacy` 列出歷次決策的 pendingApprovals 文字；監督依決策帳與現況把仍未決的以新格式登記一次（都已解決就送 `{"raise":[]}`），之後不再出現。舊文字有的是全表、有的是增量，所以程式不自動匯入。
 
@@ -159,7 +169,7 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 - 通知：滿 10 分鐘時，`watch-health.cjs`（父程序每分鐘、系統排程 `watch-guard.cjs` 每 3 分鐘各查一次）用「Jay的小秘書」推一則「【開發任務中止，需要開啟查看】…請打開監督對話『…』查看」，並在儀表板最上方標示；同一次中斷只推一則，恢復時再推一則「【已恢復，不用處理】」。推播失敗重試一次，仍失敗就寫在儀表板。App 還收得到訊息時，監督對話另外收到一則 `LONG_TASK_WATCH_ALERT`；恢復後收到 `LONG_TASK_WATCH_RECOVERED`，用一句話結束回合即可。
 - 推播設定：Telegram bot 金鑰在鑰匙圈，收件對象在 `~/.config/long-task-supervisor/notify.json`（`notify.cjs status` 檢查、`notify.cjs configure` 設定）；兩者都不寫進 run 或技能 repo。訊息不放按鈕。
 - 重開：子程序 `native-watch.cjs` 掛掉由父程序自動重開。父程序整個消失時，系統排程無法從 App 外重開它（2026-10-29 實測：App 只接受它自己啟動的程式連線），所以只推播；監督在下一個回合重掛。
-- **監督每個回合結束前**跑 `supervise.cjs status RUN`：`active` 為 true 才結束回合。不是 true 且 run 沒有 STOP／accepted／stopped 時，先看 `watch` 欄位：`parentAlive` 為 false 就依上方啟動指令在本對話用背景命令重掛 `run-watch.cjs`（`restartCommand`），等到 `active` 為 true；父程序還在但 `appHealth` 顯示讀不到，依 `lastError` 處理（例如執行對話被封存或刪除就登記待決帳），不另開第二組監看。
+- **監督每個回合結束前**跑 `supervise.cjs status RUN`：`active` 為 true 才能宣稱監看啟動；`readVerified` 只代表先前讀取成功，要搭配 `readVerifiedAt`、`lastReadAt` 及實際讀取判斷目前連線。若 `active` 或 `parentAlive` 任一為 `null`，優先視為狀態不明：監督先核對 PID、父子程序、鎖、心跳及收件，不宣稱已停止或已連線，不自動重掛；其他已授權工作繼續。只有核對確認舊父程序與其他存活監看均不存在，且 run 沒有 STOP／accepted／stopped，才依上方啟動指令重掛。新 run 剛初始化、尚無 ready 或監看紀錄時，先確認確實尚未啟動且沒有舊程序或鎖，再依啟動步驟首次啟動，不等待只能由監看產生的 ready 檔。父程序還在但 `appHealth` 顯示讀不到，依 `lastError` 處理（例如執行對話被封存或刪除就登記待決帳），不另開第二組監看。
 
 ## 原契約、使用者修訂與舊 run 接入
 
@@ -187,7 +197,7 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 以下都由背景程式不呼叫模型地查核，有問題才產生 `progress_review`；處理方式見 event-review。
 
 - `instruction_overdue`：監督送出 reply／reject 後開始計時，期限是 decision 的 `instruction.deadlineMinutes`，沒填則 30 分鐘，扣掉電腦睡眠。期限內只要有執行端的真正事件，或派工快照的 `updatedAt` 晚於送出時間，就算有動靜。逾時發第一次（`misses=1`），再過一個期限發第二次（`misses=2`），之後不再追這則。只差使用者核准期間不發逾時通知，但有動靜照樣結案，核准等待解除後不會把已完成的指示誤報為逾時。
-- `permission_review`／`permission_changed`：從執行對話紀錄的 `turn_context` 與 `thread_settings_applied` 讀權限模式，從工具輸出讀「rejected due to unacceptable risk」拒絕原文。自動審查下開工通知一次，之後只有新的工作項目被擋才再通知（同一程式與子指令，或同一工具，算同一項）；重複被擋只記在儀表板的累計次數。工具輸出只是引用到那段字（例如讀技能說明）不算被擋：真正的拒絕必附審查理由（Reason）或 Auto-review denied。介面上的權限選單要在該對話輸入框送出一則訊息才會套用到回合，只切選單不會改到背景送來的回合（2026-10-11 實測三個對話選了仍是自動審查）；使用者切選單後由監督原生傳訊送的續接能否套用新模式，尚待實測，處理方式見[授權承接](authorization.md#平台自動審查擋下操作時)。讀到執行端的回合是完全存取（`approval_policy=never`）後發一次 `permission_changed`。
+- `permission_review`／`permission_changed`：從執行對話紀錄的 `turn_context` 與 `thread_settings_applied` 讀權限模式，從工具輸出掃描帶理由或拒絕通知的候選紀錄，文字本身可能只是引用，必須由監督查原始工具回應及上下文才可判定實際拒絕。僅有模式不產生 `permission_review`，候選紀錄依工具呼叫去重並保留原文來源；同一工作的新呼叫可能另觸發查證，但同一已列待決無新事實時不重問使用者。設定變更不證明平台已允許操作，依[授權承接](authorization.md#平台自動審查擋下操作時)核對。
 - `automation_found`：啟動時及每 30 分鐘讀 `CODEX_HOME/automations/*/automation.toml`，找出 ACTIVE 且 `target_thread_id` 或 prompt 指向監督／執行對話的排程；同一排程同一版本只通知一次。
 - `login_expired`：`RUN/login-sites.json`（init 依 `loginSites` 寫入）列出本任務會用到的每個登入，格式 `{"sites":[…]}`，每筆是下列其一。網站：`{"name":"網站名","url":"https://…","loggedOutPattern":"登出時網址或標題會出現的正規式"}`，用 chrome-relay 在使用者已登入的 Chrome 另開背景分頁，讀落點網址與標題後只關閉該分頁。非瀏覽器的登入或權限（CLI／API token、ssh、MCP 授權、測試身分、chrome-relay 連線等）：`{"name":"名稱","check":"唯讀檢查指令"}`，在系統暫存目錄以 `/bin/sh -c` 執行，60 秒逾時，輸出一律丟棄、不寫進 run 目錄；結束碼 0＝有效、1＝已失效，其他（126／127 找不到指令、當掉、名稱打錯被攔下）或逾時＝檢查本身出錯（`error`），不當成登出。指令只有在確定是認證失效時才 exit 1；連不到主機、網路逾時、服務沒回應等回其他非 0 碼（判 `error`），否則會把連線問題誤報成要使用者重登（2026-10-15 GDB 的 ssh 檢查以結束碼 255 一律判失效，直連主機被擋、網路逾時也是 255，被誤判 `logged_out`）。指令只讀狀態：不呼叫模型、不開登入視窗、不寫資料，也不把 token 寫在指令裡；用不會被管線吃掉錯誤的寫法，例如 `out=$(CLAUDE_CONFIG_DIR=$HOME/.gateway-uat-clients/uat2 claude mcp get gateway) || exit 3; case "$out" in *Connected*) exit 0;; *) exit 1;; esac`（2026-10-13 GDB 的 uat2／uat3 以 `claude mcp get` 判斷已驗證）；ssh 以輸出分辨，例如 `out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 user@host true 2>&1) && exit 0; case "$out" in *"Permission denied"*) exit 1;; *) exit 3;; esac`（只有金鑰或帳號被拒才判失效，連不到主機、逾時等其他非 0 回 3）。Codex MCP 的 OAuth 是否仍有效目前沒有唯讀檢查指令（`codex mcp list` 只顯示 `Auth: OAuth`，代表權杖存在、不代表有效），是已知缺口，不寫成 check、也不宣稱有在看。兩種都可加 `login`（失效時怎麼恢復，給執行端或使用者看）。開工預檢與清單有變動後跑 `node <installed-skill>/scripts/login-check.cjs DIR`（init 前 DIR 是準備目錄，之後是 RUN）：不受每小時限制、立刻全部實測，印出 `needsAction`；目錄或清單不存在、格式不對時印原因並以 2 結束。它逐筆依序檢查（網站每筆最久約 2.5 分鐘，指令每筆最多 60 秒），登入多時加長指令逾時或放背景跑。背景程式每小時再全部實測一次，結果寫入 `RUN/login-status.json`；同一個登入每進入一種失效狀態（`logged_out` 或 `error`）通知一次，狀態換了再通知，恢復有效後重新計算。執行端以 `question` 交來新的登入時，監督補進這個檔並跑一次 `login-check.cjs RUN`。檢查只偵測、通知，不會自動續期登入。平台自己帳號的錯誤（例如執行對話回合的 401 OAuth 過期）屬 `platform_error`，不列在這裡。
 - 限速換模型：讀 opencodex 的 `usage.jsonl`，以「對話 ID 的 SHA-256 前 32 碼」對應監督、執行對話與其子代理，看到 429／rate-limit 就記錄該系列的限速與恢復時間，寫入 `RUN/model-fallback.json`。背景程式（重新）啟動時回看檔尾一段：某對話最新一筆模型請求仍是被拒、且在 5 小時內，就當成現行限速；被拒後已有成功請求的不算。監督或執行對話被拒時，送一則短訊並帶 `model` 參數，讓它改用下一個模型接續；恢復時間到了，下一則送給它的訊息帶回原模型。子代理被拒時，通知執行端改用新模型重派。全部可用模型都被限速時發 `rate_limited_all`。binding 的 `modelFallback` 設為 false 可關閉。

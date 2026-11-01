@@ -26,8 +26,14 @@ function fixture(prefix,platform,difficultPath=false){
   return {root,run,source,contract,binding,executorId};
 }
 
-test('both installable skills ship byte-identical dispatch audit and writer',()=>{
-  for(const file of ['dispatch-audit.cjs','dispatch.cjs'])assert.deepEqual(fs.readFileSync(path.join(codex,file)),fs.readFileSync(path.join(claude,file)));
+test('both platforms share the writer and produce the same common dispatch decisions',()=>{
+  assert.deepEqual(fs.readFileSync(path.join(codex,'dispatch.cjs')),fs.readFileSync(path.join(claude,'dispatch.cjs')));
+  const codexAudit=require(path.join(codex,'dispatch-audit.cjs')),claudeAudit=require(path.join(claude,'dispatch-audit.cjs'));
+  const claim={key:'worktree:busy',kind:'worktree'},ready={id:'READY',independent:true,safe:true,dependencies:[],exclusiveResources:[],evidence:['plan']};
+  for(const activity of ['planning','dispatching','working','waiting','integrating']){
+    const value=snapshot('x',{activity,capacity:{verified:3,evidence:['capacity']},packages:{ready:[ready],inFlight:[{id:'MAIN',handle:'main',exclusiveResources:[claim],evidence:['main']},{id:'PROC',handle:'resource:test',exclusiveResources:[],evidence:['proc']},{id:'AGENT',handle:'agent:123',exclusiveResources:[],evidence:['agent']}],recurringRework:[{id:'REWORK',count:2,evidence:['evidence']}]}});
+    assert.deepEqual(codexAudit.derive(value),claudeAudit.derive(value),'same common outcomes during '+activity);
+  }
 });
 
 // Document time budget (Jay 2026-10-15): document work after development takes at most 1.5x the development time. In the
@@ -178,7 +184,7 @@ test('atomic writer validates concrete snapshot and timestamp-only changes remai
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('Claude preflight treats an empty-evidence snapshot as invalid and cancels stale advice',()=>{
+test('Claude preflight defers an invalid snapshot and rechecks preserved advice after recovery',()=>{
   const f=fixture('dispatch-empty-evidence-','claude-code'),helper=require(path.join(claude,'dispatch-audit.cjs'));
   try{
     const prompt=path.join(f.run,'executor-prompt.txt');fs.writeFileSync(prompt,'prompt');Object.assign(f.binding,{promptSha256:sha(prompt)});save(path.join(f.run,'binding.json'),f.binding);
@@ -186,8 +192,9 @@ test('Claude preflight treats an empty-evidence snapshot as invalid and cancels 
     const state={phase:'awaiting_decision',seen:[],pending:null},event=helper.eventFor(helper.inspect(f.run,f.binding,state));helper.markAnnounced(state,event);state.pending=event;save(path.join(f.run,'daemon-state.json'),state);
     const invalid=snapshot(f.executorId);invalid.capacity.evidence=[];save(path.join(f.run,'dispatch.json'),invalid);
     const checked=JSON.parse(execFileSync(process.execPath,[path.join(claude,'supervise.cjs'),'dispatch-preflight',f.run,event.id],{encoding:'utf8'}));
-    assert.equal(checked.current,false);const after=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));assert.equal(after.pending,null);
-    assert.equal(helper.inspect(f.run,f.binding,after).newIssues[0].kind,'snapshot_invalid');
+    assert.equal(checked.current,null);assert.equal(checked.deferred,true);const after=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));assert.equal(after.pending,null);assert.equal(after.deferredDispatchEvents[event.id].id,event.id);
+    assert.ok(helper.inspect(f.run,f.binding,after).newIssues.some(i=>i.kind==='snapshot_invalid'));
+    save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{packages:{ready:[{id:'A',independent:true,safe:true,dependencies:[],exclusiveResources:[],evidence:['plan:A']}]}}));const reopened=require(path.join(claude,'deferred-dispatch.cjs')).recheck(f.run,f.binding,after);assert.ok(reopened);assert.equal(reopened.kind,'dispatch_review');
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
@@ -288,7 +295,9 @@ test('Codex watcher reissues the surviving member of a stale bundle without deli
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pid===child.pid);
     await new Promise(resolve=>setTimeout(resolve,250));assert.equal(JSON.parse(fs.readFileSync(sent)).length,1);
     save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{activity:'waiting',packages:{returned:[{id:'B0',integrated:false,resultEvidence:['result:B0']}]}}));
-    save(path.join(f.run,'decision-'+state.pending.id+'.json'),{eventId:state.pending.id,disposition:'reply',reply:'Add agents'});
+    const draft=path.join(f.run,'draft-decision-'+state.pending.id+'.json');
+    save(draft,{eventId:state.pending.id,disposition:'reply',reply:'Add agents'});
+    execFileSync(process.execPath,[path.join(codex,'supervise.cjs'),'decision',f.run,draft],{encoding:'utf8'});
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).resolved?.[state.pending.id]?.obsolete===true);
     await until(()=>{const current=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));return current.pending?.id!==state.pending.id&&current.pending?.issues?.length===1&&current.pending.issues[0].kind==='returned_unintegrated';});
     await until(()=>JSON.parse(fs.readFileSync(sent)).length===2);

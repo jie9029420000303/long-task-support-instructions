@@ -25,9 +25,9 @@
   - 記錄後繼續：`{"eventId":"…","disposition":"observe","reason":"…"}`。進度查核另加 `"progressCheck":{"evidence":["查了什麼"],"finding":"結論"}`；靜默類只剩已知等待時再加 `"wait":{"kind":"user_approval","conditions":[]}`（外部結果用 `external_result`，附條件檔或 `resumeAt`）。
   - 進度查核要執行端動作：`disposition` 用 `reply`，`progressCheck` 加 `guidance`，`reply` 要包含這句 guidance。
   - 驗收：`{"eventId":"…","disposition":"accept","revision":"sha256:…","contractStateSha256":"<有修訂時必填>","results":[{"id":"A1","status":"PASS","method":"…","expected":"…","actual":"…","evidence":[{"path":"/絕對路徑","sha256":"…"}]}]}`，每條驗收都要列。
-- 有推薦就照推薦直接回覆執行端；只有推薦的那條路本身要改驗收條件、刪除或永久改動既有資料，或碰到開工時沒授權的付費、帳號密碼、正式部署，以及改寫 Git 歷史、非測試的正式對外發送，才登記待決帳問使用者。
+- 有推薦且在本案授權範圍內、不受禁令或適用專案規則限制時就照推薦直接回覆執行端；只有推薦的那條路本身要改驗收條件、刪除或永久改動既有資料，或碰到開工時沒授權的付費、帳號密碼、正式部署，以及改寫 Git 歷史、非測試的正式對外發送、推翻使用者禁令、本人須動手，或上層規則須先確認的重大內容／設計／資訊架構變更，或本案有效授權、禁令及適用專案規則要求確認，才登記待決帳問使用者；既定目標與授權內的技術路線由監督自行比較、測試並判定。
 - 待決帳：`supervise.cjs pending RUN <變更檔>`，變更檔 `{"raise":[{"key":"k","kind":"acceptance","ask":"…","recommend":"…","why":"…","options":["…"]}],"reopen":[{"key":"k","fact":"新事實"}],"withdraw":[{"key":"k","reason":"…"}],"answer":[{"key":"k","choice":"A","quote":"使用者原話"}]}`。kind：irreversible、paid、delete、credential、external、prohibition、acceptance、user_action、major_change。
-- 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，同回合跑 `supervise.cjs shown RUN <全部 key>`（程式同時用小秘書推播一則）。
+- 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，先前已列而未答的可簡述題意、推薦與後果；列出當回合跑 `supervise.cjs shown RUN <全部 key>`（程式同時用小秘書推播一則）。背景事件沒有新進展或新決定時不重問，回合結尾只用一句話說明仍在監看或等待。
 - 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<ISO 時間>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。
-- 每個回合結束前：`supervise.cjs status RUN` 的 `active` 要是 true；不是就照 `watch.restartCommand` 在本對話用背景命令重掛（見 runtime「監看中斷」）。
+- 每個回合結束前：`supervise.cjs status RUN` 的 `active` 為 true 才可稱監看啟動；若狀態不明，先核對 PID、心跳與收件，不自動重掛，其他已授權工作繼續。核對確認舊父程序與其他存活監看均不存在後才重掛；新 run 尚未啟動過時先核對無舊程序與鎖，再依啟動步驟首次啟動（見 runtime「監看中斷」）。
 - 收到 `LONG_TASK_WATCH_RECOVERED` 或 `LONG_TASK_KEEPALIVE`：用一句話結束回合。

@@ -123,7 +123,7 @@ test('STOP during pending receipt wait never produces notification qualification
     const env={...f.env,CLAUDE_HANDOFF_WAIT_MS:'250'};
     const run=new Promise(resolve=>{const child=spawn(process.execPath,[path.join(scripts,'handoff.cjs'),'prepare',f.run,event.file],{env,stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',x=>out+=x);child.stderr.on('data',x=>err+=x);child.on('exit',code=>resolve({code,out,err}));});
     await until(()=>fs.existsSync(path.join(f.run,'handoff-request-'+id+'.json')));fs.writeFileSync(path.join(f.run,'STOP'),'stop\n');
-    const result=await run;sleeper.kill('SIGTERM');assert.notEqual(result.code,0);assert.match(result.err,/timed out/);
+    const result=await run;sleeper.kill('SIGTERM');assert.notEqual(result.code,0);assert.match(result.err,/Run stopped before notification qualification/);
     assert.equal(fs.existsSync(path.join(f.run,'handoff-notification-'+id+'.json')),false);
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
@@ -150,7 +150,7 @@ test('persisted handoff stays authoritative when the visible final uses the same
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).phase==='watching');
     await new Promise(resolve=>setTimeout(resolve,250));
     state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));
-    assert.equal(state.pending,null);assert.equal(state.error,undefined);assert.equal(state.seen.includes(id),true);
+    assert.equal(state.pending,null);assert.equal(state.error,null);assert.equal(state.seen.includes(id),true);
     assert.match(fs.readFileSync(path.join(f.run,'handoff-'+id+'.json'),'utf8'),/Persisted final\./);
     const next='Next real question.\nLONG_TASK_EVENT '+JSON.stringify({kind:'question'});
     line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'next-real',content:[{type:'text',text:next}],stop_reason:'end_turn'}});
@@ -169,8 +169,11 @@ test('an explicit transcript id without a persisted handoff is rejected',async()
     line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'unregistered',content:[{type:'text',text}],stop_reason:'end_turn'}});
     line(f.executorLog,{type:'assistant',uuid:crypto.randomUUID(),message:{id:'boundary',content:[{type:'text',text:'boundary'}],stop_reason:'tool_use'}});
     const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),f.run],{env:f.env,stdio:['ignore','pipe','pipe']});
-    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).phase==='error');
-    assert.match(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).error.message,/no persisted handoff/);child.kill('SIGTERM');
+    await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.kind==='protocol_error');
+    const state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));
+    assert.equal(state.phase,'awaiting_decision');assert.equal(state.pending.kind,'protocol_error');
+    assert.notEqual(state.pending.id,id);assert.match(state.pending.text,/Unregistered id/);
+    assert.equal(fs.existsSync(path.join(f.run,'handoff-'+id+'.json')),false);child.kill('SIGTERM');
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 

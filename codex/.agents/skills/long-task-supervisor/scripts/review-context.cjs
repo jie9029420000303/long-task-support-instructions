@@ -21,6 +21,10 @@ function prompt(run,event,node=process.execPath){
 function summary(event){
   if(!event)return null;
   const {text,pace,...rest}=event;
+  // Legacy progress events may contain raw commands or rejection reasons; keep their original event file unchanged.
+  if(rest.permission?.newRejections)rest.permission={...rest.permission,newRejections:rest.permission.newRejections.map(require('./supervisor-clock.cjs').safeRejection)};
+  if(Array.isArray(rest.executorBlocked))rest.executorBlocked=rest.executorBlocked.map(({id,since,source})=>({id,since,summary:'指令操作尚未開始',...(source?{source}:{})}));
+  if(Array.isArray(rest.failedCommands))rest.failedCommands=rest.failedCommands.map(({command,commandHash,count,lastAt,source})=>({commandHash:commandHash||('sha256:'+digest(String(command||''))),count,lastAt,...(source?{source}:{})}));
   return {...rest,...(typeof text==='string'?{textChars:text.length}:{} )};
 }
 function authorization(contract,binding){

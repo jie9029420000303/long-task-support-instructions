@@ -11,17 +11,18 @@ const health = require('./watch-health.cjs');
 const HEARTBEAT_MS = Number(process.env.LONG_TASK_HEARTBEAT_MS) || 60000;
 // One parent per run: a second start while the first is alive and beating leaves it alone instead of fighting it for
 // the watcher lock every 30 seconds. A parent from before v0.34.0 writes no heartbeat; its live PID is enough.
-try {
-  const previous = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
-  let alive = false;
-  try { process.kill(previous.pid, 0); alive = previous.pid !== process.pid; } catch {}
+if (fs.existsSync(statusPath)) {
+  let previous;
+  try { previous = JSON.parse(fs.readFileSync(statusPath, 'utf8')); }
+  catch { console.error('Cannot verify prior watcher status; reconcile before restart'); process.exit(1); }
+  const alive = previous.pid === process.pid ? false : require('./process-probe.cjs').probe(previous.pid);
   const fresh = !previous.heartbeatAt || Date.now() - Date.parse(previous.heartbeatAt) < 3 * HEARTBEAT_MS;
-  if (alive && fresh && !['stopped', 'accepted'].includes(previous.phase)) {
-    console.log(JSON.stringify({ alreadyRunning: previous.pid, run: directory }));
+  if (alive === null || (alive && fresh && !['stopped', 'accepted'].includes(previous.phase))) {
+    console.log(JSON.stringify(alive === null ? {processNotConfirmedStopped:previous.pid ?? null,run:directory} : {alreadyRunning:previous.pid,run:directory}));
     process.exit(0);
   }
-} catch {}
-const record = { pid: process.pid, startedAt: new Date().toISOString(), launches: [] };
+}
+const record = { pid: process.pid, startedAt: new Date().toISOString(), launches: [], decisionProtocol: 'explicit-decision-v1' };
 let child, stopping = false, delay = 1000, beat = null;
 function save() {
   fs.writeFileSync(statusPath + '.tmp', JSON.stringify(record, null, 2));
@@ -43,7 +44,7 @@ function start() {
     launch.endedAt = new Date().toISOString(); launch.code = code; launch.signal = signal;
     let state = {};
     try { state = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch {}
-    if (stopping || fs.existsSync(path.join(directory,'STOP')) || ['accepted', 'stopped'].includes(state.phase) || (state.phase==='needs_reconcile'&&!state.inflight)) {
+    if (stopping || fs.existsSync(path.join(directory,'STOP')) || ['accepted', 'stopped'].includes(state.phase) || (state.phase==='needs_reconcile'&&(!state.inflight||String(state.error?.message||'').includes('requires manual receipt reconciliation')))) {
       record.phase = stopping ? 'stopped' : state.phase; record.endedAt = new Date().toISOString(); save(); end(); return;
     }
     if (Date.now() - began >= 30000) delay = 1000;

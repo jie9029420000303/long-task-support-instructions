@@ -10,12 +10,11 @@ function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions
   const items=snapshot?.acceptance?.items||[],passed=items.filter(item=>item.status==='PASS').length;
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
   const pending=state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無';
-  const refusedItems=[...new Set((state.reviewRejections||[]).map(item=>item.item).filter(Boolean))];
-  const permission=!settings?.permissionMode?'尚未讀到':settings.permissionMode==='auto'?'自動模式（Git、遠端連線等操作可能被自動模式擋下；請在該對話的權限選單切成「略過權限」，不必在該對話打字，續接訊息由監督送）'+
-    (state.rejectionCount?'，已被擋 '+state.rejectionCount+' 次'+(refusedItems.length?'，最近被擋：'+refusedItems.slice(-4).join('、'):''):''):settings.permissionMode==='bypassPermissions'?'略過權限':settings.permissionMode;
+  const permission=!settings?.permissionMode?'尚未讀到':settings.permissionMode==='auto'?'自動模式（是否允許依實際審查結果）'+
+    (state.rejectionCount?'，已被擋 '+state.rejectionCount+' 次（可查原始事件）':''):settings.permissionMode==='bypassPermissions'?'略過權限':settings.permissionMode;
   const model=settings?.model?settings.model+(settings.effort?'／'+settings.effort:''):'尚未讀到';
   const limit=state.rateLimit&&state.rateLimit.until>now?'限速中（'+(state.rateLimit.who||'執行端')+'），預計 '+clock(state.rateLimit.until)+' 恢復；期間不叫醒模型，恢復後自動續接':'無';
-  const failed=state.platformError?clock(state.platformError.since)+' 執行對話被平台錯誤中斷：'+String(state.platformError.text||state.platformError.kind).slice(0,120)+'；2 分鐘內沒恢復就叫醒監督處理':'無';
+  const failed=state.platformError?clock(state.platformError.since)+' 執行對話被平台錯誤中斷（可查原始紀錄）；2 分鐘內沒恢復就叫醒監督處理':'無';
   const lines=['# 監督儀表板','','更新時間：'+clock(now)+'（台北）','','## 監看','',
     '- 背景監看：'+(alive?'運作中':'已停止')+'（狀態 '+(state.phase||'—')+(paused?'，使用者暫停中':'')+'）',
     '- 監督保持載入：'+(hold?'運作中':'未掛（監督可能在交出事件時被 App 暫停而叫不醒，監督下次醒來會補掛）'),

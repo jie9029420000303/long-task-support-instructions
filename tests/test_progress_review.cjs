@@ -10,6 +10,7 @@ const {activityMarker,supervisorPollFromThread,observeActivity,due,eventFor}=req
 const {validateDecision,PROGRESS_REVIEW_MS}=require(path.join(scripts,'guard.cjs'));
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
+function submit(run,decision){const file=path.join(run,'draft-decision-'+decision.eventId+'.json');save(file,decision);return require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',run,file],{encoding:'utf8'});}
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
 async function until(check,ms=12000) {
   const end=Date.now()+ms;
@@ -108,7 +109,7 @@ test('resident watcher sends a checked progress intervention, then rechecks afte
     await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.id==='progress-review-1');
     await until(()=>fs.existsSync(f.sent));
     assert.match(read(f.sent)[0],/LONG_TASK_DELIVERY:review-progress-review-1/);
-    save(path.join(f.run,'decision-progress-review-1.json'),reply('progress-review-1'));
+    submit(f.run,reply('progress-review-1'));
     await until(()=>read(path.join(f.run,'daemon-state.json')).resolved?.['progress-review-1']?.decision);
     let state=read(path.join(f.run,'daemon-state.json'));
     assert.equal(state.messages.filter(item=>item.key==='answer-progress-review-1').length,1);
@@ -133,7 +134,7 @@ test('new executor activity makes an outstanding progress instruction obsolete',
     f.start().stderr.on('data',chunk=>stderr+=chunk);
     await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.id==='progress-review-1');
     fs.writeFileSync(f.activityGate,'new executor activity\n');
-    save(path.join(f.run,'decision-progress-review-1.json'),reply('progress-review-1'));
+    submit(f.run,reply('progress-review-1'));
     await until(()=>read(path.join(f.run,'daemon-state.json')).resolved?.['progress-review-1']?.obsolete);
     assert.equal(read(f.sent).some(text=>text.includes('LONG_TASK_DELIVERY:answer-progress-review-1')),false);
     assert.equal(read(path.join(f.run,'daemon-state.json')).pending,null);
@@ -146,7 +147,7 @@ test('checked approval wait survives idle time and restart, but a new human mess
   try{
     f.start().stderr.on('data',chunk=>stderr+=chunk);
     await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.kind==='progress_review');
-    save(path.join(f.run,'decision-progress-review-1.json'),{eventId:'progress-review-1',disposition:'observe',reason:'Only an already requested approval remains; no independent work is ready.',
+    submit(f.run,{eventId:'progress-review-1',disposition:'observe',reason:'Only an already requested approval remains; no independent work is ready.',
       progressCheck:{evidence:['executor final and authorization ledger'],finding:'The approval condition is unchanged.'},wait:{kind:'user_approval',conditions:[]}});
     await until(()=>read(path.join(f.run,'daemon-state.json')).checkedWait);
     await f.stop();

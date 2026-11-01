@@ -18,7 +18,7 @@ function agentRun(file){
     const at=Date.parse(row.timestamp);
     if(Number.isFinite(at)){startedAt??=at;lastAt=at;}
     // A refused subagent stops on the shared subscription limit; the executor's clock waits for the reset.
-    if(row.isApiErrorMessage){rateLimit=require('./signals.cjs').rateLimitOf(row)||rateLimit;continue;}
+    if(row.isApiErrorMessage){const found=require('./signals.cjs').rateLimitOf(row);if(found)rateLimit={...found,source:{path:file,...(row.uuid?{messageId:row.uuid}:{})}};continue;}
     if(row.type!=='assistant'||!row.message)continue;
     model=row.message.model||model;
     if(row.message.usage)messages.set(row.message.id||row.uuid,row.message.usage.output_tokens||0);

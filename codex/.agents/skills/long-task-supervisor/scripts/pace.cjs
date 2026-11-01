@@ -71,7 +71,7 @@ function agentRun(file,meta){
     }
   }
   const activeMs=item.activeMs+(item.turnAt&&item.lastAt?item.lastAt-item.turnAt:0);
-  return {id:meta.id,path:meta.agent_path||null,model:item.model,startedAt:item.startedAt,lastAt:item.lastAt,outputTokens:item.outputTokens,done:item.done,seconds:activeMs/1000};
+  return {id:meta.id,path:meta.agent_path||null,model:item.model,startedAt:item.startedAt,lastAt:item.lastAt,active:Boolean(item.turnAt),sourceFile:file,outputTokens:item.outputTokens,done:item.done,seconds:activeMs/1000};
 }
 // Rollouts live in sessions/YYYY/MM/DD by local start date; subagents of this executor start after binding.
 const metas=new Map();
