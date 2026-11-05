@@ -68,6 +68,72 @@ const sends=f=>fs.existsSync(f.sent)?read(f.sent):[];
 function decide(f,event,decision){const file=path.join(f.run,'draft-decision-'+event.id+'.json');save(file,{eventId:event.id,...decision});require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',f.run,file],{env:f.env,encoding:'utf8'});return file;}
 function withHome(home,fn){const old=process.env.CODEX_HOME;process.env.CODEX_HOME=home;try{return fn();}finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;}}
 
+function parallelGate(f){
+  const command='bash scripts/deploy-gate.sh',now=new Date().toISOString();
+  line(f.executorLog,{timestamp:now,type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'test-gate',
+    input:'await tools.exec_command({cmd:'+JSON.stringify(command)+'});'}});
+  line(f.executorLog,{timestamp:now,type:'event_msg',payload:{type:'item_started',item:{type:'CommandExecution',process_id:'fake-gate',command:['/bin/sh','-c',command]}}});
+  line(f.executorLog,{timestamp:now,type:'response_item',payload:{type:'custom_tool_call_output',call_id:'test-gate',output:'Script running with cell ID fake:gate'}});
+  return ()=>line(f.executorLog,{timestamp:new Date().toISOString(),type:'event_msg',payload:{type:'item_completed',item:{type:'CommandExecution',process_id:'fake-gate',command:['/bin/sh','-c',command],exit_code:0}}});
+}
+const parallelReply=event=>({disposition:'reply',reply:'Check parallel opportunities now.',
+  progressCheck:{evidence:['source position'],finding:'The test looked active.',guidance:'Check parallel opportunities now.'}});
+
+test('parallel test already finished before decision never sends a stale executor instruction',async()=>{
+  const f=fixture(),finish=parallelGate(f);f.start();
+  try{
+    await until(()=>pending(f)?.reasons?.includes('parallel_test_review'));
+    const event=pending(f);await until(()=>sends(f).some(text=>text.includes('review-'+event.id)));
+    finish();decide(f,event,parallelReply(event));
+    await until(()=>read(f.statePath).resolved?.[event.id]?.obsolete);
+    assert.equal(sends(f).some(text=>text.includes('answer-'+event.id)),false);
+  }finally{await f.stop();}
+});
+
+test('parallel test stale in a mixed review keeps the other reason in a new immutable event',async()=>{
+  const f=fixture({createdMinutesAgo:80}),finish=parallelGate(f);f.start();
+  try{
+    await until(()=>pending(f)?.reasons?.includes('parallel_test_review'));
+    const event=pending(f);assert.ok(event.reasons.includes('no_event_hour'));
+    await until(()=>sends(f).some(text=>text.includes('review-'+event.id)));
+    const saved=fs.readFileSync(path.join(f.run,'review-event-'+event.id+'.json'),'utf8');
+    finish();decide(f,event,parallelReply(event));
+    await until(()=>read(f.statePath).resolved?.[event.id]?.supersededBy);
+    const previous=read(f.statePath).resolved[event.id],replacement=previous.supersededBy;
+    await until(()=>pending(f)?.id===replacement);
+    assert.notEqual(replacement,event.id);assert.ok(pending(f).reasons.includes('no_event_hour'));
+    assert.equal(pending(f).reasons.includes('parallel_test_review'),false);
+    assert.equal(fs.readFileSync(path.join(f.run,'review-event-'+event.id+'.json'),'utf8'),saved);
+    assert.equal(sends(f).some(text=>text.includes('answer-'+event.id)),false);
+  }finally{await f.stop();}
+});
+
+test('parallel test decision is rechecked after a newly observed agent appears',async()=>{
+  const f=fixture();parallelGate(f);f.start();
+  try{
+    await until(()=>pending(f)?.reasons?.includes('parallel_test_review'));
+    const event=pending(f);await until(()=>sends(f).some(text=>text.includes('review-'+event.id)));
+    subagent(f.home,'executor-qa','/root/newly-dispatched',{turns:[{start:minutesAgo(.1),tokens:100}]});
+    decide(f,event,parallelReply(event));
+    await until(()=>read(f.statePath).resolved?.[event.id]?.supersededBy);
+    const replacement=read(f.statePath).resolved[event.id].supersededBy;
+    await until(()=>pending(f)?.id===replacement);
+    assert.ok(pending(f).reasons.includes('parallel_test_review'),'changed records require a fresh review, not an assumed full seat');
+    assert.equal(sends(f).some(text=>text.includes('answer-'+event.id)),false,'the old decision must not be sent');
+  }finally{await f.stop();}
+});
+
+test('parallel review brief reports observed agents without treating missing sources as zero',async()=>{
+  const f=fixture();
+  try{
+    const runBrief=()=>JSON.parse(require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'brief',f.run],{env:f.env,encoding:'utf8'}));
+    subagent(f.home,'executor-qa','/root/working',{turns:[{start:minutesAgo(1),tokens:100}]});
+    const found=runBrief().agentActivity;assert.equal(found.coverage,'partial');assert.deepEqual(found.observedActive.map(item=>item.id),['/root/working']);
+    fs.unlinkSync(f.executorLog);
+    const missing=runBrief().agentActivity;assert.equal(missing.coverage,'unknown');assert.deepEqual(missing.observedActive,[]);
+  }finally{await f.stop();}
+});
+
 test('subagent speed comes from this executor\'s own rollouts, counting turn time but not the waits between turns',()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-pace-')),home=path.join(root,'home');
   try{

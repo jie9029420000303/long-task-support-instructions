@@ -155,6 +155,10 @@ function status() {
     unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{}), queued:handoffQueue(run).length};
 }
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
+function parallelPreflight(binding,state,event){
+  if(!(event?.reasons||[]).includes('parallel_test_review'))return null;
+  return require('./parallel-test-review.cjs').recheck(binding,state,null,event,null);
+}
 // The last assistant texts of the executor, read from the transcript's tail only.
 function executorTail(file, count = 3) {
   const size = fs.statSync(file).size, length = Math.min(size, 262144), buffer = Buffer.alloc(length), fd = fs.openSync(file, 'r');
@@ -177,6 +181,13 @@ function executorQueue() {
 // re-reads its long conversation context fewer times (Jay 2026-10-07: about 3M cached tokens per check).
 function brief() {
   const {binding} = load(), state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
+  const agentSource = require('./activity-correlation.cjs').localRuns(binding);
+  // A transcript without an end marker is a lead, not proof that the agent is running; an unreadable source is unknown.
+  const agentActivity = agentSource.available ? {available:true, coverage:'unknown', source:'executor subagent transcripts',
+    agents:agentSource.runs.map(item => ({
+      id:item.id, ...(item.workflow ? {workflow:item.workflow, label:item.label || null} : {}),
+      status:item.done ? 'end_recorded' : 'no_end_recorded', startedAt:item.startedAt || null, lastAt:item.lastAt || null}))}
+    : {available:false, status:'unknown', reason:agentSource.error || 'READ_ERROR'};
   const iso = value => value ? new Date(value).toISOString() : null;
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
@@ -192,6 +203,7 @@ function brief() {
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, subagentActivityAt(binding))),
       lastProcessActivityAt:iso(state.lastProcessActivityAt), lastWorkAt:iso(state.lastExecutorWorkAt), lastRealEventAt:iso(state.lastRealEventAt),
       settings:state.executorSettings || null, executorDesktopId:binding.executorDesktopId, tail:executorTail(binding.executorLog)},
+    agentActivity,
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     eventQueue:executorQueue().map(({id, kind, at}) => ({id, kind, at})),
@@ -253,12 +265,15 @@ function decisionPreflight() {
   need(!Object.prototype.hasOwnProperty.call(input, 'delivery'), 'Draft must not contain a delivery receipt');
   const value = validateDecision(binding, contract, event, input);
   if (event.kind === 'progress_review') need(state.progressReviewPreflight === event.id, 'Run progress-preflight first');
+  const parallel=event.kind==='progress_review'?parallelPreflight(binding,state,event):null;
+  need(!(parallel?.status==='cleared'&&(event.reasons||[]).every(reason=>reason==='parallel_test_review')),
+    'The long-test lead is no longer current; run progress-preflight again');
   if (event.kind === 'dispatch_review') {const current=stillCurrent(run, binding, state, event).current;
     need(current===true,current===null?'Dispatch sources unavailable; retain the event and retry after sources recover':'Dispatch event is no longer current');}
   const message = 'LONG_TASK_DELIVERY:' + event.id + '\n' + value.reply;
   return {eventId:event.id, eventSha256, disposition:value.disposition, contractSha256:binding.contractSha256,
     contractStateSha256:contract.contractStateSha256 || null, decisionSha256:hash(inputArgument),
-    messageSha256:crypto.createHash('sha256').update(message, 'utf8').digest('hex')};
+    messageSha256:crypto.createHash('sha256').update(message, 'utf8').digest('hex'),...(parallel?{parallelTestReview:parallel}:{})};
 }
 function decision() {
   need(inputArgument && path.isAbsolute(inputArgument), 'Use absolute decision path');
@@ -408,7 +423,8 @@ function dispatchPreflight(){
 function progressPreflight(){const {binding}=load(),state=read(path.join(run,'daemon-state.json'));need(state.pending?.id===inputArgument&&state.pending.kind==='progress_review','No matching pending progress review');const processAt=pace.inFlight(binding,snapshotOf(binding),Date.now(),state.sleeps).processActivityAt||0;
   // Only silence and a changed wait end with new activity; overdue, like the other clock reasons, asks about the
   // baseline and scope of a package that is still busy (rule A, Jay 2026-10-13).
-  const current=!fs.existsSync(path.join(run,'STOP'))&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current};}
+  const parallel=parallelPreflight(binding,state,state.pending),onlyParallel=(state.pending.reasons||[]).every(reason=>reason==='parallel_test_review');
+  const current=!fs.existsSync(path.join(run,'STOP'))&&!(onlyParallel&&parallel?.status==='cleared')&&(!quietReview(state.pending)||fs.statSync(binding.executorLog).size===state.executorOffset&&Date.now()-Math.max(state.lastExecutorActivityAt,subagentActivityAt(binding),processAt,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);if(current)state.progressReviewPreflight=state.pending.id;else{(state.resolved||={})[state.pending.id]={event:state.pending,obsolete:true};state.seen.push(state.pending.id);state.pending=null;state.progressReviewPreflight=null;state.phase='watching';}save(path.join(run,'daemon-state.json'),state);return {eventId:inputArgument,current,...(parallel?{parallelTestReview:parallel}:{})};}
 (async()=>{
   try {
     const value=command==='attach-acceptance'?contractState.attachAcceptance(run,load().binding,read(inputArgument))
