@@ -14,6 +14,7 @@ const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 const clockSafety=require('./clock-safety.cjs');
+const parallelTestReview=require('./parallel-test-review.cjs');
 const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage,trackDocTime,freeCapacity}=require('./dispatch-audit.cjs');
 const deferredDispatch=require('./deferred-dispatch.cjs');
 const {digest,promoteNext,ownerAlive}=require('./handoff-lib.cjs');
@@ -24,6 +25,7 @@ const lockPath=path.join(run,'watcher.lock');
 const readyPath=path.join(run,'native-ready.json');
 const contractPath=path.join(run,'contract.json');
 let state=read(statePath),ownsLock=false;
+const watchStartedAt=Date.now();
 const now=()=>new Date().toISOString();
 const settleMs=Number(process.env.CLAUDE_WATCH_SETTLE_MS||15000);
 function save(file,value){fs.writeFileSync(file+'.tmp',JSON.stringify(value,null,2)+'\n');fs.renameSync(file+'.tmp',file);}
@@ -104,9 +106,14 @@ function waitingHasBlocker(text){
 }
 // Count failing commands the executor repeats; three identical failures mean it is retrying instead of changing approach.
 // A success of the same command clears its count: only uninterrupted failures are a repeat.
-function trackTools(row,offset){
-  if(row.isSidechain||!Array.isArray(row.message?.content))return;
+function trackTools(row,offset,agentObservations){
+  if(row.isSidechain)return;
+  parallelTestReview.notification(state,row,agentObservations);
+  if(!Array.isArray(row.message?.content))return;
+  parallelTestReview.observeAgentStatus(state,row,agentObservations);
   for(const block of row.message.content){
+    if(row.type==='assistant')parallelTestReview.observe(state,block,{file:binding.executorLog,offset,at:row.timestamp||now()});
+    else if(row.type==='user')parallelTestReview.result(state,block,row);
     if(row.type==='assistant'&&block?.type==='tool_use'){
       const items=state.callItems||={};items[block.id]='sha256:'+clockSafety.digest(signals.workItem(block));
       const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
@@ -448,7 +455,7 @@ async function watch(){
     const rows=readNew();
     const dispatchHistory=rows.length&&state.executorKnowsRun?activityCorrelation.readHistory(run):null;
     if(rows.length)lastGrowthAt=Date.now();
-    let finalized=false;
+    let finalized=false;const agentObservations={};
     for(const {row,start,end} of rows){
       const toolResult=row?.type==='user'&&Array.isArray(row.message?.content)&&
         row.message.content.some(block=>block?.type==='tool_result');
@@ -473,7 +480,7 @@ async function watch(){
         }
       }
       if(state.executorKnowsRun)activityCorrelation.observeMainWrite(state,row,dispatchHistory);
-      trackTools(row,start);trackExecutor(row,start);
+      trackTools(row,start,agentObservations);trackExecutor(row,start);
       // Platform error rows are control signals, not assistant message text to assemble and persist.
       if(row.type==='assistant'&&row.isApiErrorMessage)continue;
       if(row.type==='user'){state.message=null;continue;}
@@ -533,13 +540,21 @@ async function watch(){
     // unbaselined package, a stalled test process and repeated failures each start a check while work goes on.
     const held=checkedWait.unchanged(state);
     const clock=isPaused?null:supervisorClock();
+    // A real, recognizable full-test call is one lead, even while the executor is busy. Do not reinterpret the
+    // existing idle suppression: if the source or agent state is unavailable the supervisor must treat it as unknown.
+    let capacitySnapshot=null,agentSource=null;
+    if(state.parallelTestCandidates?.length){
+      try{capacitySnapshot=require('./dispatch-audit.cjs').parse(snapshotNow(),binding);}catch{}
+      agentSource=activityCorrelation.localRuns(binding);
+    }
+    const parallelTest=!isPaused&&!stopped()&&!rateLimited()?parallelTestReview.take(state,capacitySnapshot,agentSource,agentObservations,watchStartedAt):null;
     // Quiet means nothing moves at all: the executor, its subagents and the test processes it runs. A pause or a
     // running rate limit is a known stop, not silence, and neither is waiting for the supervisor's ruling on an executor
     // event (lastDecisionAt, set by supervise.cjs decision; absent in older state, it counts as 0).
     const silent=!held&&!isPaused&&!rateLimited()&&(hadCheckedWait||!executorBusy(state)&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);
-    if(silent||clock){
+    if(silent||clock||parallelTest){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
-      const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[])];
+      const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[]),...(parallelTest?['parallel_test_review']:[])];
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
         kind:'progress_review',reasons,lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
         lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
@@ -549,6 +564,7 @@ async function watch(){
         baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
         machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,
+        ...(parallelTest?{parallelTestReview:parallelTest}:{}),
         ...Object.fromEntries(['noEventHour','unplannedCriteria','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel','docBudget']
           .filter(key=>clock?.[key]).map(key=>[key,clock[key]])),at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();

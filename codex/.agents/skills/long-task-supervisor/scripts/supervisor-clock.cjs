@@ -10,6 +10,7 @@ const {docBudgetStage,trackDocTime}=require('./dispatch-audit.cjs');
 const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,executorBusy}=require('./guard.cjs');
 const automations=require('./automations.cjs');
 const login=require('./login-check.cjs');
+const parallelTest=require('./parallel-test.cjs');
 const now=()=>new Date().toISOString();
 // The executor's own rollout holds its tool calls and command results; the App tools only show messages.
 function executorLog(state,binding){
@@ -62,6 +63,8 @@ function migrateFailedCommands(state){
 }
 function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   const payload=row.payload||{},at=row.timestamp||now();
+  // The clue stores only a source locator and command hash, never the command or output itself.
+  parallelTest.track(state,row,commandsOf(payload),sourceFile?{path:sourceFile,offset:sourceOffset}:null,boundAt);
   // A permission mode is context, not evidence that any operation was rejected.
   const applied=row.type==='turn_context'?payload:row.type==='event_msg'&&payload.type==='thread_settings_applied'?payload.thread_settings||{}:null;
   if(applied&&(applied.approval_policy||applied.model))state.executorSettings={approvalPolicy:applied.approval_policy||state.executorSettings?.approvalPolicy||null,
@@ -115,18 +118,50 @@ function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
     }
   }
 }
+function sourceReadError(state,file,error){
+  parallelTest.markSourceUncertain(state,file);
+  const source=file||null,code=/^[A-Z][A-Z0-9_]{0,31}$/.test(error?.code||'')?error.code:'UNKNOWN';
+  if(state.executorSourceReadError?.source!==source||state.executorSourceReadError?.code!==code){
+    const issue={at:now(),source,code};state.executorSourceReadError=issue;
+    if(!state.history)state.history=[];
+    if(Array.isArray(state.history))state.history.push({executorSourceReadError:{...issue}});
+  }
+  return {readable:false,reason:'unreadable'};
+}
 function readExecutor(state,binding){
-  const file=executorLog(state,binding);if(!file)return;
-  const size=fs.statSync(file).size;
-  if(size<(state.executorOffset||0))state.executorOffset=0;
-  if(size===state.executorOffset)return;
-  const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(size-state.executorOffset);
-  try{fs.readSync(fd,buffer,0,buffer.length,state.executorOffset);}finally{fs.closeSync(fd);}
-  const complete=buffer.lastIndexOf(10);if(complete<0)return;
+  const previous=state.executorLog,previousOffset=state.executorOffset;
+  const restore=()=>{if(previous===undefined)delete state.executorLog;else state.executorLog=previous;
+    if(previousOffset===undefined)delete state.executorOffset;else state.executorOffset=previousOffset;};
+  let file;try{file=executorLog(state,binding);}catch(error){restore();return sourceReadError(state,previous,error);}
+  if(!file){parallelTest.markSourceUncertain(state,previous);return {readable:false,reason:'missing'};}
+  const switched=Boolean(previous&&previous!==file);
+  let size;try{size=fs.statSync(file).size;}catch(error){restore();return sourceReadError(state,previous||file,error);}
+  const truncated=size<(state.executorOffset||0);
+  if(switched||truncated)parallelTest.markSourceUncertain(state,switched?previous:file);
+  if(truncated)state.executorOffset=0;
+  if(size===state.executorOffset){
+    let probe;try{probe=fs.openSync(file,'r');}catch(error){restore();return sourceReadError(state,previous||file,error);}
+    finally{if(probe!==undefined)try{fs.closeSync(probe);}catch{}}
+    delete state.executorSourceReadError;return {readable:!switched&&!truncated,reason:switched?'segment_changed':truncated?'truncated':null};
+  }
+  let fd;const buffer=Buffer.alloc(size-state.executorOffset);
+  try{fd=fs.openSync(file,'r');const n=fs.readSync(fd,buffer,0,buffer.length,state.executorOffset);
+    if(n!==buffer.length){restore();parallelTest.markSourceUncertain(state,previous||file);return {readable:false,reason:'truncated'};}}
+  catch(error){restore();return sourceReadError(state,previous||file,error);}
+  finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}}
+  const complete=buffer.lastIndexOf(10);if(complete<0)return {readable:false,reason:'incomplete'};
   const start=state.executorOffset;state.executorOffset+=complete+1;
   const boundAt=Date.parse(binding.createdAt)||0;
-  let offset=0;
-  for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){try{trackTools(state,JSON.parse(line),boundAt,file,start+offset);}catch{}offset+=Buffer.byteLength(line)+1;}
+  let offset=0,invalid=false;
+  for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){
+    if(line.trim())try{trackTools(state,JSON.parse(line),boundAt,file,start+offset);}catch{invalid=true;}
+    offset+=Buffer.byteLength(line)+1;
+  }
+  const partial=complete!==buffer.length-1;
+  if(invalid)parallelTest.markSourceUncertain(state,file);
+  delete state.executorSourceReadError;
+  return {readable:!switched&&!truncated&&!partial&&!invalid,
+    reason:switched?'segment_changed':truncated?'truncated':partial?'incomplete':invalid?'invalid_record':null};
 }
 function commandsAt(source){
   if(!source?.path||!Number.isInteger(source.offset))return [];
@@ -223,6 +258,10 @@ function check(run,binding,state){
   for(const [,item] of repeated)item.announced=now();
   // A checked wait on Jay's approval already says what is missing: asking again every hour only spends turns.
   const waitingUser=state.checkedWait?.kind==='user_approval';
+  // A recognizable long-test call is a single lead for cross-checking, not proof that work can be parallelized.
+  // It is independent of readyPackages and does not change the existing busy/idle suppression rules.
+  const testLeads=parallelTest.leads(state,once);
+  const testFingerprint=testLeads.length?parallelTest.fingerprint(snapshot,parallelTest.observedAgents(binding,state)):null;
   // The hour restarts when the supervisor's ruling on an executor event is applied: the executor waited for it.
   const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awakeSince(state,lastEvent)>=NO_EVENT_REVIEW_MS;
   const noEventHour=quietEvent&&!waitingUser&&once('no_event_hour:'+lastEvent);
@@ -292,7 +331,7 @@ function check(run,binding,state){
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
     ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(platformError?['platform_error']:[]),
-    ...(docBudget?['doc_budget']:[])];
+    ...(docBudget?['doc_budget']:[]),...(testLeads.length?['parallel_test_review']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
     state.lastHealthAt=Date.now();
     const iso=value=>value?new Date(value).toISOString():null;
@@ -308,6 +347,6 @@ function check(run,binding,state){
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
     ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
     ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{}),
-    ...(docBudget?{docBudget}:{})};
+    ...(docBudget?{docBudget}:{}),...(testLeads.length?{parallelTestReview:{tests:testLeads,fingerprint:testFingerprint}}:{})};
 }
 module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince,safeRejection};

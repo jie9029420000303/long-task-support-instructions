@@ -424,6 +424,30 @@ async function pendingDecision() {
       (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:submitted.decisionSha256};
       state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;
     }
+    if(event.reasons?.includes('parallel_test_review')){
+      // Do not deliver an instruction based on a test confirmed ended while review was queued. Changed agent
+      // records or snapshots require a fresh review; neither alone proves actual live platform capacity.
+      // Preserve the immutable event and submitted decision; remaining reasons get a new event.
+      const parallel=require('./parallel-test.cjs');
+      let readable=false;try{readable=clock.readExecutor(state,binding)?.readable===true;}catch{}
+      const agents=parallel.observedAgents(binding,state);
+      const check=parallel.reassess(event,state,clock.snapshotOf(run,binding),agents,{readable});
+      if(check.changed){
+        let replacement=null;
+        if(check.reasons.length){
+          const {id:_id,kind:_kind,at:_at,parallelTestReview:_old,...details}=event;
+          details.reasons=check.reasons;
+          if(check.tests.length||check.missingDetails)details.parallelTestReview={tests:check.tests,fingerprint:check.fingerprint,
+            ...(check.missingDetails?{sourceCoverage:'unknown'}:{})};
+          replacement=progressEvent(state,Date.now(),details);
+          (state.eventQueue||=[]).push(replacement);
+        }
+        (state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:submitted.decisionSha256,
+          ...(replacement?{supersededBy:replacement.id}:{})};
+        state.seen.push(event.id);parallel.clear(state,event,{retain:check.tests.map(item=>item.source?.callId).filter(Boolean)});
+        state.pending=null;state.phase='watching';checkpoint();return;
+      }
+    }
   }
   if (decision.disposition === 'needs_user') {
     state.phase = 'needs_user'; checkpoint();
@@ -442,6 +466,7 @@ async function pendingDecision() {
     state.lastProgressReviewAt=Date.now();ruled(event);
     if(event.kind==='progress_review')state.failedCommands={};
     (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:submitted.decisionSha256};
+    if(event.kind==='progress_review')require('./parallel-test.cjs').clear(state,event);
     state.seen.push(event.id); state.pending = null;
     state.phase = 'watching'; checkpoint(); return;
   }
@@ -463,6 +488,7 @@ async function pendingDecision() {
     sentAt:Date.now(),deadlineMs:(given?.deadlineMinutes || 30)*60000,misses:0};
   if(event.kind==='progress_review'){state.lastProgressReviewAt=Date.now();state.failedCommands={};}
   (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:submitted.decisionSha256};
+  if(event.kind==='progress_review')require('./parallel-test.cjs').clear(state,event);
   state.seen.push(event.id); state.pending = null;
   state.phase = 'watching'; checkpoint();
 }

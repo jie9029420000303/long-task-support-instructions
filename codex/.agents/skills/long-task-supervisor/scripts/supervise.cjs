@@ -125,7 +125,10 @@ function brief() {
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
   const checkCoverage = {};
-  const crossChecks = snapshot ? require('./dispatch-audit.cjs').crossCheck(run,binding,snapshot,state,pace.agentRuns(binding),checkCoverage) : [];
+  const observedAgents=require('./parallel-test.cjs').observedAgents(binding,state);
+  const latestAgents=new Map();
+  for(const item of observedAgents||[]){const id=item.path||item.id;if(id&&(!latestAgents.has(id)||(item.lastAt||0)>(latestAgents.get(id).lastAt||0)))latestAgents.set(id,item);}
+  const crossChecks = snapshot ? require('./dispatch-audit.cjs').crossCheck(run,binding,snapshot,state,observedAgents||[],checkCoverage) : [];
   return {status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
     // Jay is online for 10 minutes after typing in this chat: one of the two times to ask the whole pending ledger.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < require('./guard.cjs').ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
@@ -137,6 +140,7 @@ function brief() {
     platformError:state.platformError ? {...state.platformError, since:iso(state.platformError.since)} : null,
     dashboard:path.join(run, require('./dashboard.cjs').FILE),
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, paced.subagentActivityAt || 0)),
+      sourceReadError:state.executorSourceReadError||null,
       lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(state.executorLog || pace.sessionFile(binding.executorId))},
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
@@ -144,6 +148,9 @@ function brief() {
     eventQueue:(state.eventQueue || []).map(({id, kind, at}) => ({id, kind, at})),
     dispatchCrossChecks:crossChecks,
     dispatchSourceCoverage:{workPackages:checkCoverage.workPackages || 'unknown'},
+    // Rollouts may be missing or unreadable: observed active turns are evidence, an empty list is not proof of zero agents.
+    agentActivity:{coverage:observedAgents?'partial':'unknown',observedActive:[...latestAgents.values()].filter(item=>item.active).map(item=>({
+      id:item.path||item.id,lastAt:iso(item.lastAt),source:item.sourceFile||null}))},
     deferredDispatch:Object.values(state.deferredDispatch || {}).map(item=>require('./review-context.cjs').summary(item.event)),
     // A decision file for the pending event that failed its checks: the watcher kept it unapplied and keeps watching.
     decisionError:(state.pending && state.decisionErrors?.[state.pending.id]) || null,
