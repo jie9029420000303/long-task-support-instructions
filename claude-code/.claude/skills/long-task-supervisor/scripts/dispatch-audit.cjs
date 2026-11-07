@@ -6,7 +6,7 @@ const acceptance=require('./acceptance-audit.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 
 const kinds=['ready_capacity','returned_unintegrated','resource_conflict','recurring_rework','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn',
-  'main_write_review','agent_untracked','agent_finished_inflight','wp_mismatch','wp_source_unknown'];
+  'main_write_review','agent_untracked','agent_finished_inflight','wp_mismatch','wp_source_unknown','planning_review','dependency_ready_review'];
 // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time).
 const DOC_BUDGET_RATIO=1.5;
 const nonEmpty=value=>typeof value==='string'&&value.trim();
@@ -22,6 +22,11 @@ function parse(snapshot,binding){
   need(['planning','dispatching','working','integrating','waiting'].includes(snapshot.activity),'invalid activity');
   need(snapshot.capacity&&Number.isInteger(snapshot.capacity.verified)&&snapshot.capacity.verified>=0,'capacity.verified must be a non-negative integer');
   evidence(snapshot.capacity.evidence,'capacity');
+  if(snapshot.capacity.throttle!==undefined){const t=snapshot.capacity.throttle;
+    need(t&&Number.isInteger(t.limit)&&t.limit>=0&&t.limit<=snapshot.capacity.verified,'capacity.throttle.limit must be within verified capacity');
+    need(nonEmpty(t.reason)&&nonEmpty(t.reviewWhen),'capacity.throttle needs reason and reviewWhen');evidence(t.evidence,'capacity.throttle');}
+  if(snapshot.planningReview!==undefined){const p=snapshot.planningReview;
+    need(p&&/^[a-f0-9]{64}$/.test(p.basis)&&nonEmpty(p.reason)&&Number.isFinite(Date.parse(p.at)),'planningReview needs basis, reason and at');}
   need(snapshot.packages&&typeof snapshot.packages==='object','packages is required');
   const p=snapshot.packages;
   for(const name of ['ready','inFlight','returned','blocked','completed','recurringRework'])records(p[name],name);
@@ -69,11 +74,30 @@ function issue(kind,items,detail){need(kinds.includes(kind),'unknown issue kind'
 // Main-line work and resource processes consume resources, but not a subagent seat.
 // Unknown handles remain counted until the platform handle can be verified.
 function freeCapacity(snapshot){
-  const seats=Number(snapshot?.capacity?.verified)||0;
+  const seats=Number(snapshot?.capacity?.throttle?.limit??snapshot?.capacity?.verified)||0;
   const occupied=(snapshot?.packages?.inFlight||[]).filter(item=>item?.handle!=='main'&&!/^resource:.+/.test(item?.handle||'')).length;
   return Math.max(0,seats-occupied);
 }
-function derive(snapshot){
+function agentSeatCount(inFlight){return (inFlight||[]).filter(item=>item.handle!=='main'&&!String(item.handle||'').startsWith('resource:')).length;}
+function planningBasis(binding){return digest({contractSha256:binding.contractSha256,contractStateSha256:binding.contractStateSha256||null});}
+function planReview(snapshot,binding){
+  const p=snapshot.packages,completed=new Set(p.completed.map(item=>item.id));
+  const occupied=new Set(p.inFlight.flatMap(item=>(item.exclusiveResources||[]).map(claim=>claim.key)));
+  const eligible=p.ready.filter(item=>item.independent&&item.safe&&item.dependencies.every(id=>completed.has(id))&&
+    (item.exclusiveResources||[]).every(claim=>!occupied.has(claim.key))).map(item=>item.id);
+  // A resolved prerequisite is a lead to verify, never permission to clear a separate human/data/resource block.
+  const dependenciesReady=p.blocked.filter(item=>/^(dependency|依賴)(?:$|[：:\s])/i.test(item.kind||'')&&
+    Array.isArray(item.dependencies)&&item.dependencies.length&&item.dependencies.every(id=>completed.has(id)))
+    .map(item=>({id:item.id,dependencies:item.dependencies}));
+  const covered=new Set(['ready','inFlight','blocked','returned'].flatMap(list=>(p[list]||[]).flatMap(item=>item.acceptanceIds||[])));
+  const uncovered=(snapshot.acceptance?.items||[]).filter(item=>!['PASS','EXCLUDED'].includes(item.status)&&!covered.has(item.id)).map(item=>item.id);
+  const basis=planningBasis(binding),verified=snapshot.capacity.verified,limit=snapshot.capacity.throttle?.limit??verified;
+  return {basis,reviewRequired:Boolean(binding.contractStateSha256||snapshot.planningReview)&&snapshot.planningReview?.basis!==basis,
+    source:{contractSha256:binding.contractSha256,contractStateSha256:binding.contractStateSha256||null},eligible,dependenciesReady,uncovered,
+    capacity:{verified,dispatchLimit:limit,activeAgents:agentSeatCount(p.inFlight),free:Math.max(0,limit-agentSeatCount(p.inFlight)),
+      ...(snapshot.capacity.throttle?{throttle:snapshot.capacity.throttle}:{})}};
+}
+function derive(snapshot,binding){
   const p=snapshot.packages,issues=[];
   const completed=new Set(p.completed.map(item=>item.id));
   const occupied=new Set(p.inFlight.flatMap(item=>(item.exclusiveResources||[]).map(claim=>claim.key)));
@@ -85,7 +109,11 @@ function derive(snapshot){
   const exclusiveConflictGroups=[...readyClaims].filter(([,ids])=>ids.length>1).map(([resource,packages])=>({resource,packages:packages.sort()})).sort((a,b)=>a.resource.localeCompare(b.resource));
   if(['working','waiting','integrating'].includes(snapshot.activity)&&free>0&&eligible.length)issues.push(issue('ready_capacity',eligible,{freeCapacity:free,exclusiveConflictGroups}));
   const returned=p.returned.filter(item=>!item.integrated).map(item=>item.id).sort();
-  if(snapshot.activity==='waiting'&&returned.length)issues.push(issue('returned_unintegrated',returned,{}));
+  if(['working','waiting'].includes(snapshot.activity)&&returned.length)issues.push(issue('returned_unintegrated',returned,{}));
+  if(binding?.contractSha256){const review=planReview(snapshot,binding);
+    if(review.reviewRequired)issues.push(issue('planning_review',[],{expectedBasis:review.basis,recordedBasis:snapshot.planningReview?.basis||null,
+      source:review.source,eligible:review.eligible,uncovered:review.uncovered}));
+    for(const item of review.dependenciesReady)issues.push(issue('dependency_ready_review',[item.id],{dependencies:item.dependencies}));}
   const claims=new Map();
   for(const item of p.inFlight)for(const claim of item.exclusiveResources||[]){const values=claims.get(claim.key)||[];values.push({id:item.id,kind:claim.kind});claims.set(claim.key,values);}
   for(const [resource,values] of [...claims].sort(([a],[b])=>a.localeCompare(b))){if(values.length>1)issues.push(issue('resource_conflict',values.map(value=>value.id),{resource,kinds:[...new Set(values.map(value=>value.kind))].sort()}));}
@@ -143,7 +171,7 @@ function inspect(run,binding,state){
     if(snapshot.acceptance)acceptance.validate(snapshot.acceptance,contractState.effective(run,binding));
     else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
     snapshotAvailable=true;
-    issues=derive(snapshot);
+    issues=derive(snapshot,binding);
     wpSource=workPackageCheck(run,binding,snapshot,file);
     if(wpSource.available)for(const lead of wpSource.leads){const value=issue('wp_mismatch',[lead.id],lead);issues.push(value);wpIssues.push(value);}
     else{
@@ -209,4 +237,4 @@ function stillCurrent(run,binding,state,event){const result=inspect(run,binding,
   });
   if(unknown)return {current:null,result};
   return {current:event.dispatchIssueKeys?.every(key=>active.has(key)),result};}
-module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,workPackageCheck,docBudgetStage,trackDocTime,freeCapacity,DOC_BUDGET_RATIO};
+module.exports={planningBasis,planReview,parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,workPackageCheck,docBudgetStage,trackDocTime,freeCapacity,DOC_BUDGET_RATIO};

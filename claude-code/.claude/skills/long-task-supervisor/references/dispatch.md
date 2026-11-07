@@ -26,7 +26,7 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 
 `schemaVersion` 為 `1`，`executorId` 必須等於 binding 的執行對話 ID；`planningRevision` 是執行者目前工作計畫的版本識別。`activity` 為 `planning`（拆包）、`dispatching`（正在派出）、`working`（工作進行中）、`integrating`（正在收回核對）、`waiting`（等待）。過渡狀態只用於當下的動作，不能用來藏住未派工作。
 
-`capacity.verified` 是**已核實的總子代理席位上限**，不是剩餘席位，也不是希望派出的數量；`capacity.evidence` 附平台能力或實際查核來源。剩餘席位由總數扣除在途子代理；`main` 與 `resource:<id>` 不佔子代理席位，未知 handle 保守計入。無可核對資料時交監督查能力，不臆造上限。CPU、記憶體、服務與帳號是否適合增派另查實際證據，不把席位上限當作主機承載量；所有在途包仍參與資源衝突比對。
+`capacity.verified` 是**已核實的總子代理席位上限**，不是剩餘席位，也不是希望派出的數量；`capacity.evidence` 附平台能力或實際查核來源。剩餘席位由總數扣除在途子代理；`main` 與 `resource:<id>` 不佔子代理席位，未知 handle 保守計入。無可核對資料時交監督查能力，不臆造上限。CPU、記憶體、服務與帳號是否適合增派另查實際證據，不把席位上限當作主機承載量；所有在途包仍參與資源衝突比對。 已有暫時節流另記 `capacity.throttle:{limit,reason,evidence,reviewWhen}`：保留原已核實／已授權的限制與重查條件，limit 不大於 verified；派工空位以兩者較小值計算，verified 不隨一次限流改小，不自行新增或放寬數值設定。收包與條件改變時重查。
 
 `packages` 的六個陣列均必填，可為空；每筆有穩定且唯一的 `id`：
 
@@ -72,6 +72,14 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 - ready、inFlight、blocked、returned 的工作包可附 `acceptanceIds:["條件ID"]`，標明它推進哪幾條驗收條件。快照的 `acceptance.items` 中，FAIL／PENDING／INCONCLUSIVE 的條件若沒有任何工作包標到它，且持續 30 分鐘（扣掉電腦睡眠）、執行端已閒置，背景程式的監督時鐘發 `unplanned_criteria` 進度查核原因，附空著的子代理席位數；同一組條件只發一次，只剩等使用者核准或暫停中不發。只能等使用者核准或外部結果的條件，列進 blocked 並標上 acceptanceIds。
 - 開工拆包時，部署腳本、回退步驟、規格草稿、發布說明等準備工作一開始就列為 ready，和測試並行，不留到最後。
 - 同一包重做 2 次仍沒送驗就凍結（recurringRework 的 count 達 2 即送監督）：監督指定新做法或改派其他子代理，不讓它原樣再跑第三次。
+
+## 決策更新與派工對帳
+
+新使用者定案先依原協定登記，不把延展討論當新授權。執行端在新定案、壓縮續接、收包、長測試或等待前，用 `node "<skill>/scripts/dispatch.cjs" reconcile "<RUN>"` 讀精簡對帳：有效契約版本、實際可派包、前置已完成而仍受阻的包、沒有在途或待辦包負責的條件，以及總席位與暫時節流。這些是核對線索；有效成果先沿用，不因列出未分派條件就重做已完成工作。
+
+核對全部剩餘工作、依賴、授權與隔離後，在原有 write／mark／collect／from-wp 命令加 `--reviewed "實際核對依據與結果"`，同一步保存 `planningReview:{basis,reason,at}`；basis 綁定原契約與修訂帳的版本。新修訂沒有這次核對時，背景以 `planning_review` 提醒一次；改時間、planningRevision 或只更新工作包狀態不會自動確認新定案。提醒不凍結其餘已授權工作，也不重問已回答事項。沒有修訂且尚無核對欄位的舊快照保持相容。
+
+受阻包的依賴也從工作包表頭讀入。依賴全部完成時，`dependency_ready_review` 只請監督查證；程式不把 user_action 或外部資料阻塞自動改為 ready。working／waiting 時有未收成果會提醒收包，正在 integrating 則不打斷正常整合。不同頁若只因共用最終目錄而依序，先查能否用同基準的獨立工作複本隔離建置，主線最後整合；真實共享程式、內容前置與互動資源照原規則。
 
 ## 由工作包檔產生快照（2026-10-15 定案）
 

@@ -16,7 +16,8 @@ function prompt(run,event,node=process.execPath){
   const saved=persist(run,event),quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
   return `長任務事件 ${event.id}（${event.kind}${event.reasons?.length?' / '+event.reasons.join(','):''}）。`+
     `先執行 ${[node,path.join(__dirname,'supervise.cjs'),'context',run,event.id].map(quote).join(' ')}。`+
-    `事件 SHA-256：${saved.sha256}。依 context 的既有規則處理此事件；brief 已包含於 context，不重讀歷史或整份契約。`;
+    `事件 SHA-256：${saved.sha256}。依 context 的既有規則處理此事件；brief 已包含於 context，不重讀歷史或整份契約。`+
+    `本輪結束前先正式提交本事件決策；已有答案的部分先解鎖，再處理延展討論。`;
 }
 function summary(event){
   if(!event)return null;

@@ -23,6 +23,9 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},now=
     '- 背景監看：'+(alive?'運作中':'已停止')+'（狀態 '+(state.phase||'—')+(paused?'，使用者暫停中':'')+'）',
     '- 執行對話最後一次交回進度：'+clock(state.lastRealEventAt)+'（'+ago(state.lastRealEventAt,now)+'）',
     '- 等監督處理：'+handling,'- 執行對話權限：'+permission,'- 限速換模型：'+models,'- 平台錯誤：'+failed];
+  const response=state.pending&&state.supervisorWake?.[state.pending.id];
+  if(response?.completionRecovery)lines.push('- 監督決策：上一回合已結束，這個事件仍未結案；'+
+    (response.completionWakeSentAt?'已補送原事件的決策提醒，等待正式提交。':'正在補送原事件的決策提醒。'));
   if(state.instruction){const due=state.instruction.sentAt+state.instruction.deadlineMs*((state.instruction.misses||0)+1);
     lines.push('- 等執行端回應的指示：'+state.instruction.what.slice(0,80)+'（期限 '+clock(due)+'）');}
   // Jay's decisions from the run ledger: the same list the supervisor asks in one go.

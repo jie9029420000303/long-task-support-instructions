@@ -71,7 +71,10 @@ test('only an acknowledged background call wakes once with a locator and no comm
 test('a call finished or rejected before observation is not mistaken for a running test',async()=>{
   for(const is_error of [false,true]){
     const f=fixture();let child;
-    try{writeCall(f,'call-fast','bash /tmp/deploy-gate.sh');writeResult(f,'call-fast',{is_error});child=start(f);await until(()=>read(f.statePath).phase==='watching');await sleep(300);assert.equal(pending(f),null);assert.deepEqual(read(f.statePath).parallelTestCandidates,[]);}
+    try{writeCall(f,'call-fast','bash /tmp/deploy-gate.sh');writeResult(f,'call-fast',{is_error});child=start(f);
+      // A watching process may not have read these rows yet under parallel load; wait for the actual source offset.
+      await until(()=>read(f.statePath).executorOffset>=fs.statSync(f.executorLog).size&&Array.isArray(read(f.statePath).parallelTestCandidates));
+      assert.equal(pending(f),null);assert.deepEqual(read(f.statePath).parallelTestCandidates,[]);}
     finally{if(child)await stop(child);f.done();}
   }
 });

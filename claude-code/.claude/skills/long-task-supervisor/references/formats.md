@@ -16,6 +16,9 @@
 - 文件時間預算（派工快照 `docBudget`）：`{"startedAt":"<ISO 時間>","devMinutes":76,"minutes":114,"basis":"開發 76 分鐘 × 1.5","estimate":[{"item":"說明 .md","minutes":40},{"item":"Archify 流程圖與圖片檢查","minutes":60}]}`。開寫前逐項估時；只算真正在寫文件的時間。
 - 提問 30 分鐘沒人答：可撤回的執行細節照自己的推薦做、事後補報；改驗收、刪除或永久改動既有資料、未授權的付費／帳號密碼／正式部署、改寫 Git 歷史、非測試的正式對外發送不適用，繼續等並先做別的。
 
+- 新定案登記、壓縮續接、收包及等待前，用 `dispatch.cjs reconcile RUN` 核對有效決策、可派包與前置；核對後在原 mark／collect／from-wp 命令加 `--reviewed "核對依據與結果"`。未定案討論不改既有派工原則，真實阻塞只停該動作。
+- `capacity.verified` 記實際總席位；已有節流用 `capacity.throttle:{limit,reason,evidence,reviewWhen}` 另記，沿用限制數字及來源，不自行改設定。
+
 ## 監督
 
 - 處理事件：`node <skill>/supervise.cjs context RUN <事件 ID>`，決策寫到它給的 `decisionPath`；reply／reject 傳訊前先依 runtime 執行只讀 `decision-preflight`，核對同一事件、契約／授權及待送內容，通過後才用原生工具傳送、記回執，再跑 `supervise.cjs decision RUN <決策檔>`。預檢不是平台層傳訊強制閘。

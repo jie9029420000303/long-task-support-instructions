@@ -53,7 +53,9 @@ function call(name,args) {
     // supervisorIdle: the supervisor finished a turn just now and sits idle, as after a dropped queued message.
     const latest={id:activity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:data.supervisorIdle?Math.floor(Date.now()/1000):0,
       items:[...(activity?[{type:'userMessage',id:'human-user-new',text:'Approval granted'}]:[]),{type:'agentMessage',id:activity?'supervisor-new-message':'supervisor-old-message',phase:'final_answer',text:'Supervisor status'}]};
-    return reply({thread:{id:data.supervisorId,...(data.supervisorIdle?{status:{type:'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
+    const closed=data.supervisorCompletedGate&&fs.existsSync(data.supervisorCompletedGate);
+    if(data.supervisorCompletedGate){latest.status=closed?'completed':'inProgress';latest.completedAt=closed?Date.now():null;}
+    return reply({thread:{id:data.supervisorId,...(data.supervisorCompletedGate?{status:{type:closed?'idle':'active'}}:data.supervisorIdle?{status:{type:'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
   }
   if (name==='send_message_to_thread') {
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];

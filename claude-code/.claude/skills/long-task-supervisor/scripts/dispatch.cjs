@@ -2,10 +2,10 @@
 const fs=require('node:fs');
 const contractState=require('./contract-state.cjs');
 const path=require('node:path');
-const {parse}=require('./dispatch-audit.cjs');
+const {parse,planningBasis,planReview}=require('./dispatch-audit.cjs');
 const acceptance=require('./acceptance-audit.cjs');
 const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
-const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [same options]';
+const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [same options]';
 
 // Work-package files are the bookkeeping (Jay 2026-10-15). In GDB v1.2.0 the main line spent 99 minutes and 506 turns
 // on records alone, rewriting snapshot JSON and a generator of its own by hand. Each wp/<id>.md carries one
@@ -61,7 +61,8 @@ function packagesFrom(stateDir,override){
     const record={id:packageId(text,file),...extra,evidence:[file,...(extra.evidence||[])]};
     if(ids.length&&!extra.acceptanceIds)record.acceptanceIds=ids;
     if(['ready','inFlight','blocked'].includes(list)&&!extra.exclusiveResources)record.exclusiveResources=claims(text);
-    if(list==='ready'){if(!extra.dependencies)record.dependencies=listOf((header.match(/依賴\s*[：:]\s*([^；;]*)/)||[])[1]);
+    if(['ready','inFlight','blocked'].includes(list)&&!extra.dependencies)record.dependencies=listOf((header.match(/依賴\s*[：:]\s*([^；;]*)/)||[])[1]);
+    if(list==='ready'){
       if(record.independent===undefined)record.independent=true;if(record.safe===undefined)record.safe=true;}
     if(list==='returned'&&record.integrated===undefined)record.integrated=false;
     if(list==='completed'&&!record.acceptanceIds)record.acceptanceIds=[];
@@ -92,6 +93,11 @@ function checked(run,binding,value){
   else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
   return value;
 }
+function reviewed(value,binding,reason){
+  if(reason!==undefined){if(!reason.trim())throw Error('--reviewed needs the actual reconciliation reason');
+    value.planningReview={basis:planningBasis(binding),reason,at:new Date().toISOString()};}
+  return value;
+}
 let lock;
 function acquire(run){
   if(lock)return;
@@ -116,15 +122,17 @@ const flag=name=>{const at=args.indexOf('--'+name);return at>=0?args[at+1]:undef
 try{
   const absolute=value=>path.isAbsolute(value||'');
   const positional=args.filter((value,at)=>!value.startsWith('--')&&!(at>0&&args[at-1].startsWith('--')));
-  const valid={write:absolute(positional[2]),summary:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
+  const valid={write:absolute(positional[2]),summary:true,reconcile:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
     collect:absolute(positional[2])&&positional[3]&&absolute(positional[4])}[command];
   if(!valid||!absolute(runArg)||(flag('base')!==undefined&&!absolute(flag('base'))))throw Error(USAGE);
   const run=path.resolve(runArg),binding=JSON.parse(fs.readFileSync(path.join(run,'binding.json'),'utf8'));
   if(!binding.dispatchAudit?.enabled&&!fs.existsSync(path.join(run,'DISPATCH_AUDIT')))throw Error('Dispatch auditing is not attached to this run');
   if(command==='summary'){const snapshot=checked(run,binding,JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')));
     console.log(JSON.stringify(acceptance.summarize(run,snapshot.acceptance)));}
-  else if(command==='write'){const value=checked(run,binding,JSON.parse(fs.readFileSync(positional[2],'utf8')));
-    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision}));}
+  else if(command==='reconcile'){const snapshot=checked(run,binding,JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')));
+    console.log(JSON.stringify(planReview(snapshot,binding)));}
+  else if(command==='write'){const value=checked(run,binding,reviewed(JSON.parse(fs.readFileSync(positional[2],'utf8')),binding,flag('reviewed')));
+    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,reconciliation:planReview(value,binding)}));}
   else{
     const stateDir=path.resolve(positional[2]),options={activity:flag('activity'),revision:flag('revision'),base:flag('base')};
     const packageDir=trustedPackageDir(binding,stateDir);
@@ -142,11 +150,11 @@ try{
       override={file:wpFile,state};
     }
     // Validate the whole snapshot before touching the package file, so a rejected change leaves both as they were.
-    const draft=build(run,binding,stateDir,options,override,packageDir);applyAcceptance(draft,updates);
+    const draft=build(run,binding,stateDir,options,override,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
     const value=checked(run,binding,draft);
     if(wpFile){const temporary=wpFile+'.tmp-'+process.pid;fs.writeFileSync(temporary,wpText,{flag:'wx'});fs.renameSync(temporary,wpFile);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
-    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,activity:value.activity,packages:counts,
+    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}

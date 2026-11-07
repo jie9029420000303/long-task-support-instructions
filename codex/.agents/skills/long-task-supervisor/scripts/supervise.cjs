@@ -84,6 +84,7 @@ function status() {
   const parentAlive = runtime ? probe(runtime.pid) : null;
   const outage = fs.existsSync(path.join(run, 'watch-health.json')) ? read(path.join(run, 'watch-health.json')).open || null : null;
   const health = state.appHealth || {};
+  const response=state.pending&&state.supervisorWake?.[state.pending.id];
   return {
     run, executorId: binding.executorId, supervisorId: binding.supervisorId,
     phase: state.phase, active: ['watching', 'awaiting_decision', 'needs_user'].includes(state.phase) ? alive : false,
@@ -91,6 +92,9 @@ function status() {
     reads: state.reads, messages: state.messages.length, acceptedAt: state.acceptedAt || null,
     // An amendment waits for both to be empty (contract-state safePoint).
     pending: state.pending?.id || null, inflight: state.inflight ? { key: state.inflight.key, phase: state.inflight.phase || null } : null,
+    pendingDecision:state.pending?{eventId:state.pending.id,since:state.pending.at||null,
+      finishedWithoutDecision:Boolean(response?.completionRecovery&&!fs.existsSync(require('./decision-commit.cjs').file(run,state.pending.id))),
+      reminderSentAt:response?.completionWakeSentAt?new Date(response.completionWakeSentAt).toISOString():null}:null,
     error: state.error || null,
     watch: { parentAlive, heartbeatAt: runtime?.heartbeatAt || null, lastReadAt: state.lastReadAt || null,
       appHealth: health.failingSince ? { failingSince: health.failingSince, kind: health.kind || null, lastError: health.lastError || null } : null,
@@ -144,6 +148,7 @@ function brief() {
       lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(state.executorLog || pace.sessionFile(binding.executorId))},
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
+    dispatchReconciliation:snapshot?require('./dispatch-audit.cjs').planReview(snapshot,binding):null,
     // Executor events waiting behind the pending one, oldest first; native-watch hands them over one by one.
     eventQueue:(state.eventQueue || []).map(({id, kind, at}) => ({id, kind, at})),
     dispatchCrossChecks:crossChecks,

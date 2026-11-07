@@ -386,14 +386,29 @@ async function pendingDecision() {
   if (!fs.existsSync(file)) {
     await changed(run,()=>fs.existsSync(file));
     const wake=state.supervisorWake[event.id];
-    if(!fs.existsSync(file)&&!fs.existsSync(path.join(run,'STOP'))&&!wake.wakeSentAt&&Date.now()-wake.deliveredAt>=SUPERVISOR_WAKE_MS){
-      const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
+    if(fs.existsSync(file)||fs.existsSync(path.join(run,'STOP'))||isPaused())return;
+    if(!wake.completionWakeSentAt){
+      const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+      const closed=require('./supervisor-response.cjs').closedWithoutDecision(detail,wake.deliveredAt);
+      if(closed&&!wake.completionRecovery){
+        // Persist the key and exact prompt before sending, so a restart reconciles this delivery instead of
+        // inventing another recovery for a newer turn. One completion reminder per unresolved event.
+        wake.completionRecovery={...closed,key:'decision-required-'+event.id,prompt:
+          `監督回合已結束，但事件 ${event.id} 尚未提交決策。先核對 STOP、原事件與既有提交；已授權且有答案的部分先正式提交並確認送達，再處理延展研究。仍須本人決定的部分只登記待決，不凍結其他工作。不要重建或重送業務事件。\n`+reviewPrompt(event)};
+        checkpoint();
+      }
+      if(wake.completionRecovery){
+        await sendAndRead(binding.supervisorId,wake.completionRecovery.prompt,wake.completionRecovery.key);
+        wake.completionWakeSentAt=Date.now();checkpoint();return;
+      }
+      if(!wake.wakeSentAt&&Date.now()-wake.deliveredAt>=SUPERVISOR_WAKE_MS){
       if(assistantMarker(detail)===wake.assistantMarker){
         await sendAndRead(binding.supervisorId,
           `監督喚醒補訊 ${event.id}：既有事件已送達，但尚未偵測到本對話的模型輸出。請處理既有 ${deliveryMarker('review-'+event.id)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
           'wake-review-' + event.id);
         wake.wakeSentAt=Date.now();checkpoint();
       }else{wake.modelStartedAt=Date.now();checkpoint();}
+      }
     }
     return;
   }
@@ -493,6 +508,20 @@ async function pendingDecision() {
   state.phase = 'watching'; checkpoint();
 }
 const isPaused = () => fs.existsSync(path.join(run,'PAUSED.json'));
+// The existing keep-loaded interval also applies while an event waits for a decision. That branch used to
+// continue before the keepalive check, letting a live pending review outlast the App's unload interval.
+async function keepLoaded(){
+  const due=()=>Date.now()-Math.max(state.lastSupervisorActivityAt||0,state.lastKeepaliveAt||0,watchStartedAt)>=KEEPALIVE_MS;
+  if(isPaused()||state.inflight||!due())return false;
+  const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+  const latest=detail.turns?.[0],completed=Number(latest?.completedAt);
+  if(detail.thread?.status?.type==='active'){state.lastSupervisorActivityAt=Date.now();checkpoint();return false;}
+  if(Number.isFinite(completed)&&completed>0){const at=completed<1e12?completed*1000:completed;
+    state.lastSupervisorActivityAt=Math.max(state.lastSupervisorActivityAt||0,Math.min(at,Date.now()));}
+  if(!due()){checkpoint();return false;}
+  state.lastKeepaliveAt=Date.now();state.keepalives=(state.keepalives||0)+1;checkpoint();
+  await sendAndRead(binding.supervisorId,KEEPALIVE_TEXT,'keepalive-'+state.keepalives);return true;
+}
 // Recheck deferred reviews only after reading and queuing any new executor event.
 async function recheckDeferred(){
   if(isPaused())return false;
@@ -609,6 +638,7 @@ async function watch() {
       delete state.appHealth.recoveryNotice; checkpoint();
       continue;
     }
+    if(await keepLoaded())continue;
     if (state.pending) {
       await pendingDecision();
       if (state.phase === 'accepted') break;
@@ -634,12 +664,6 @@ async function watch() {
     }
     const auditEvent=paused?null:dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
-    const hostIdle = Date.now() - Math.max(state.lastSupervisorActivityAt || 0, state.lastKeepaliveAt || 0, watchStartedAt);
-    if (hostIdle >= KEEPALIVE_MS && !state.inflight) {
-      state.lastKeepaliveAt = Date.now(); state.keepalives = (state.keepalives || 0) + 1; checkpoint();
-      await sendAndRead(binding.supervisorId, KEEPALIVE_TEXT, 'keepalive-' + state.keepalives);
-      continue;
-    }
     const response = await waitExecutor();
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
