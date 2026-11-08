@@ -7,11 +7,13 @@ const need=(ok,message)=>{if(!ok)throw Error(message);};
 const text=value=>typeof value==='string'&&value.trim();
 function inside(file,root){const rel=path.relative(root,file);return rel===''||(!rel.startsWith('..'+path.sep)&&rel!=='..'&&!path.isAbsolute(rel));}
 const journal=run=>{const file=path.join(run,'contract-amendments.jsonl');return fs.existsSync(file)?fs.readFileSync(file,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)):[];};
-// No live process may write the run while its contract state is changed or copied.
-function idle(run,names){
+// No live process may write the run while its contract state is changed or copied. self: the PID of a Codex watcher
+// that records an amendment itself (2026-11-09); its own lock is not another writer, every other live owner still is.
+function idle(run,names,self){
   for(const name of names){
     const file=path.join(run,name);if(!fs.existsSync(file))continue;
-    const owner=read(file);let alive=false;try{process.kill(owner.pid,0);alive=true;}catch(error){alive=error.code!=='ESRCH';}
+    const owner=read(file);if(self&&owner.pid===self)continue;
+    let alive=false;try{process.kill(owner.pid,0);alive=true;}catch(error){alive=error.code!=='ESRCH';}
     need(!alive,'Run writer is active: '+name);
   }
 }
@@ -20,11 +22,11 @@ function supervisorOnly(binding){
   const caller=binding.platform==='codex'?process.env.CODEX_THREAD_ID:process.env.CLAUDE_SESSION_ID;
   if(caller)need([binding.supervisorId,binding.toolSessionId].includes(caller),'Only the original supervisor may update this run');
 }
-function safePoint(run,binding){
+function safePoint(run,binding,{self}={}){
   const state=read(path.join(run,'daemon-state.json'));
   need(!fs.existsSync(path.join(run,'STOP'))&&!['accepted','stopped'].includes(state.phase),'Stopped or accepted run cannot be changed');
   need(!state.pending&&!state.inflight,'Finish the pending event and reconcile delivery before updating the run');
-  idle(run,['watcher.lock','dispatch-write.lock']);
+  idle(run,['watcher.lock','dispatch-write.lock'],self);
   supervisorOnly(binding);
 }
 // Jay's words count only from a saved snapshot inside the allowed roots whose hash still matches.
@@ -122,8 +124,8 @@ function startContract(input){
   need(!rebuilt.length,'Contract was rebuilt from effective-contract ('+rebuilt.join(', ')+'); continue the old run with inheritFrom so every user grant keeps its journal');
   return {contract:input.contract,inherited:null};
 }
-function append(run,binding,input){
-  safePoint(run,binding);
+function append(run,binding,input,options={}){
+  safePoint(run,binding,options);
   const contract=base(run,binding),file=path.join(run,'contract-amendments.jsonl');
   effective(run,binding);
   const rows=journal(run);
@@ -157,11 +159,11 @@ function attachAcceptance(run,binding,progress){
   fs.writeFileSync(bindingFile+'.tmp',JSON.stringify(binding,null,2)+'\n');fs.renameSync(bindingFile+'.tmp',bindingFile);
   return {attached:true,revision:progress.revision,items:progress.items.length};
 }
-function update(run,binding,work){
-  safePoint(run,binding);
+function update(run,binding,work,options={}){
+  safePoint(run,binding,options);
   const file=path.join(run,'contract-update.lock');
   fs.writeFileSync(file,JSON.stringify({pid:process.pid,at:new Date().toISOString()})+'\n',{flag:'wx'});
   try{return work();}finally{fs.unlinkSync(file);}
 }
-module.exports={effective,safePoint,supervisorOnly,userSource,journal,inherit,startContract,append:(run,binding,input)=>update(run,binding,()=>append(run,binding,input)),
+module.exports={effective,safePoint,supervisorOnly,userSource,journal,inherit,startContract,append:(run,binding,input,options)=>update(run,binding,()=>append(run,binding,input,options),options),
   attachAcceptance:(run,binding,input)=>update(run,binding,()=>attachAcceptance(run,binding,input))};

@@ -262,6 +262,45 @@ function pendingChange() {
   refreshDashboard(binding);
   return result;
 }
+// A running watcher records the authorization itself (2026-11-09: WEB's supervisor stopped the watcher to record one at
+// 23:14, hit its usage limit six seconds later, and the run stayed unwatched until 01:01). Without a live watcher the
+// amendment is recorded here as before. An authorization that answers pending items closes them with its amendmentId.
+async function amend() {
+  const {binding} = load(), input = read(other);
+  contractState.supervisorOnly(binding);
+  const request = path.join(run, 'amend-request.json');
+  let owner = null; try { owner = read(path.join(run, 'watcher.lock')); } catch {}
+  if (!owner || require('./process-probe.cjs').probe(owner.pid) !== true) {
+    const result = pending.amend(run, binding, input);
+    // A request left by a watcher that ended is this same authorization once it is recorded here.
+    try { if (read(request).input?.id === input.id) fs.rmSync(request, {force:true}); } catch {}
+    refreshDashboard(binding);
+    return result;
+  }
+  const id = require('node:crypto').randomBytes(8).toString('hex');
+  try { fs.writeFileSync(request, JSON.stringify({id, input, caller:process.env.CODEX_THREAD_ID || null, requesterPid:process.pid, at:now()}, null, 2) + '\n', {flag:'wx'}); }
+  catch (error) {
+    need(error.code !== 'EEXIST', 'The watcher has not recorded the previous authorization yet (' + request + '); wait for LONG_TASK_AMEND_RECORDED or LONG_TASK_AMEND_FAILED in this chat, then run amend again');
+    throw error;
+  }
+  const results = path.join(run, 'amend-results'), resultFile = path.join(results, id + '.json');
+  const state = read(path.join(run, 'daemon-state.json'));
+  // The watcher records only at a safe point; an event waiting for this supervisor's ruling or a delivery in hand first.
+  if (!state.pending && !state.inflight) {
+    const end = Date.now() + (Number(process.env.LONG_TASK_AMEND_WAIT_MS) || 90000);
+    while (Date.now() < end && !fs.existsSync(resultFile)) await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  // Leaving without a result: the watcher reports it in this chat. Checked once more after the mark, so none is lost.
+  if (!fs.existsSync(resultFile)) { fs.mkdirSync(results, {recursive:true}); fs.writeFileSync(path.join(results, id + '.requester-left'), JSON.stringify({id, at:now()}) + '\n'); }
+  if (fs.existsSync(resultFile)) {
+    const saved = read(resultFile);
+    refreshDashboard(read(path.join(run, 'binding.json')));
+    need(saved.ok, saved.error);
+    return {...saved.result, recordedBy:'watcher', requestId:id};
+  }
+  return {queued:true, requestId:id, request, waitingFor:state.pending ? 'event ' + state.pending.id : state.inflight ? 'delivery ' + state.inflight.key : 'watcher',
+    next:'背景監看會在安全點登記，完成後在本對話送 LONG_TASK_AMEND_RECORDED（失敗送 LONG_TASK_AMEND_FAILED）；不要停監看、不要重跑 amend。'};
+}
 // After a reply listed every open item: stamp them, only when the keys are exactly all open ones.
 function shown() {
   const {binding} = load();
@@ -311,8 +350,7 @@ function dispatchPreflight() {
 }
 try {
   const result = command === 'attach-acceptance' ? contractState.attachAcceptance(run,load().binding,read(other))
-    // An authorization that answers pending items closes them with its amendmentId in the same step (pendingKeys).
-    : command === 'amend' ? (() => { const {binding} = load(); const result = pending.amend(run, binding, read(other)); refreshDashboard(binding); return result; })()
+    : command === 'amend' ? amend()
     : command === 'effective-contract' ? contractState.effective(run,load().binding)
     : command === 'init' ? init()
     : command === 'status' ? status()

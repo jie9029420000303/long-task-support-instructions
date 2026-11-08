@@ -18,6 +18,10 @@ const binding = read(path.join(run, 'binding.json'));
 const statePath = path.join(run, 'daemon-state.json');
 const contractPath = path.join(run, 'contract.json');
 const lockPath = path.join(run, 'watcher.lock');
+// Authorizations reach the effective contract through this running watcher (2026-11-09: WEB's supervisor stopped the
+// watcher to record one at 23:14, hit its usage limit six seconds later, and the run stayed unwatched until 01:01).
+// supervise.cjs amend leaves the request here; the watcher records it at a safe point and writes the result.
+const AMEND_REQUEST = path.join(run, 'amend-request.json'), AMEND_RESULTS = path.join(run, 'amend-results');
 let state = read(statePath), ownsLock = false, lastMentionCheck = 0;
 const client = createClient({nodePath:process.execPath});
 const meta = {'x-codex-turn-metadata':{thread_id:binding.supervisorId,turn_id:binding.callerTurnId}};
@@ -143,12 +147,13 @@ function executorTurnEnded(){
 // The 3 minutes between reads still end at once on STOP, and the dashboard stays current.
 async function idle(ms){
   const end=Date.now()+ms;
-  while(Date.now()<end&&!fs.existsSync(path.join(run,'STOP'))){
+  while(Date.now()<end&&!fs.existsSync(path.join(run,'STOP'))&&!amendWaiting()){
     writeDashboard();
     const changed=await executionWake.waitChange(Math.min(IDLE_SLICE_MS,end-Date.now()),()=>{
+      if(amendWaiting())return {ready:[{kind:'amend'}],files:[]};
       const result=completionNow();
       return isPaused()||state.executorStatus==='active'||state.executionWakeDeferred?{...result,ready:[]}:result;
-    },[path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),path.join(run,'STOP')]);
+    },[path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),path.join(run,'STOP'),AMEND_REQUEST]);
     if(changed==='completion')return;
     // Give the App a moment to report the turn its rollout just closed.
     if(executorTurnEnded()){turnEndReads=TURN_END_REREADS;await sleep(1000);return;}
@@ -224,6 +229,9 @@ function markSent(target, key) {
   checkpoint();
 }
 function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
+// Every message to the executor ends with the push to dispatch at full speed (Jay 2026-11-09). Only the sent text carries
+// it: receipts, saved deliveries and their hashes keep the bare prompt, so a delivery saved before an upgrade still matches.
+function outgoing(target,prompt){return target===binding.executorId&&!isPaused()?prompt+'\n\n'+executionWake.EXECUTOR_PUSH:prompt;}
 function assistantMarker(detail) {
   for (const turn of detail.turns || []) {
     const message=(turn.items || []).filter(item=>item.type==='agentMessage').at(-1);
@@ -288,7 +296,7 @@ async function reconcile(delivery) {
   if (await provenLost(delivery)) {
     (state.lostDeliveries ||= []).push({target:delivery.target,key:delivery.key,sentAt:delivery.at,resentAt:now()});
     delivery.resentAt = now();
-    delivery.sent = await rpc('send_message_to_thread',{threadId:delivery.target,prompt:deliveryMarker(delivery.key)+'\n'+delivery.prompt});
+    delivery.sent = await rpc('send_message_to_thread',{threadId:delivery.target,prompt:deliveryMarker(delivery.key)+'\n'+outgoing(delivery.target,delivery.prompt)});
     delivery.at = now(); delivery.phase = 'resent-awaiting-readback';
     checkpoint();
     return reconcile(delivery);
@@ -324,7 +332,7 @@ async function sendAndRead(target, prompt, key, options = {}) {
   // If the process exits after send but before its receipt, never issue a second send.
   const restore = options.model ? null : restoreFor(target);
   const model = options.model || restore?.original, thinking = options.model ? options.thinking : restore?.effort;
-  const sent = await rpc('send_message_to_thread',{threadId:target,prompt:deliveryMarker(key)+'\n'+prompt,
+  const sent = await rpc('send_message_to_thread',{threadId:target,prompt:deliveryMarker(key)+'\n'+outgoing(target,prompt),
     ...(model?{model}:{}),...(model&&thinking?{thinking}:{})});
   if (restore) restore.restored = now();
   state.inflight.sent = sent;
@@ -619,27 +627,105 @@ function writeDashboard() {
   } catch (error) { state.dashboardError = {message:error.message,at:now()}; }
 }
 const clockText = ms => new Date(ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+// supervise.cjs amend, run while this watcher is alive, leaves Jay's authorization in amend-request.json. The watcher records
+// it at a safe point (no event waiting for a ruling, no unconfirmed delivery) under its own lock and keeps watching. The
+// requester reads amend-results/<id>.json; when it has already returned, the supervisor gets one message instead.
+let amendRetryAt=0,amendUnreadableSince=0;
+const amendWaiting=()=>Date.now()>=amendRetryAt&&!state.pending&&!state.inflight&&fs.existsSync(AMEND_REQUEST);
+async function handleAmendRequest(){
+  if(!amendWaiting())return false;
+  let request=null,error=null,result=null;
+  try{request=read(AMEND_REQUEST);amendUnreadableSince=0;}
+  catch(caught){
+    // A request still being written is read again shortly; one that stays unreadable is answered as failed.
+    amendUnreadableSince||=Date.now();
+    if(Date.now()-amendUnreadableSince<30000){amendRetryAt=Date.now()+1000;return false;}
+    amendUnreadableSince=0;error='Unreadable amend request: '+caught.message;
+  }
+  const id=/^[a-f0-9]{16,64}$/.test(request?.id||'')?request.id:null;
+  if(!error&&!id)error='Amend request without a valid id';
+  if(!error){
+    checkpoint();
+    const caller=process.env.CODEX_THREAD_ID;
+    try{
+      if(request.caller)process.env.CODEX_THREAD_ID=request.caller;else delete process.env.CODEX_THREAD_ID;
+      result=require('./pending-decisions.cjs').amend(run,binding,request.input,{self:process.pid});
+    }catch(caught){
+      // The executor's dispatch writer holds its lock only for a moment: record once it is done.
+      if(/Run writer is active: dispatch-write\.lock/.test(caught.message)){amendRetryAt=Date.now()+5000;return false;}
+      error=caught.message;
+    }finally{if(caller===undefined)delete process.env.CODEX_THREAD_ID;else process.env.CODEX_THREAD_ID=caller;}
+  }
+  if(result){
+    // The amendment rewrote binding.json (contractStateSha256): read it back into the binding this process uses.
+    const fresh=read(path.join(run,'binding.json'));
+    for(const key of Object.keys(binding))if(!(key in fresh))delete binding[key];
+    Object.assign(binding,fresh);checkSources();
+  }
+  const record={id,ok:!error,...(error?{error}:{result}),recordedBy:'watcher',watcherPid:process.pid,at:now()};
+  fs.mkdirSync(AMEND_RESULTS,{recursive:true});
+  if(id)save(path.join(AMEND_RESULTS,id+'.json'),record);
+  // Decided right after the result is written: a requester still polling reads it and reports it itself.
+  const left=!id||!request.requesterPid||fs.existsSync(path.join(AMEND_RESULTS,id+'.requester-left'))||
+    require('./process-probe.cjs').probe(request.requesterPid)!==true;
+  fs.rmSync(AMEND_REQUEST,{force:true});
+  (state.amendRequests||=[]).push({id,ok:!error,at:record.at});
+  if(state.amendRequests.length>20)state.amendRequests.splice(0,state.amendRequests.length-20);
+  checkpoint();lastDashboardAt=0;writeDashboard();
+  if(left){
+    const tag=require('node:crypto').createHash('sha256').update(JSON.stringify(record)).digest('hex').slice(0,8);
+    await sendAndRead(binding.supervisorId,error
+      ?'LONG_TASK_AMEND_FAILED：授權登記'+(id?' '+id:'')+' 沒有完成：'+String(error).slice(0,300)+'。背景監看照常運作；修正 amend 輸入後重跑 supervise.cjs amend，不要停監看。'
+      :'LONG_TASK_AMEND_RECORDED：授權登記 '+id+' 已由背景監看寫入有效契約（'+(request.input?.id||'')+'），監看照常運作。不要重做登記或停監看；依授權流程把它交給執行主線，並核對待決帳。',
+      'amend-'+(error?'failed':'recorded')+'-'+(id||'unreadable')+'-'+tag);
+  }
+  return true;
+}
 // Rate limits (Jay 2026-10-11, default on): a refused supervisor or executor is told to continue on the next model
 // in anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol; a refused subagent makes the executor re-dispatch on the next one.
 async function handleRateLimits() {
   if (binding.modelFallback === false) return;
-  const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path}));
+  const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path,file:item.sourceFile}));
   const hits = fallback.scan(state,[{role:'supervisor',threadId:binding.supervisorId},{role:'executor',threadId:binding.executorId},...subagents]);
   for (const hit of hits) {
     const key = fallback.keyOf(hit.model), known = state.rateLimits?.[key];
-    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,...fallback.resetFor(key,hit.at)};
+    // The refused thread's own rollout names the reset; its file is kept so later looks can still find that error.
+    const files = [hit.file || pace.sessionFile(hit.threadId)].filter(Boolean);
+    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...fallback.resetFor(key,hit.at,files)};
+    else known.files = [...new Set([...(known.files || []),...files])];
     const queue = state.switchQueue ||= [];
     if (!queue.some(item => item.threadId === hit.threadId && item.model === hit.model)) queue.push(hit);
   }
-  if (hits.length) { fallback.publish(run,state); checkpoint(); }
+  // Limits saved before 2026-11-09 have no files: use the rollouts of the threads switched for them.
+  for (const [key,item] of Object.entries(state.rateLimits || {})) if (!item.files)
+    item.files = Object.entries(state.modelSwitch || {}).filter(([,record]) => fallback.keyOf(record.original) === key)
+      .map(([threadId]) => pace.sessionFile(threadId)).filter(Boolean);
+  const refined = fallback.refine(state), back = fallback.recovered(state);
+  if (hits.length || refined || back) { fallback.publish(run,state); checkpoint(); }
   while (state.switchQueue?.length && !state.inflight) {
     const hit = state.switchQueue[0], record = state.modelSwitch?.[hit.threadId];
+    if (record && !record.restored && record.current !== hit.model) {
+      // A refusal for a model this thread already left is stale. A thread that runs the refused model again (switched
+      // back by hand or by a restore) was refused anew and is switched again.
+      if (fallback.settingsOf(hit.threadId)?.model !== hit.model) { state.switchQueue.shift(); checkpoint(); continue; }
+      record.restored = now(); record.restoredBy = 'thread-runs-refused-model';
+    }
     const original = record && !record.restored ? record.original : hit.model;
-    // A refusal for a model this thread already left is stale.
-    if (record && !record.restored && record.current !== hit.model) { state.switchQueue.shift(); checkpoint(); continue; }
     const target = fallback.next(original,hit.model,hit.role,state);
     const until = state.rateLimits?.[fallback.keyOf(original)]?.until || Date.now() + fallback.FALLBACK_MS;
     state.switchQueue.shift();
+    // The reset already passed (a watcher started after it reads the refusal): no switch, and a stopped chat continues
+    // on its original model at once instead of waiting for its next event.
+    if (until <= Date.now()) {
+      const effort = record?.effort || (fallback.settingsOf(hit.threadId) || {}).effort;
+      if (record && !record.restored) { record.restored = now(); record.restoredBy = 'reset-passed'; }
+      checkpoint();
+      if (hit.role !== 'subagent') await sendAndRead(hit.threadId,
+        '額度限速：' + hit.model + ' 於 ' + clockText(hit.at) + ' 被拒；' + original + ' 的恢復時間 ' + clockText(until) + ' 已過，本對話用 ' + original +
+        ' 從中斷處接續原本的工作，不需重述或重做已完成的部分。',
+        'rate-resume-' + hit.threadId.slice(0,8) + '-' + hit.at,{model:original,thinking:effort});
+      continue;
+    }
     if (!target) { state.rateLimitedAll = {threadId:hit.threadId,role:hit.role,model:hit.model,error:hit.error,at:now()}; checkpoint(); continue; }
     if (hit.role === 'subagent') {
       const notice = 'subagent:' + fallback.keyOf(hit.model) + '@' + state.rateLimits[fallback.keyOf(hit.model)].since;
@@ -658,6 +744,18 @@ async function handleRateLimits() {
       '額度限速：' + hit.model + ' 被拒（' + hit.error + '）。本對話自此改用 ' + target + '，預計 ' + clockText(until) + ' 換回 ' + original +
       '。請從中斷處接續原本的工作，不需重述或重做已完成的部分。',
       'model-switch-' + hit.threadId.slice(0,8) + '-' + state.modelSwitches,{model:target,thinking:settings.effort});
+  }
+  // A supervisor moved for a limit gets its model back once the limit ends, without waiting for its next event
+  // (2026-11-09: WEB's supervisor, working again after 23:40, stayed on the paid key). A busy supervisor is left alone.
+  const restore = restoreFor(binding.supervisorId);
+  if (restore && !state.pending && !state.inflight) {
+    if (fallback.settingsOf(binding.supervisorId)?.model === restore.original) { restore.restored = now(); restore.restoredBy = 'already-on-original'; checkpoint(); }
+    else {
+      const detail = unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200}));
+      if (detail.thread?.status?.type !== 'active') await sendAndRead(binding.supervisorId,
+        'LONG_TASK_MODEL_RESTORED：額度已恢復，本對話換回 ' + restore.original + '。不用處理，用一句話結束回合即可。',
+        'model-restore-' + binding.supervisorId.slice(0,8) + '-' + restore.since);
+    }
   }
 }
 async function watch() {
@@ -697,6 +795,7 @@ async function watch() {
   checkpoint();
   while (!fs.existsSync(path.join(run,'STOP'))) {
     await handleRateLimits();
+    if (await handleAmendRequest()) continue;
     writeDashboard();
     // The supervisor saw an outage warning: one short note once reads work again, so it does not act on a stale alarm.
     if (state.appHealth?.recoveryNotice && !state.inflight && !state.pending) {

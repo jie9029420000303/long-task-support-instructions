@@ -59,11 +59,13 @@ function call(name,args) {
     return reply({thread:{id:data.supervisorId,...(data.supervisorCompletedGate?{status:{type:closed?'idle':'active'}}:data.supervisorIdle?{status:{type:'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
   }
   if (name==='send_message_to_thread') {
+    // Model overrides are recorded beside the prompts so a rate-limit switch and its restore can be checked. They are
+    // written first and whole: a test that sees the prompt count grow must find that call's arguments too (2026-11-09:
+    // under full parallel load a test read the second prompt before its arguments existed).
+    const argsFile=sentFile+'.args.json',calls=fs.existsSync(argsFile)?JSON.parse(fs.readFileSync(argsFile,'utf8')):[];
+    calls.push({threadId:args.threadId,model:args.model||null,thinking:args.thinking||null,prompt:args.prompt});fs.writeFileSync(argsFile+'.tmp',JSON.stringify(calls));fs.renameSync(argsFile+'.tmp',argsFile);
     const sends=fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[];
     sends.push(args.prompt);fs.writeFileSync(sentFile+'.tmp',JSON.stringify(sends));fs.renameSync(sentFile+'.tmp',sentFile);
-    // Model overrides are recorded beside the prompts so a rate-limit switch and its restore can be checked.
-    const argsFile=sentFile+'.args.json',calls=fs.existsSync(argsFile)?JSON.parse(fs.readFileSync(argsFile,'utf8')):[];
-    calls.push({threadId:args.threadId,model:args.model||null,thinking:args.thinking||null,prompt:args.prompt});fs.writeFileSync(argsFile,JSON.stringify(calls));
     return reply({threadId:args.threadId});
   }
   throw Error('Unexpected tool '+name);

@@ -47,6 +47,8 @@ test('a result appearing early returns through the original executor Bash when o
   const pending=api.watch(f.run);setTimeout(()=>save(f.result,{exit:1}),30);const result=await pending;
   assert.equal(result.fallback,true);assert.equal(result.id,item.id);assert.equal(output.length,1);
   assert.match(output[0],new RegExp('LONG_TASK_EXECUTION_RESUME:'+item.id));
+  // Jay 2026-11-09: every message to the executor pushes it to dispatch subagents at full speed, this background resume too.
+  assert.ok(output[0].endsWith(require('../claude-code/.claude/skills/long-task-supervisor/scripts/execution-wake.cjs').EXECUTOR_PUSH));
   const state=read(api.paths(f.run,item.id).state);assert.ok(state.readyAt);assert.ok(state.fallbackAt);
   assert.equal(fs.existsSync(api.paths(f.run,item.id).receipt),false,'transport must not manufacture a model-read receipt');
   assert.equal(api.receipt(f.run,item.id).executorId,f.executorId);

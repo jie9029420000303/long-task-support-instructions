@@ -114,4 +114,7 @@ function facts(inspection){
 }
 // Added to a progress continuation that declared a wait: progress never waits, so the executor learns the one form that does.
 const PROGRESS_WAIT_NOTE='\nprogress 一律立即續接，不會等待 waitMinutes；回合一結束主線就停工。下一步及等待期間可並行的工作現在就做；只有剩下的工作全部都必須等背景結果時，才以 waiting 結束（附 waitMinutes 與可觀察的 waitFor），由監督確認。';
-module.exports={allowed,inspect,waitChange,prompt,facts,PROGRESS_WAIT_NOTE};
+// Every message the supervisor side sends the executor ends with this push (Jay 2026-11-09: 「我希望監督或背景程序可以每次
+// 傳送訊息都積極Push主線「積極派出子代理」全面加速」). It restates the dispatch rule and grants no new authority.
+const EXECUTOR_PUSH='全面加速：除非本訊息要求暫停或停止，請依積極派工（可派即派、不留空席），把已就緒、彼此獨立、資源不衝突的工作立刻派子代理並行，用滿可用席位；主線專注整合、收回成果與裁決。授權、範圍與資源隔離規則照舊。';
+module.exports={allowed,inspect,waitChange,prompt,facts,PROGRESS_WAIT_NOTE,EXECUTOR_PUSH};

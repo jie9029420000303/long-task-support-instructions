@@ -124,11 +124,11 @@ function apply(run,change,{binding,checkQuote,at=new Date().toISOString()}={}){
 // 2026-10-15 IA closed 10 items with Jay's words and recorded the same answers as two amendments; every
 // answer.amendmentId stayed empty. The keys are checked before the journal is written and never stored in it, so a
 // retry of a recorded amendment closes only what is still open.
-function amend(run,binding,input,{at}={}){
+function amend(run,binding,input,{at,self}={}){
   need(input&&typeof input==='object'&&!Array.isArray(input),'An amendment is one JSON object');
   const {pendingKeys,...row}=input;
   need(pendingKeys===undefined||Array.isArray(pendingKeys),'pendingKeys lists the open pending items this amendment answers');
-  if(!pendingKeys?.length)return contractState.append(run,binding,row);
+  if(!pendingKeys?.length)return contractState.append(run,binding,row,{self});
   need(binding,'Amendments need the run binding');
   contractState.supervisorOnly(binding);
   const byKey=new Map(load(run).items.map(item=>[item.key,item])),seen=new Set(),answer=[],already=[];
@@ -142,7 +142,7 @@ function amend(run,binding,input,{at}={}){
     need(isOpen(item),key+' is already '+item.status+'; an amendment closes only open items');
     answer.push({key,amendmentId:row.id,...(text(choice)?{choice}:{})});
   }
-  const recorded=contractState.append(run,binding,row);
+  const recorded=contractState.append(run,binding,row,{self});
   const closed=answer.length?apply(run,{answer},{binding,at}):{answered:[],...view(run,{},load(run))};
   return {...recorded,pending:{...closed,alreadyAnswered:already}};
 }
