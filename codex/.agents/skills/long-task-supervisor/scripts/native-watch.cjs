@@ -108,25 +108,55 @@ async function rpc(name, args, timeout = 75000) {
 // ends the App answers it with "Codex app tool request failed" (App log 2026-10-28 23:11, the call handed to a hidden
 // window), and when that error text changed the run reconnected for 9 hours. read_thread keeps working between turns.
 async function waitExecutor() {
+  markExecutorLog();
   const detail=unpack(await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
   need(detail.thread?.id===binding.executorId,'Bound executor missing from read');
   return {polls:[{thread:detail.thread,...supervisorPollFromThread(detail)}]};
+}
+// The executor's own rollout records every finished turn. Seeing one ends the wait between reads, so a stopped main
+// line reaches its next owner within seconds; the 3-minute read stays the fallback (Jay 2026-11-08: 主線寫明下一步就直接續做，
+// 其他所有停下一律立刻交監督; WEB 20:57: 180 of a 659-second stop were only the read interval). Only new bytes are scanned.
+const TURN_END=/"type":"(?:task_complete|turn_aborted)"/,TURN_SCAN_MAX=16*1024*1024;
+const IDLE_SLICE_MS=Number(process.env.CODEX_IDLE_SLICE_MS)||5000;
+// The App can show the finished turn a moment after its rollout closes it: read again every 2 seconds, up to 5 times,
+// with the clock checked each time, so a turn the platform failed also reaches the supervisor at once.
+const TURN_END_REREADS=5,TURN_END_REREAD_MS=Number(process.env.CODEX_TURN_END_REREAD_MS)||2000;
+let turnLog=null,turnOffset=0,turnTail='',turnEndReads=0;
+function markExecutorLog(){
+  turnLog=state.executorLog||null;turnOffset=0;turnTail='';
+  if(turnLog)try{turnOffset=fs.statSync(turnLog).size;}catch{turnLog=null;}
+}
+function executorTurnEnded(){
+  if(!state.executorLog)return false;
+  if(turnLog!==state.executorLog){markExecutorLog();return false;}
+  let size;try{size=fs.statSync(turnLog).size;}catch{return false;}
+  if(size<turnOffset){markExecutorLog();return false;}
+  if(size===turnOffset)return false;
+  const start=Math.max(turnOffset,size-TURN_SCAN_MAX),buffer=Buffer.alloc(size-start);let fd;
+  try{fd=fs.openSync(turnLog,'r');fs.readSync(fd,buffer,0,buffer.length,start);}catch{return false;}
+  finally{if(fd!==undefined)fs.closeSync(fd);}
+  turnOffset=size;
+  const text=turnTail+buffer.toString('utf8'),ended=TURN_END.test(text);
+  turnTail=ended?'':text.slice(-64);
+  return ended;
 }
 // The 3 minutes between reads still end at once on STOP, and the dashboard stays current.
 async function idle(ms){
   const end=Date.now()+ms;
   while(Date.now()<end&&!fs.existsSync(path.join(run,'STOP'))){
     writeDashboard();
-    const changed=await executionWake.waitChange(Math.min(5000,end-Date.now()),()=>{
+    const changed=await executionWake.waitChange(Math.min(IDLE_SLICE_MS,end-Date.now()),()=>{
       const result=completionNow();
       return isPaused()||state.executorStatus==='active'||state.executionWakeDeferred?{...result,ready:[]}:result;
     },[path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),path.join(run,'STOP')]);
     if(changed==='completion')return;
+    // Give the App a moment to report the turn its rollout just closed.
+    if(executorTurnEnded()){turnEndReads=TURN_END_REREADS;await sleep(1000);return;}
   }
 }
-function completionNow(){
+function completionNow(wait=state.progressWait){
   let snapshot=null;try{snapshot=read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{}
-  return executionWake.inspect(binding,state.progressWait,snapshot,pace.agentRuns(binding),state.executionWakeReceipts||{});
+  return executionWake.inspect(binding,wait,snapshot,pace.agentRuns(binding),state.executionWakeReceipts||{});
 }
 async function resumeExecution(inspection){
   if(isPaused()||!state.progressWait&&!inspection.ready.length)return false;
@@ -678,6 +708,11 @@ async function watch() {
     }
     if(await keepLoaded())continue;
     if (state.pending) {
+      // While the supervisor reviews a declared wait, its result still goes straight to the executor; the ruling lands after.
+      if(state.pending.kind==='waiting'&&state.progressWait?.event?.id===state.pending.id&&!isPaused()){
+        const completion=completionNow();
+        if(!completion.blocked&&completion.ready.length&&await resumeExecution(completion))continue;
+      }
       await pendingDecision();
       if (state.phase === 'accepted') break;
       continue;
@@ -720,6 +755,7 @@ async function watch() {
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
     if (turn?.status === 'completed' && !state.seen.includes(turn.id) && !(state.eventQueue || []).some(item => item.id === turn.id)) {
+      turnEndReads=0;
       await queueSkipped(turn.id);
       state.lastRealEventAt=Date.now();
       if(state.progressWait)state.progressWait=null;
@@ -729,24 +765,24 @@ async function watch() {
         if(waitingHasBlocker(event.text))event.kind='blocked';
         else if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';
         else{
+          // Every declared wait goes to the supervisor at once (Jay 2026-11-08): the executor's own claim no longer keeps
+          // both chats idle. Its sources stay registered, so after the ruling a result still goes straight to the executor.
           state.progressWait={event,deadline:Date.now()+event.waitMinutes*WAIT_MINUTE_MS};
-          state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
+          event.completion=executionWake.facts(completionNow());
         }
       }
       if (event.kind === 'progress') {
         const repeated = state.lastProgressAction === event.nextAction ? (state.repeatedProgress || 0) + 1 : 1;
         state.lastProgressAction = event.nextAction;
         state.repeatedProgress = repeated;
-        if (repeated < 2 && event.waitMinutes!==null) {
-          if(!(event.waitMinutes>=1&&event.waitMinutes<=120))event.kind='protocol_error';
-          else{
-            state.progressWait={event,deadline:Date.now()+event.waitMinutes*WAIT_MINUTE_MS};
-            state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
-          }
-        } else if (repeated < 2) {
+        // A named next step resumes the executor at once (Jay 2026-11-08); waitMinutes or waitFor no longer turn
+        // progress into a silent wait (WEB 20:40 and 20:57: progress + waitMinutes 10 with work to do left both chats
+        // idle 8-9 minutes). A real wait is reported as waiting and reaches the supervisor.
+        if (repeated < 2) {
           if(paused){state.progressWait={event,deadline:Date.now(),immediate:true};state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;}
           await sendAndRead(binding.executorId,
-            `長任務續接 ${event.id}：執行你剛才明列的下一步「${event.nextAction}」。沿用原契約及已完成工作；只在下一個真實事件送驗或回報，不重述整份 prompt。`,
+            `長任務續接 ${event.id}：執行你剛才明列的下一步「${event.nextAction}」。沿用原契約及已完成工作；只在下一個真實事件送驗或回報，不重述整份 prompt。`+
+            (event.waitMinutes!==null||Array.isArray(event.waitFor)?executionWake.PROGRESS_WAIT_NOTE:''),
             'continue-' + event.id);
           state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
         }
@@ -764,7 +800,7 @@ async function watch() {
       }
       // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
       // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.
-      const hadCheckedWait=Boolean(state.checkedWait),found=paused?null:clock.check(run,binding,state),silent=paused?false:progressDue(state);
+      const hadCheckedWait=Boolean(state.checkedWait),found=paused?null:clock.check(run,binding,state,turnEndReads>0),silent=paused?false:progressDue(state);
       const allLimited=state.rateLimitedAll&&!state.rateLimitedAll.announced?state.rateLimitedAll:null;
       if(allLimited)allLimited.announced=now();
       if(silent||found||allLimited){
@@ -779,7 +815,7 @@ async function watch() {
         continue;
       }
       checkpoint();
-      await idle(WATCH_IDLE_SLEEP_MS);
+      await idle(turnEndReads>0?(turnEndReads--,TURN_END_REREAD_MS):WATCH_IDLE_SLEEP_MS);
     }
   }
   if (state.phase !== 'accepted') {state.phase = 'stopped';state.stoppedAt = now();checkpoint();}

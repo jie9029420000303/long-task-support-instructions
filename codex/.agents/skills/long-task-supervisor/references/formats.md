@@ -6,10 +6,10 @@
 
 - 最終回覆最後一行放事件（一次一行）：
   - `LONG_TASK_EVENT {"kind":"progress","nextAction":"下一步具體工作"}`
-  - `LONG_TASK_EVENT {"kind":"waiting","nextAction":"結果出來後要做的事","waitMinutes":15}`（1～120 分鐘）
+  - `LONG_TASK_EVENT {"kind":"waiting","nextAction":"結果出來後要做的事","waitMinutes":15}`（1～120 分鐘；剩下的工作全部都要等背景結果時才用，會立刻交監督審查）
   - `LONG_TASK_EVENT {"kind":"question"}`、`LONG_TASK_EVENT {"kind":"blocked"}`
   - 送驗：`node <skill>/candidate.cjs <新版清單絕對路徑> <候選檔>...`，把它印出的 submission 行原樣貼上。
-- 一般結果與可自行處理的失敗先回執行主線，完成通知＋定期讀狀態補漏並存，倒數不是最早續接時間；依[執行層完成通知](execution-wake.md)用工作包資源或 `waitFor:[{"ledger":"/允許根目錄/resources.json","id":"r1"}]` 登記。
+- `progress` 一律立即續接，附 `waitMinutes` 也不等待。一般結果與可自行處理的失敗先回執行主線，完成通知＋定期讀狀態補漏並存，倒數不是最早續接時間；依[執行層完成通知](execution-wake.md)用工作包資源或 `waitFor:[{"ledger":"/允許根目錄/resources.json","id":"r1"}]` 登記。
 
 - 工作包檔 `<狀態目錄>/wp/<id>.md`：`[工作包] id=WP-X；依賴：WP-Y`、`[狀態] {"list":"inFlight","handle":"agent:<id>","baseline":{"minutes":20,"startedAt":"<ISO 時間>","basis":"pace.cjs 估算"}}`、`[驗收條目] A1、A2`、`[共用資源] 帳號:… 瀏覽器:…`。文件工作包在狀態加 `"doc":true`；主線自己做的包 `handle` 寫 `main`。
 - 改狀態：`node <skill>/dispatch.cjs mark RUN <狀態目錄> WP-X '<狀態 JSON>'`。

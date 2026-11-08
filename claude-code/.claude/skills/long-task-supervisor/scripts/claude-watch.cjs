@@ -302,10 +302,11 @@ function supervisorClock(){
   // transcript is read again on every tick.
   if(state.rateLimit&&!limited){const {rearmedAt:_rearmed,...limit}=state.rateLimit;rateReset={...limit,since:new Date(limit.since).toISOString(),until:new Date(limit.until).toISOString()};
     handledUpTo(limit.until);state.rateLimit=null;state.lastRealEventAt=Date.now();}
-  // A platform error the executor has not left for 2 minutes, while no rate limit runs and Jay's approval is not
-  // what the run waits on: once per error, with the error text.
-  const failed=state.platformError;
-  const platformError=failed&&!limited&&!waitingUser&&awake(Math.max(failed.since,failed.rearmedAt||0))>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?
+  // A platform error the executor has not left, while no rate limit runs and Jay's approval is not what the run waits
+  // on: once per error, with the error text. It goes at once (Jay 2026-11-08: every stop except a named next step goes
+  // to the supervisor); a rate limit that names no reset keeps 2 minutes, as a queued notice or model switch resumes it.
+  const failed=state.platformError,rateLimitText=failed&&(failed.status===429||/usage.?limit|rate.?limit/i.test(String(failed.kind||'')+' '+String(failed.text||'')));
+  const platformError=failed&&!limited&&!waitingUser&&awake(Math.max(failed.since,failed.rearmedAt||0))>=(rateLimitText?PLATFORM_ERROR_MS:0)&&once('platform_error:'+failed.since)?
     {who:failed.who,since:new Date(failed.since).toISOString(),kind:failed.kind,status:failed.status,text:failed.text,textSha256:failed.textSha256,source:failed.source}:null;
   // The hour counts from the executor's last event or the supervisor's ruling on one, whichever is later (lastDecisionAt).
   const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awake(lastEvent)>=NO_EVENT_REVIEW_MS;
@@ -452,18 +453,19 @@ async function watch(){
       else{
         const minutes=event.waitMinutes;
         if(!(minutes>0&&minutes<=120))event.kind='protocol_error';
-        else{state.progressWait={event,deadline:writtenAt+minutes*60000};state.seen.push(event.id);checkpoint();return false;}
+        // Every declared wait goes to the supervisor at once (Jay 2026-11-08: 主線寫明下一步就直接續做，其他所有停下一律
+        // 立刻交監督). The wait stays registered: the executor's own watcher still resumes it when the result lands.
+        else{state.progressWait={event,deadline:writtenAt+minutes*60000};
+          event.completion=executionWake.facts(executionWake.inspect(binding,state.progressWait,snapshotNow(),pace.agentRuns(binding)));}
       }
     }
     if(event.kind==='progress'){
       state.repeatedProgress=state.lastProgressAction===event.nextAction?(state.repeatedProgress||0)+1:1;
       state.lastProgressAction=event.nextAction;
       if(state.repeatedProgress>=2)event.kind='stalled';
+      // A registered next step resumes through the executor's own watcher at once. An unregistered progress has no
+      // direct path, so it reaches the supervisor like any other stop, with or without waitMinutes (Jay 2026-11-08).
       else if(event.executionWatch){state.progressWait={event,deadline:writtenAt};state.seen.push(event.id);checkpoint();return false;}
-      else if(event.waitMinutes!==null){
-        if(!(event.waitMinutes>0&&event.waitMinutes<=120)){event.kind='protocol_error';}
-        else{state.progressWait={event,deadline:writtenAt+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
-      }
     }
     state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
     wake(event);

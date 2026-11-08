@@ -68,6 +68,45 @@ const sends=f=>fs.existsSync(f.sent)?read(f.sent):[];
 function decide(f,event,decision){const file=path.join(f.run,'draft-decision-'+event.id+'.json');save(file,{eventId:event.id,...decision});require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',f.run,file],{env:f.env,encoding:'utf8'});return file;}
 function withHome(home,fn){const old=process.env.CODEX_HOME;process.env.CODEX_HOME=home;try{return fn();}finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;}}
 
+// Jay 2026-11-08 (WEB 20:57: 180 of a 659-second stop were only the 3-minute read): the executor's rollout closing a turn
+// ends the wait between reads, so the stop reaches its next owner within seconds; the periodic read stays the fallback.
+async function idleWatcher(f){
+  Object.assign(f.env,{CODEX_WATCH_IDLE_SLEEP_MS:'60000',CODEX_IDLE_SLICE_MS:'50'});f.start();
+  await until(()=>read(f.statePath).executorLog===f.executorLog&&read(f.statePath).reads>=1);
+  await new Promise(resolve=>setTimeout(resolve,400));
+}
+test('a finished executor turn is read within seconds instead of at the next periodic read',async()=>{
+  const f=fixture({final:'Continue.\nLONG_TASK_EVENT {"kind":"progress","nextAction":"Run the next check"}'}),gate=path.join(f.root,'turn-ended');
+  save(f.mock,{...read(f.mock),noTurnUntil:gate});
+  try{
+    await idleWatcher(f);assert.equal(sends(f).length,0);
+    const ended=Date.now();fs.writeFileSync(gate,'done');
+    line(f.executorLog,{timestamp:new Date().toISOString(),type:'event_msg',payload:{type:'task_complete',turn_id:'executor-turn-1'}});
+    await until(()=>sends(f).length===1,8000);
+    assert.ok(Date.now()-ended<4000,'read within seconds, not after the 60-second periodic read');
+    assert.match(sends(f)[0],/LONG_TASK_DELIVERY:continue-executor-turn-1/);
+  }finally{await f.stop();}
+});
+test('a turn the platform failed reaches the supervisor within seconds; a usage limit keeps its 2 minutes',async()=>{
+  for(const [info,wakes] of [[{response_stream_disconnected:{http_status_code:null}},true],[{usage_limit_exceeded:{http_status_code:429}},false]]){
+    const f=fixture();
+    try{
+      await idleWatcher(f);const failed=Date.now();
+      line(f.executorLog,{timestamp:new Date().toISOString(),type:'event_msg',payload:{type:'task_complete',
+        error:{message:'stream disconnected before completion',codex_error_info:info}}});
+      if(wakes){
+        await until(()=>pending(f)?.reasons?.includes('platform_error'),8000);
+        assert.ok(Date.now()-failed<4000,'a failed turn reaches the supervisor at once, not after 2 minutes or the next read');
+        assert.equal(pending(f).platformError.kind,'response_stream_disconnected');
+      }else{
+        await new Promise(resolve=>setTimeout(resolve,2500));
+        assert.equal(pending(f),null,'a usage limit waits 2 minutes for the model switch to resume the executor');
+        assert.equal(read(f.statePath).platformError.kind,'usage_limit_exceeded');
+      }
+    }finally{await f.stop();}
+  }
+});
+
 function parallelGate(f){
   const command='bash scripts/deploy-gate.sh',now=new Date().toISOString();
   line(f.executorLog,{timestamp:now,type:'response_item',payload:{type:'custom_tool_call',name:'exec',call_id:'test-gate',

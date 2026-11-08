@@ -328,6 +328,21 @@ test('a rate limit with no reset is reported as a platform error instead of an i
   finally{await stopWatch(child);f.done();}
 });
 
+// Jay 2026-11-08: every stop without a named next step reaches the supervisor at once, so a platform error that just ended
+// the turn no longer waits 2 minutes. A rate limit without a reset keeps them: a queued notice or model switch resumes it.
+test('a platform error that just ended the turn wakes the supervisor at once; a rate limit without reset keeps 2 minutes',async()=>{
+  for(const [error,status,wakes] of [['server_error',500,true],['rate_limit',429,false]]){
+    const f=fixture({quietMinutes:0,lastReviewMinutesAgo:0});
+    line(f.executorLog,{type:'assistant',isApiErrorMessage:true,error,apiErrorStatus:status,timestamp:new Date().toISOString(),
+      message:{id:'err-'+error,model:'<synthetic>',stop_reason:'stop_sequence',content:[{type:'text',text:'Synthetic '+error}]}});
+    const child=start(f);
+    try{
+      if(wakes){await until(()=>pending(f)?.reasons?.includes('platform_error'));assert.equal(pending(f).platformError.kind,'server_error');}
+      else{await watching(f);await sleep(800);assert.equal(pending(f),null,'a rate limit without reset waits 2 minutes for a model switch or queued notice');}
+    }finally{await stopWatch(child);f.done();}
+  }
+});
+
 test('a scheduled turn in a supervised chat is reported so the automation can be paused',async()=>{
   const f=fixture({quietMinutes:0});
   line(f.executorLog,{type:'user',turnOrigin:'scheduled',promptSource:'system',isMeta:true,message:{content:'Scheduled check: read the run and nudge'}});

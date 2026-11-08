@@ -103,4 +103,15 @@ function prompt(event,inspection){
     (facts.length?'完成來源：'+JSON.stringify(facts)+'\n':'')+
     `下一步：${event.nextAction}。沿用原契約、授權與有效證據；完成通知不代表成功或驗收通過。一般結果與可自行處理的失敗由執行主線收回、查核、修正並續派；需裁決、未授權動作、獨立驗收或無法自行恢復的阻塞才交監督。`;
 }
-module.exports={allowed,inspect,waitChange,prompt};
+// What the supervisor needs to judge a declared wait, read by code: which completion sources still run, which finished
+// (and whether that result already went to the executor), and what could not be read. Locations only, never contents.
+function facts(inspection){
+  const fresh=new Set((inspection.ready||[]).map(source=>source.key)),sources=inspection.sources||[];
+  const item=source=>({kind:source.kind,packageId:source.packageId||null,id:source.id||null,path:source.path||null,
+    ...(source.finishedAt?{finishedAt:source.finishedAt}:{}),...(source.ready&&!fresh.has(source.key)?{delivered:true}:{})});
+  return {observable:Boolean(inspection.observable),running:sources.filter(source=>!source.ready).map(item),
+    finished:sources.filter(source=>source.ready).map(item),issues:inspection.issues||[],...(inspection.blocked?{blocked:true}:{})};
+}
+// Added to a progress continuation that declared a wait: progress never waits, so the executor learns the one form that does.
+const PROGRESS_WAIT_NOTE='\nprogress 一律立即續接，不會等待 waitMinutes；回合一結束主線就停工。下一步及等待期間可並行的工作現在就做；只有剩下的工作全部都必須等背景結果時，才以 waiting 結束（附 waitMinutes 與可觀察的 waitFor），由監督確認。';
+module.exports={allowed,inspect,waitChange,prompt,facts,PROGRESS_WAIT_NOTE};

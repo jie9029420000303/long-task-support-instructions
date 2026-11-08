@@ -11,7 +11,7 @@
 3. `watcherAlive` 為false才在本執行對話用背景Bash啟動回傳的 `watchArgv`。一個run只掛一個執行層監看；不要從其他對話借通道或重複啟動。沒有其他可做工作時才結束回合。
 4. 收到 `LONG_TASK_EXECUTION_RESUME:<UUID>`，先讀同run的 `execution-waits/state-<UUID>.json`，以提示內的參數陣列執行 `execution-watch.cjs receipt RUN UUID` 留收件證據，再讀原始結果與續做。重複提示先查收件及目前工作包；已接手不再做第二次。收件不是成功、收包或驗收通過。
 
-單純因回合邊界需要續做時可登記 `kind:"progress"` 與具體 `nextAction`，不拿等待子代理當理由停止其他可做工作。問題、阻塞及送驗照原本的handoff流程，不透過本機制繞過監督判斷。
+單純因回合邊界需要續做時可登記 `kind:"progress"` 與具體 `nextAction`，不拿等待子代理當理由停止其他可做工作。沒登記的 `progress` 與所有 `waiting` 都會立刻交監督（使用者 2026-11-08）；`waiting` 事件附看得到的完成來源，登記的來源有結果仍由本機制直接回執行主線。問題、阻塞及送驗照原本的handoff流程，不透過本機制繞過監督判斷。
 
 ## 雙機制與原生邊界
 

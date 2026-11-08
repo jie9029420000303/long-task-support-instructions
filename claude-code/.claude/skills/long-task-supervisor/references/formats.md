@@ -4,7 +4,7 @@
 
 ## 執行端
 
-- 最終回覆最後一行放事件（一次一行）：`LONG_TASK_EVENT {"kind":"progress","nextAction":"下一步具體工作"}`，或 `LONG_TASK_EVENT {"kind":"waiting","nextAction":"結果出來後要做的事","waitMinutes":15}`（1～120 分鐘）。
+- 最終回覆最後一行放事件（一次一行）：`LONG_TASK_EVENT {"kind":"progress","nextAction":"下一步具體工作"}`，或 `LONG_TASK_EVENT {"kind":"waiting","nextAction":"結果出來後要做的事","waitMinutes":15}`（1～120 分鐘；剩下的工作全部都要等背景結果時才用，會立刻交監督審查）。寫明下一步要直接續做時，先在原執行 Bash register `{"kind":"progress","nextAction":…}` 並用回傳的 event；沒登記的 `progress` 會立刻交監督。
 - 提問、阻塞、送驗走原生交接：存 `EVENT.json`（`id` UUID、`kind`、完整正文 `text`，送驗另含 `candidate.cjs` 給的 `revision`、`manifest`）→ `node <skill>/handoff.cjs prepare RUN <EVENT.json>` → 回 `ready:true` 或 `queued:true` 時用原生傳訊送 `targetDesktopId`、`message` 一次 → `handoff.cjs receipt RUN <收據檔>` → 最終回覆加 `finalEventLine`。
 - 送驗清單：`node <skill>/candidate.cjs <新版清單絕對路徑> <候選檔>...`。
 - 一般結果與可自行處理的失敗先回執行主線，完成通知＋定期讀狀態補漏並存，倒數不是最早續接時間；依[執行層完成通知](execution-wake.md)登記工作包資源或 `waitFor:[{"ledger":"/允許根目錄/resources.json","id":"r1"}]`。在原執行 Bash 跑 `node <skill>/execution-watch.cjs register RUN <等待輸入JSON>`，只在 watcherAlive=false 時背景啟動回傳的 watchArgv；最終事件使用回傳的 event。收到 `LONG_TASK_EXECUTION_RESUME:<UUID>` 先讀 state 檔、跑 `execution-watch.cjs receipt RUN UUID`，再核對原始結果與續做。

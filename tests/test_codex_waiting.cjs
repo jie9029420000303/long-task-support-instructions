@@ -33,38 +33,64 @@ function setup(final,extraEnv={},extraFixture={}){
   return {root,run,sent,fixture,child,stderr:()=>stderr};
 }
 async function stop(f){f.child.kill('SIGTERM');await new Promise(resolve=>f.child.once('exit',resolve));fs.rmSync(f.root,{recursive:true,force:true});}
+const executorCalls=f=>fs.existsSync(f.sent+'.args.json')?read(f.sent+'.args.json').filter(call=>call.threadId==='executor-qa'):[];
 
-for(const [label,event] of [
-  ['waiting',{kind:'waiting',nextAction:'Read the background result',waitMinutes:1}],
-  ['progress with waitMinutes',{kind:'progress',nextAction:'Read the background result',waitMinutes:1}],
-])test(label+' without an observable source resumes its executor once at the fallback time',async()=>{
-  const f=setup('Background command is running.\nLONG_TASK_EVENT '+JSON.stringify(event));
+// Jay 2026-11-08: 主線寫明下一步就直接續做，其他所有停下一律立刻交監督. A declared wait used to keep both chats idle until
+// its timer ran out (WEB 20:40 and 20:57: 8 and 9 minutes with nobody working); now the supervisor sees it at once.
+test('a declared wait reaches the supervisor at once with what the background program can observe',async()=>{
+  const f=setup('Background command is running.\nLONG_TASK_EVENT '+JSON.stringify({kind:'waiting',nextAction:'Read the background result',waitMinutes:1}));
   try{
-    await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).progressWait));
-    assert.equal(fs.existsSync(f.sent),false,'declared wait must not immediately send a continuation');
     await until(()=>fs.existsSync(f.sent)&&read(f.sent).length===1);
-    const state=read(path.join(f.run,'daemon-state.json'));
-    await until(()=>read(path.join(f.run,'daemon-state.json')).progressWait===null);
-    assert.equal(state.pending,null);
-    assert.equal(read(f.sent)[0].includes('LONG_TASK_DELIVERY:continue-executor-turn-1'),true);
-    assert.equal(read(f.sent+'.args.json')[0].threadId,'executor-qa','an ordinary wait must not create a supervisor model round');
+    const call=read(f.sent+'.args.json')[0],state=read(path.join(f.run,'daemon-state.json'));
+    assert.equal(call.threadId,'supervisor-qa','a declared wait is a stop, and every stop without a named next step goes to the supervisor');
+    assert.match(call.prompt,/LONG_TASK_DELIVERY:review-executor-turn-1/);
+    assert.equal(state.pending.kind,'waiting');
+    assert.equal(state.pending.completion.observable,false,'the supervisor learns that nothing observable would end this wait');
+    assert.equal(state.progressWait.event.id,'executor-turn-1','the wait stays registered for its result');
+    await new Promise(resolve=>setTimeout(resolve,300));
+    assert.deepEqual(executorCalls(f),[],'while the supervisor reviews, only a real result goes to the executor');
   }finally{await stop(f);}
   assert.doesNotMatch(f.stderr(),/Error:|Delivery uncertain|protocol_error/);
 });
 
-test('a completed result resumes the executor before the timer and both paths deliver it only once',async()=>{
+test('progress that names a next step resumes the executor at once even with waitMinutes and a running waitFor (WEB 20:57)',async()=>{
+  // WEB 2026-11-08 20:57: progress + waitMinutes 10 + waitFor r1, while preparing the next diff could run beside the test.
+  const f=setup(root=>{
+    const ledger=path.join(root,'resources.json');
+    save(ledger,{resources:[{kind:'process',id:'r1',wp:'WP-1',start:new Date().toISOString()}]});
+    return 'r1 is running.\nLONG_TASK_EVENT '+JSON.stringify({kind:'progress',nextAction:'Prepare the next diff while r1 runs',waitMinutes:10,waitFor:[{ledger,id:'r1'}]});
+  },{CODEX_WAIT_MINUTE_MS:'60000'});
+  try{
+    await until(()=>fs.existsSync(f.sent)&&read(f.sent).length===1);
+    const call=read(f.sent+'.args.json')[0],state=read(path.join(f.run,'daemon-state.json'));
+    assert.equal(call.threadId,'executor-qa','a named next step goes straight back to the executor');
+    assert.match(call.prompt,/LONG_TASK_DELIVERY:continue-executor-turn-1/);
+    assert.match(call.prompt,/progress 一律立即續接/,'the executor learns that progress never waits');
+    assert.equal(state.pending,null);
+    assert.ok(!state.progressWait,'progress registers no silent wait');
+    await new Promise(resolve=>setTimeout(resolve,200));
+    assert.equal(read(f.sent).length,1,'no supervisor round for a named next step');
+  }finally{await stop(f);}
+  assert.doesNotMatch(f.stderr(),/Error:|Delivery uncertain|protocol_error/);
+});
+
+test('a completed result resumes the executor while the supervisor still reviews the wait, and only once',async()=>{
   const f=setup(root=>'A test is running.\nLONG_TASK_EVENT '+JSON.stringify({kind:'waiting',nextAction:'Collect and inspect the test result',waitMinutes:30,
     waitFor:[{path:path.join(root,'result.json'),sha256:null}]}));
   try{
-    await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).progressWait));
+    await until(()=>fs.existsSync(f.sent)&&read(f.sent).length===1);
+    assert.equal(read(f.sent+'.args.json')[0].threadId,'supervisor-qa','the declared wait reaches the supervisor first');
     const deadline=read(path.join(f.run,'daemon-state.json')).progressWait.deadline;
     save(path.join(f.root,'result.json'),{exit:1});
-    await until(()=>fs.existsSync(f.sent)&&read(f.sent).length===1);
+    await until(()=>read(f.sent).length===2);
     assert.ok(Date.now()<deadline,'completion must not wait for the old countdown');
-    assert.equal(read(f.sent+'.args.json')[0].threadId,'executor-qa');
+    const call=read(f.sent+'.args.json')[1];
+    assert.equal(call.threadId,'executor-qa','the result goes straight to the executor, not through the supervisor');
+    assert.match(call.prompt,/LONG_TASK_DELIVERY:continue-executor-turn-1/);
+    await until(()=>read(path.join(f.run,'daemon-state.json')).progressWait===null);
     await new Promise(resolve=>setTimeout(resolve,180));
-    assert.equal(read(f.sent).length,1,'the periodic path must share the completion receipt');
-    assert.equal(read(path.join(f.run,'daemon-state.json')).pending,null);
+    assert.equal(read(f.sent).length,2,'the periodic path must share the completion receipt');
+    assert.equal(read(path.join(f.run,'daemon-state.json')).pending.kind,'waiting','the supervisor ruling still lands afterwards');
   }finally{await stop(f);}
   assert.doesNotMatch(f.stderr(),/Error:|Delivery uncertain|protocol_error/);
 });
@@ -75,7 +101,7 @@ for(const marker of ['STOP','PAUSED.json'])test(marker+' prevents an execution c
   try{
     await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).progressWait));
     fs.writeFileSync(path.join(f.run,marker),marker==='PAUSED.json'?'{}':'stop\n');save(path.join(f.root,'result.json'),{exit:0});
-    await new Promise(resolve=>setTimeout(resolve,200));assert.equal(fs.existsSync(f.sent),false);
+    await new Promise(resolve=>setTimeout(resolve,200));assert.deepEqual(executorCalls(f),[]);
   }finally{
     if(f.child.exitCode===null)await stop(f);else fs.rmSync(f.root,{recursive:true,force:true});
   }
@@ -118,10 +144,9 @@ test('completion from a different executor snapshot stays blocked until ownershi
   try{
     await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).progressWait));
     save(path.join(f.run,'dispatch.json'),{executorId:'different-executor',packages:{inFlight:[]}});save(path.join(f.root,'result.json'),{exit:0});
-    await new Promise(r=>setTimeout(r,120));assert.equal(fs.existsSync(f.sent),false);
+    await new Promise(r=>setTimeout(r,120));assert.deepEqual(executorCalls(f),[]);
     save(path.join(f.run,'dispatch.json'),{executorId:'executor-qa',packages:{inFlight:[]}});
-    await until(()=>fs.existsSync(f.sent)&&read(f.sent).length===1);
-    assert.equal(read(f.sent+'.args.json')[0].threadId,'executor-qa');
+    await until(()=>executorCalls(f).length===1);
   }finally{await stop(f);}
 });
 
@@ -132,7 +157,7 @@ test('a mismatched readback identity cannot authorize an execution continuation'
     await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).progressWait));
     fs.writeFileSync(path.join(f.root,'bad-read'),'bad');save(path.join(f.root,'result.json'),{exit:0});
     await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).error));
-    assert.equal(fs.existsSync(f.sent),false);
+    assert.deepEqual(executorCalls(f),[]);
   }finally{if(f.child.exitCode===null&&f.child.signalCode===null)await stop(f);else fs.rmSync(f.root,{recursive:true,force:true});}
 });
 

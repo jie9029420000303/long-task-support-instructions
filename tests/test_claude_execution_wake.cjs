@@ -1,6 +1,6 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto'),net=require('node:net');
 const api=require('../claude-code/.claude/skills/long-task-supervisor/scripts/execution-watch.cjs');
-const {spawn}=require('node:child_process');
+const {spawn,execFileSync}=require('node:child_process');
 const save=(p,v)=>fs.writeFileSync(p,JSON.stringify(v)+'\n');
 const read=p=>JSON.parse(fs.readFileSync(p,'utf8'));
 async function until(check,ms=6000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(r=>setTimeout(r,20));}throw Error('Timed out');}
@@ -93,26 +93,58 @@ function supervisorWatcher(f,event){
  return child;
 }
 async function stopChild(child){if(child.exitCode!==null||child.signalCode!==null)return;const done=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');await done;}
+// The supervisor's observe ruling through the real decision command, then its watcher armed again as context says.
+function observeAndRearm(f,eventId){
+ const draft=path.join(f.root,'decision-'+eventId+'.json'),env={...process.env,CLAUDE_SESSION_ID:f.supervisorId,CLAUDE_CONFIG_DIR:path.join(f.root,'config')};
+ save(draft,{eventId,disposition:'observe',reason:'The declared wait is reasonable; its result returns to the main line.'});
+ execFileSync(process.execPath,[path.resolve(__dirname,'../claude-code/.claude/skills/long-task-supervisor/scripts/supervise.cjs'),'decision',f.run,draft],{env,stdio:'pipe'});
+ const child=spawn(process.execPath,[path.resolve(__dirname,'../claude-code/.claude/skills/long-task-supervisor/scripts/claude-watch.cjs'),f.run],{
+  env:{...env,CLAUDE_WATCH_SETTLE_MS:'20'},stdio:['ignore','pipe','pipe']});
+ child.out='';child.err='';child.stdout.on('data',b=>child.out+=b);child.stderr.on('data',b=>child.err+=b);return child;
+}
+const exited=child=>child.exitCode!==null||child.signalCode!==null;
 
-test('a failed test delivered to its execution-owned inbox does not take an ordinary detour through the supervisor',async t=>{
+test('a declared wait reaches the supervisor once; its failed test then returns through the execution inbox without a second detour',async t=>{
  const f=fixture(t),s=await inbox(t);process.env.CLAUDE_CODE_MESSAGING_SOCKET=s.file;process.env.CLAUDE_CODE_MESSAGING_TOKEN='mock';
- const item=api.register(f.run,{...f.input,waitMinutes:.001}),worker=api.watch(f.run),child=supervisorWatcher(f,item.event);
+ const item=api.register(f.run,{...f.input,waitMinutes:.001}),worker=api.watch(f.run);let child=supervisorWatcher(f,item.event);
  try{
-  await until(()=>read(path.join(f.run,'daemon-state.json')).progressWait?.event.executionWatch===item.id);
+  // Jay 2026-11-08: every stop without a named next step reaches the supervisor at once, with what can be observed.
+  await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.kind==='waiting');
+  const declared=read(path.join(f.run,'daemon-state.json')).pending;
+  assert.equal(declared.executionWatch,item.id);assert.equal(declared.completion.observable,true);
+  assert.equal(declared.completion.running.length,1);
+  await until(()=>exited(child));assert.equal((child.out.match(/LONG_TASK_WAKE/g)||[]).length,1);
   save(f.result,{exit:1});await until(()=>s.messages.length===1);
-  await new Promise(r=>setTimeout(r,150));
+  child=observeAndRearm(f,declared.id);
+  await until(()=>read(path.join(f.run,'daemon-state.json')).phase==='watching');
+  await new Promise(r=>setTimeout(r,600));
   assert.equal(read(path.join(f.run,'daemon-state.json')).pending,null,'ordinary completion stays in the execution layer after the old timer expires');
   assert.doesNotMatch(child.out,/LONG_TASK_WAKE/);assert.equal(child.err,'');
   api.receipt(f.run,item.id);
  }finally{fs.writeFileSync(path.join(f.run,'STOP'),'stop\n');await worker;await stopChild(child);}
 });
 
-test('a missing execution-native watcher is a recoverable delivery fault for the periodic supervisor',async t=>{
- const f=fixture(t),item=api.register(f.run,f.input),child=supervisorWatcher(f,item.event);
+test('a missing execution-native watcher is a recoverable delivery fault for the periodic supervisor after it rules on the wait',async t=>{
+ const f=fixture(t),item=api.register(f.run,f.input);let child=supervisorWatcher(f,item.event);
  try{
+  await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.kind==='waiting');
+  await until(()=>exited(child));
+  child=observeAndRearm(f,read(path.join(f.run,'daemon-state.json')).pending.id);
   await until(()=>read(path.join(f.run,'daemon-state.json')).pending?.deliveryRecovery);
   const pending=read(path.join(f.run,'daemon-state.json')).pending;
   assert.equal(pending.kind,'continue');assert.match(pending.text,/原生續接需要恢復/);
   assert.equal(child.err,'');
  }finally{await stopChild(child);}
+});
+
+test('a registered next step resumes through the executor own watcher without a supervisor round',async t=>{
+ const f=fixture(t),s=await inbox(t);process.env.CLAUDE_CODE_MESSAGING_SOCKET=s.file;process.env.CLAUDE_CODE_MESSAGING_TOKEN='mock';
+ const item=api.register(f.run,{kind:'progress',nextAction:'Run the next check'}),worker=api.watch(f.run),child=supervisorWatcher(f,item.event);
+ try{
+  await until(()=>s.messages.length===1);
+  await until(()=>read(path.join(f.run,'daemon-state.json')).progressWait?.event.executionWatch===item.id);
+  await new Promise(r=>setTimeout(r,150));
+  assert.equal(read(path.join(f.run,'daemon-state.json')).pending,null,'a named next step stays in the execution layer');
+  assert.doesNotMatch(child.out,/LONG_TASK_WAKE/);assert.equal(child.err,'');
+ }finally{fs.writeFileSync(path.join(f.run,'STOP'),'stop\n');await worker;await stopChild(child);}
 });

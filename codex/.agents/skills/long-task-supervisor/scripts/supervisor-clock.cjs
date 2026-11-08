@@ -217,8 +217,9 @@ function awakeSince(state,from,nowMs=Date.now()){
   return nowMs-from-slept;
 }
 let lastClockAt=0;
-function check(run,binding,state){
-  if(Date.now()-lastClockAt<60000)return null;
+// force: the executor's turn just ended, so a failed turn is read now instead of up to a minute later.
+function check(run,binding,state,force=false){
+  if(!force&&Date.now()-lastClockAt<60000)return null;
   lastClockAt=Date.now();
   migrateFailedCommands(state);
   readExecutor(state,binding);
@@ -316,10 +317,12 @@ function check(run,binding,state){
   }
   const loggedOut=login.due(state,run)||[];
   // A turn the platform ended (Jay 2026-10-14) stays open until the executor's own rows show work after it
-  // (trackTools); 2 minutes awake without that wakes the supervisor once with the error text, to resume the executor
-  // or tell Jay what to do. While Jay's approval is the checked wait, another failing turn behind it is not news.
-  const failed=state.platformError;
-  const platformError=failed&&!waitingUser&&awakeSince(state,failed.since)>=PLATFORM_ERROR_MS&&once('platform_error:'+failed.since)?{...failed,since:new Date(failed.since).toISOString()}:null;
+  // (trackTools). It wakes the supervisor once with the error text, to resume the executor or tell Jay what to do: at
+  // once (Jay 2026-11-08: every stop except a named next step goes to the supervisor), except that a rate limit keeps
+  // 2 minutes for the model switch to resume it, since a shared limit would refuse the supervisor's turn too.
+  // While Jay's approval is the checked wait, another failing turn behind it is not news.
+  const failed=state.platformError,rateLimit=failed&&(/usage_limit|rate_limit/i.test(failed.kind||'')||failed.status===429||/rate.?limit/i.test(failed.text||''));
+  const platformError=failed&&!waitingUser&&awakeSince(state,failed.since)>=(rateLimit?PLATFORM_ERROR_MS:0)&&once('platform_error:'+failed.since)?{...failed,since:new Date(failed.since).toISOString()}:null;
   // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time): one wake at half to see
   // whether round trips eat the time, one when spent to put the status and options to Jay. A new budget re-arms both.
   // Only time spent writing documents counts (Jay 2026-10-29), not the wall clock since the budget started.

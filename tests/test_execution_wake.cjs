@@ -13,6 +13,19 @@ test('a running test does not become ready merely because its declared wait expi
   const f=fixture(t);f.wait.deadline=Date.now()-60000;
   const r=f.inspect();assert.equal(r.observable,true);assert.equal(r.ready.length,0);
 });
+test('the supervisor reviewing a wait sees which sources run, which finished and whether a result already went back',t=>{
+  const f=fixture(t);let facts=wake.facts(f.inspect());
+  assert.equal(facts.observable,true);assert.deepEqual(facts.finished,[]);
+  assert.deepEqual(facts.running,[{kind:'resource',packageId:'WP-TEST',id:'r1',path:f.ledger}]);
+  f.save([{...f.resource,stopped_at:new Date().toISOString(),note:'exit 1; secret-value-not-for-the-supervisor'}]);
+  const r=f.inspect();facts=wake.facts(r);
+  assert.equal(facts.running.length,0);assert.equal(facts.finished.length,1);assert.ok(facts.finished[0].finishedAt);
+  assert.equal(facts.finished[0].delivered,undefined);
+  facts=wake.facts(f.inspect({[r.ready[0].key]:{deliveredAt:new Date().toISOString()}}));
+  assert.equal(facts.finished[0].delivered,true,'a result already sent to the executor is marked, so the supervisor does not resend it');
+  assert.doesNotMatch(JSON.stringify(facts),/secret-value-not-for-the-supervisor/,'locations only, never contents');
+  assert.deepEqual(wake.facts(wake.inspect(f.binding,{event:{id:'w',nextAction:'Read'}},null,[])),{observable:false,running:[],finished:[],issues:[]});
+});
 test('a finished process is ready before its estimated waiting time; failure is still an execution result',t=>{
   const f=fixture(t);f.wait.deadline=Date.now()+20*60000;
   f.save([{...f.resource,stopped_at:new Date().toISOString(),note:'exit 1; secret-value-not-for-the-message'}]);

@@ -230,8 +230,12 @@ test('the same next action reported twice is treated as stalled',async()=>{
     await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
     final('Waiting.\nLONG_TASK_EVENT {"kind":"progress","nextAction":"Wait for both test lines","waitMinutes":20}','m1');
     line(f.executorLog,{type:'user',message:{content:'next turn'}});
-    await new Promise(resolve=>setTimeout(resolve,400));
-    assert.equal(pending(f),null,'the first report is a declared wait');
+    // An unregistered progress reaches the supervisor at once (Jay 2026-11-08); its observe ruling re-arms the watcher.
+    await until(()=>pending(f)?.kind==='progress');
+    if(child.exitCode===null&&child.signalCode===null)await new Promise(resolve=>child.once('exit',resolve));
+    const draft=path.join(f.root,'decision-first.json');
+    save(draft,{eventId:pending(f).id,disposition:'observe',reason:'The executor continues on its own.'});command(f,'decision',draft);
+    child=start(f);await until(()=>JSON.parse(fs.readFileSync(f.statePath)).phase==='watching');
     final('Still waiting.\nLONG_TASK_EVENT {"kind":"progress","nextAction":"Wait for both test lines","waitMinutes":20}','m2');
     line(f.executorLog,{type:'user',message:{content:'next turn'}});
     await until(()=>pending(f)?.kind==='stalled');

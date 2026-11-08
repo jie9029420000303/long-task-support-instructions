@@ -104,8 +104,9 @@ test('earlier turn text cannot make a thinking row swallow the real final questi
   }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('replayed progress uses the original reply time instead of extending its deadline',async()=>{
-  // A desktop supervisor can reconnect after a missed background wake; old waits must already be due.
+test('replayed unregistered progress reaches the supervisor at once instead of waiting out its declared minutes',async()=>{
+  // A desktop supervisor can reconnect after a missed background wake. An unregistered progress has no direct path back to
+  // a Claude executor, so it goes to the supervisor at once, whatever its waitMinutes (Jay 2026-11-08).
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'claude-replayed-wait-'));
   const project=path.join(root,'claude-config','projects','qa');fs.mkdirSync(project,{recursive:true});
   const source=path.join(root,'source.md');fs.writeFileSync(source,'Criterion\n');
@@ -125,15 +126,15 @@ test('replayed progress uses the original reply time instead of extending its de
   const writtenAt=new Date(Date.now()-120000).toISOString(),id=crypto.randomUUID();
   line(executorLog,{type:'assistant',uuid:id,timestamp:writtenAt,message:{id:'msg_old_progress',
     stop_reason:'end_turn',content:[{type:'text',text:'Background work still running.\n'+
-      'LONG_TASK_EVENT {"kind":"progress","nextAction":"Check the job","waitMinutes":1}'}]}});
+      'LONG_TASK_EVENT {"kind":"progress","nextAction":"Check the job","waitMinutes":60}'}]}});
   const child=spawn(process.execPath,[path.join(scripts,'claude-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});
   let errors='';child.stderr.on('data',chunk=>errors+=chunk);
   try{
-    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.kind==='continue');
+    await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).pending?.kind==='progress');
     const state=JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json')));
     assert.equal(state.pending.id,id);
     assert.equal(state.pending.nextAction,'Check the job');
-    assert.deepEqual(state.seen,[id]);
+    assert.ok(!state.progressWait,'no silent wait is registered for an unregistered progress');
     assert.equal(errors,'');
   }finally{child.kill('SIGTERM');fs.rmSync(root,{recursive:true,force:true});}
 });
