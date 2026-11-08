@@ -43,7 +43,7 @@ LONG_TASK_EVENT {"kind":"waiting","nextAction":"正在等待的背景工作與�
 LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
 ```
 
-若工作正在執行而回合尚未結束，背景監看保持安靜。若完成回合仍有可執行工作，`progress` 附下一步，監督用桌面原生跨對話傳訊送一則短續接。純背景等待可用 `waiting`，或相容的 `progress` 加 `waitMinutes`（1～120）：分鐘數用 `scripts/pace.cjs` 依等待中工作包的剩餘 AI 時程基準算出，不憑人類開發經驗填；宣告的等待不會暫停監督自己的進度時鐘，也不補發保活續接；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。
+若工作正在執行而回合尚未結束，背景監看保持安靜。一般完成或仍有可執行工作的 `progress`，由執行主線依[執行層原生續接](execution-wake.md)在自己的 Bash 先 register 等待輸入、需要時掛唯一背景 watcher，最終回覆用 register 回傳的 `event`。子代理成果、測試／CI 一般結果及可自行處理的失敗先回原執行主線；監督不代轉每次完成，只在通知缺失或未接手時依既有查核恢復。純背景等待可用 `waiting`，或相容的 `progress` 加 `waitMinutes`（1～120）：分鐘數用 `scripts/pace.cjs` 依等待中工作包的剩餘 AI 時程基準算出，不憑人類開發經驗填；完成來源使用工作包資源或 `waitFor`，檔案通知與定期讀狀態共用去重及收件；有結果可提前回執行主線，可觀察的工作仍在跑時不單因到期叫 AI。宣告的等待不會暫停監督自己的進度時鐘，也不補發保活續接；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。
 
 reply／reject 在呼叫桌面原生傳訊前先執行 `node <skill>/scripts/supervise.cjs decision-preflight RUN DECISION_PATH EVENT_HASH CONTRACT_HASH STATE_HASH_OR_DASH`；三個雜湊取自同一事件 context 的 `event.sha256`、`authorization.contractSha256` 與 `contractStateSha256`（後者為 null 時傳 `-`）。此指令只讀，核對目前 pending 事件、STOP、有效契約與授權狀態、裁示格式及準備傳送的內容，回傳事件 ID、契約／授權雜湊、草稿雜湊及「`LONG_TASK_DELIVERY:<eventId>`、換行、`reply` 原文」的訊息雜湊，不傳訊、不寫狀態。原有進度或派工 preflight 照舊；預檢失敗、被拒或事件／授權／草稿改變時不傳送，重查 context 後重新預檢。成功後緊接著用原生傳訊工具按上述精確內容送出；送達後照原流程記回執並執行 decision。預檢僅供監督遵守順序，不會在平台層攔住獨立的原生傳訊呼叫，也不保證預檢與傳訊之間狀態不再改變。
 
@@ -63,7 +63,7 @@ reply／reject 在呼叫桌面原生傳訊前先執行 `node <skill>/scripts/sup
 
 ## 原生事件交接
 
-綁定完成後，監督把精確 run 路徑及本節交給執行對話。執行者在需要代答、阻塞判斷或送驗時，先保存事件，再以桌面原生跨對話工具喚醒監督，補足背景通知可能無法啟動模型的情況。只有 `question`、`blocked`、`submission` 走這條路徑；純背景等待與一般進度維持原有監看，不傳保活訊息。
+綁定完成後，監督把精確 run 路徑及本節交給執行對話。執行者在需要代答、阻塞判斷或送驗時，先保存事件，再以桌面原生跨對話工具喚醒監督，補足背景通知可能無法啟動模型的情況。只有 `question`、`blocked`、`submission` 走這條路徑；純背景等待與一般進度走[執行層原生續接](execution-wake.md)，監督巡查照常，不傳保活訊息。
 
 1. 為本次事件產生唯一 UUID，另存 `EVENT.json`：`id`、`kind`、完整回覆正文 `text`，送驗另含 `candidate.cjs` 產生的 `revision`、`manifest`。事件 ID 不因重試改變；正文不含最後的 `LONG_TASK_EVENT` 行。
 2. 執行 `node <skill>/scripts/handoff.cjs prepare <ABS_RUN> <ABS_EVENT_JSON>`。程式先存原文並放進 run 的持久佇列（每個事件一個 `handoff-request-<id>.json`，依送出先後），再與 watcher 以同一鎖交接：監督手上沒有待決事件時，佇列最前面的事件成為 pending；監督還在處理前一個事件時，本事件留在佇列（輸出 `queued:true` 與 `ahead`：前面的事件與排第幾），等該事件決策、watcher 重掛後依序成為 pending，不報錯、不遺失（2026-10-12／13 A 開發 22 次 prepare 有 7 次被「Another event is already pending」拒絕，一則提問和一則補件送驗沒送到監督）。事件存進 pending 或佇列後，才輸出 `ready:true` 及原生傳訊所需的精確目的地與短訊。這一步不呼叫模型或 CLI。

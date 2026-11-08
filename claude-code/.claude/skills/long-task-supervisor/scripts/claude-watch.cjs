@@ -12,6 +12,8 @@ const login=require('./login-check.cjs');
 const dashboard=require('./dashboard.cjs');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
+const executionWake=require('./execution-wake.cjs');
+const executionWatch=require('./execution-watch.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 const clockSafety=require('./clock-safety.cjs');
 const parallelTestReview=require('./parallel-test-review.cjs');
@@ -96,7 +98,24 @@ function eventOf(text,id){
   }
   return {id:value.id||id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
     nextAction:value.nextAction||null,waitMinutes:Number.isFinite(value.waitMinutes)?value.waitMinutes:null,
+    ...(Array.isArray(value.waitFor)?{waitFor:value.waitFor}:{}),
+    ...(uuidExecutionWatch(value.executionWatch)?{executionWatch:value.executionWatch}:{}),
     text,at:now()};
+}
+function uuidExecutionWatch(id){return typeof id==='string'&&/^[a-f0-9-]{36}$/.test(id);}
+function executionDelivery(event){
+  if(!event.executionWatch)return null;
+  try{
+    const item=executionWatch.request(run,event.executionWatch,binding),p=executionWatch.paths(run,item.id);
+    need(item.nextAction===event.nextAction,'Execution continuation does not match the declared next action');
+    const status=fs.existsSync(p.state)?read(p.state):{},receipt=fs.existsSync(p.receipt)?read(p.receipt):null;
+    const received=Boolean(receipt&&receipt.executorId===binding.executorId&&receipt.requestSha256===item.sha256);
+    const lock=path.join(run,'execution-watcher.lock'),worker=fs.existsSync(lock)?read(lock):null;
+    const alive=Boolean(worker&&worker.executorId===binding.executorId&&ownerAlive(worker.pid));
+    // An inbox write is not a read receipt. Use the existing idle-work interval for a missing consumer.
+    const unreceived=status.readyAt&&!received&&Date.now()-Date.parse(status.readyAt)>=IDLE_WORK_MS;
+    return {registered:true,received,alive,recovery:Boolean(unreceived||!alive&&!status.readyAt)};
+  }catch{return {registered:false,recovery:true};}
 }
 function waitingHasBlocker(text){
   // These phrases identify the observed permission block and explicit user-decision requests.
@@ -440,6 +459,7 @@ async function watch(){
       state.repeatedProgress=state.lastProgressAction===event.nextAction?(state.repeatedProgress||0)+1:1;
       state.lastProgressAction=event.nextAction;
       if(state.repeatedProgress>=2)event.kind='stalled';
+      else if(event.executionWatch){state.progressWait={event,deadline:writtenAt};state.seen.push(event.id);checkpoint();return false;}
       else if(event.waitMinutes!==null){
         if(!(event.waitMinutes>0&&event.waitMinutes<=120)){event.kind='protocol_error';}
         else{state.progressWait={event,deadline:writtenAt+event.waitMinutes*60000};state.seen.push(event.id);checkpoint();return false;}
@@ -526,11 +546,19 @@ async function watch(){
       markAnnounced(state,auditEvent);state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();
       wake(auditEvent);return;
     }}
-    if(state.progressWait&&Date.now()>=state.progressWait.deadline){
-      const event={...state.progressWait.event,kind:'continue',declaredAt:state.progressWait.event.at,dueAt:new Date(state.progressWait.deadline).toISOString(),at:now()};
-      state.progressWait=null;state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
-      wake(event);
-      return;
+    if(!isPaused&&state.progressWait){
+      const wait=state.progressWait,delivery=executionDelivery(wait.event);
+      const completion=executionWake.inspect(binding,wait,snapshotNow(),pace.agentRuns(binding));
+      const due=Date.now()>=wait.deadline;
+      // Healthy routine completion is owned by the executor's native watcher, not by this supervisor Bash.
+      // Only a missing/unread execution delivery (or an old unregistered wait) needs supervisor recovery.
+      if(delivery?.recovery||!delivery&&(completion.ready.length||due)){
+        const event={...wait.event,kind:'continue',deliveryRecovery:true,
+          text:wait.event.text+'\n執行層的原生續接需要恢復：先核對 execution-waits 收件及原生背景程序，再由原生工具恢復執行主線；不要把一般完成事件都改交監督。',
+          declaredAt:wait.event.at,dueAt:new Date(wait.deadline).toISOString(),at:now()};
+        state.progressWait=null;state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
+        wake(event);return;
+      }
     }
     const hadCheckedWait=Boolean(state.checkedWait);
     checkedWait.supervisorInput(state,binding);

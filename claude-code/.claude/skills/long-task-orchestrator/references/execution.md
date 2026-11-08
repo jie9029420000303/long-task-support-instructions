@@ -2,6 +2,8 @@
 
 只在建立狀態檔、派工、前台操作、模型解析、續接或驗收證據需要細節時讀本檔；核心分工與錯誤規則以 `SKILL.md` 與 `references/spec.md` 為準，不在此重述。
 
+受監督的背景等待或回合續接，先讀監督技能的[執行層完成通知與定期補漏](../../long-task-supervisor/references/execution-wake.md)：一般結果及可自行處理的失敗回執行主線；完成通知與定期查核並存，只有裁決、授權、獨立驗收或無法恢復才升級監督。
+
 ## 狀態檔
 
 位置：`<專案根>/.claude/long-task/<YYYY-MM-DD>-<slug>/state.md`，證據放同目錄 `evidence/`。範本：`templates/state.md`（用 `cp` 複製後填寫）。不想進 git 就把 `.claude/long-task/` 加進 `.gitignore`（由使用者決定）。

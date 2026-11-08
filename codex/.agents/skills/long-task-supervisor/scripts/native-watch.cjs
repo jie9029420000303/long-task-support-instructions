@@ -10,6 +10,7 @@ const clock = require('./supervisor-clock.cjs');
 const fallback = require('./model-fallback.cjs');
 const dashboard = require('./dashboard.cjs');
 const pace = require('./pace.cjs');
+const executionWake = require('./execution-wake.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
@@ -114,7 +115,43 @@ async function waitExecutor() {
 // The 3 minutes between reads still end at once on STOP, and the dashboard stays current.
 async function idle(ms){
   const end=Date.now()+ms;
-  while(Date.now()<end&&!fs.existsSync(path.join(run,'STOP'))){writeDashboard();await sleep(Math.min(5000,end-Date.now()));}
+  while(Date.now()<end&&!fs.existsSync(path.join(run,'STOP'))){
+    writeDashboard();
+    const changed=await executionWake.waitChange(Math.min(5000,end-Date.now()),()=>{
+      const result=completionNow();
+      return isPaused()||state.executorStatus==='active'||state.executionWakeDeferred?{...result,ready:[]}:result;
+    },[path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),path.join(run,'STOP')]);
+    if(changed==='completion')return;
+  }
+}
+function completionNow(){
+  let snapshot=null;try{snapshot=read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{}
+  return executionWake.inspect(binding,state.progressWait,snapshot,pace.agentRuns(binding),state.executionWakeReceipts||{});
+}
+async function resumeExecution(inspection){
+  if(isPaused()||!state.progressWait&&!inspection.ready.length)return false;
+  const wait=state.progressWait||{event:state.executionContinuation?{id:state.executionContinuation.eventId}:{
+    id:'execution-'+require('node:crypto').createHash('sha256').update(JSON.stringify(inspection.ready.map(item=>item.key))).digest('hex').slice(0,24),
+    nextAction:'收回這次已交回的成果與程序結果，核對原始證據，再依目前工作包整合、修正或續派。'}};
+  const key='continue-'+wait.event.id;
+  // Read the current owner before sending: a newer question, submission, or an already active main line wins.
+  const detail=unpack(await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
+  need(detail.thread?.id===binding.executorId,'Bound executor missing from execution resume read');
+  const latest=detail.turns?.[0];state.executorStatus=detail.thread?.status?.type;
+  if(!latest||latest.status!=='completed'||state.executorStatus==='active'||latest.id!==wait.event.id&&!state.seen.includes(latest.id)){
+    state.executionWakeDeferred=latest?.id||'unknown';return false;
+  }
+  delete state.executionWakeDeferred;
+  checkSources();
+  if(fs.existsSync(path.join(run,'STOP'))||isPaused())return false;
+  const pending=state.executionContinuation||{eventId:wait.event.id,key,prompt:executionWake.prompt(wait.event,inspection),sources:inspection.ready};
+  need(pending.eventId===wait.event.id,'Another execution continuation needs receipt reconciliation');
+  state.executionContinuation=pending;checkpoint();
+  await sendAndRead(binding.executorId,pending.prompt,pending.key);
+  for(const source of pending.sources)(state.executionWakeReceipts||={})[source.key]={eventId:wait.event.id,packageId:source.packageId,
+    deliveryKey:pending.key,deliveredAt:now()};
+  // A receipt proves delivery, not successful work. The existing dispatch/clock checks still verify actual progress.
+  state.progressWait=null;state.executionContinuation=null;checkpoint();return true;
 }
 // One warning in the supervisor chat per outage, when the App still takes a message (a read can fail while sends work).
 // It is marked before sending, so a lost reply never repeats it; Jay's push comes from watch-health.cjs either way.
@@ -281,7 +318,8 @@ function extractEvent(turn, message) {
   if (item.kind === 'submission' && (!/^sha256:[a-f0-9]{64}$/.test(item.revision) || typeof item.manifest !== 'string')) item = {kind:'protocol_error'};
   if (['progress','waiting'].includes(item.kind) && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
   return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,
-    waitMinutes:Number.isFinite(item.waitMinutes)?item.waitMinutes:null,text,at:now()};
+    waitMinutes:Number.isFinite(item.waitMinutes)?item.waitMinutes:null,
+    ...(Array.isArray(item.waitFor)?{waitFor:item.waitFor}:{}),text,at:now()};
 }
 // Waiting on the supervisor's own ruling is a question for the supervisor, whatever kind the executor marked it
 // (2026-10-12 05:59 GDB: K1 sent as progress + waitMinutes 60 "Waiting for the supervisor's K1 ruling").
@@ -656,6 +694,10 @@ async function watch() {
     const paused = isPaused();
     if (state.pausedSeen && !paused) { state.lastRealEventAt = Date.now(); state.lastExecutorWorkAt = Date.now(); state.lastProgressReviewAt = Date.now(); state.unplanned = {}; }
     state.pausedSeen = paused;
+    if(!paused){
+      const completion=completionNow();
+      if(!completion.blocked&&(completion.ready.length||state.progressWait&&(state.progressWait.immediate||Date.now()>=state.progressWait.deadline&&!completion.observable))&&await resumeExecution(completion))continue;
+    }
     const audit=inspectDispatch(run,binding,state);
     // The executor learns the run from the binding message; until then, or 15 minutes, a missing snapshot is expected.
     if(!state.executorKnowsRun&&audit.newIssues.some(item=>item.kind==='snapshot_missing')&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS){
@@ -667,6 +709,7 @@ async function watch() {
     const response = await waitExecutor();
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
+    state.executorStatus=poll.thread?.status?.type;
     const supervisorDetail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
     need(supervisorDetail.thread?.id===binding.supervisorId,'Bound supervisor missing from read result');
     const supervisorPoll=supervisorPollFromThread(supervisorDetail);
@@ -701,6 +744,7 @@ async function watch() {
             state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
           }
         } else if (repeated < 2) {
+          if(paused){state.progressWait={event,deadline:Date.now(),immediate:true};state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;}
           await sendAndRead(binding.executorId,
             `長任務續接 ${event.id}：執行你剛才明列的下一步「${event.nextAction}」。沿用原契約及已完成工作；只在下一個真實事件送驗或回報，不重述整份 prompt。`,
             'continue-' + event.id);
@@ -714,13 +758,9 @@ async function watch() {
     } else {
       state.cursor=nextCursor;
       if(await recheckDeferred())continue;
-      if(state.progressWait&&Date.now()>=state.progressWait.deadline){
-        const event={...state.progressWait.event,kind:'continue',declaredAt:state.progressWait.event.at,
-          dueAt:new Date(state.progressWait.deadline).toISOString(),at:now()};
-        state.progressWait=null;state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;
-        state.pending=event;state.phase='awaiting_decision';checkpoint();
-        await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
-        continue;
+      if(!paused){
+        const completion=completionNow();
+        if(!completion.blocked&&(completion.ready.length||state.progressWait&&(state.progressWait.immediate||Date.now()>=state.progressWait.deadline&&!completion.observable))&&await resumeExecution(completion))continue;
       }
       // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
       // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.

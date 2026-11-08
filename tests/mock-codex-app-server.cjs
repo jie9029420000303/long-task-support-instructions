@@ -45,7 +45,8 @@ function call(name,args) {
       const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);
       const activity=data.activityGate && fs.existsSync(data.activityGate);
       if ((data.noTurn || data.noTurnUntil&&!fs.existsSync(data.noTurnUntil)) && args.turnLimit===1) return reply({thread:{id:data.executorId},turns:activity?[{id:'executor-active-turn',status:'inProgress',items:[{type:'agentMessage',id:'executor-new-activity',text:'working'}]}]:[]});
-      return reply({thread:{id:data.executorId},turns:[{id:turnId,status:data.readTurnStatus||'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]},...sends.map(text=>({type:'userMessage',text})),
+      return reply({thread:{id:data.badExecutorReadGate&&fs.existsSync(data.badExecutorReadGate)?'different-executor':data.executorId,
+        status:{type:data.executorBusyGate&&fs.existsSync(data.executorBusyGate)?'active':'idle'}},turns:[{id:turnId,status:data.readTurnStatus||'completed',items:[{type:'agentMessage',phase:'final_answer',text:finals[currentTurn]},...sends.map(text=>({type:'userMessage',text})),
         ...(activity?[{type:'agentMessage',id:'executor-new-activity',text:'working'}]:[])]}]});
     }
     const sends=data.receiptGate&&!fs.existsSync(data.receiptGate)?[]:(fs.existsSync(sentFile)?JSON.parse(fs.readFileSync(sentFile,'utf8')):[]);

@@ -64,14 +64,15 @@ function agentRun(file,meta){
         const at=Date.parse(row.timestamp),payload=row.payload||{};
         if(Number.isFinite(at)){item.startedAt??=at;item.lastAt=at;}
         if(row.type==='turn_context')item.model=payload.model||item.model;
-        else if(payload.type==='task_started'){item.turnAt=at;item.done=false;}
-        else if(payload.type==='task_complete'||payload.type==='turn_aborted'){if(item.turnAt)item.activeMs+=at-item.turnAt;item.turnAt=null;item.done=payload.type==='task_complete';}
+        else if(payload.type==='task_started'){item.turnAt=at;item.turnId=payload.turn_id||null;item.done=false;item.completedAt=null;item.completedTurnId=null;}
+        else if(payload.type==='task_complete'||payload.type==='turn_aborted'){if(item.turnAt)item.activeMs+=at-item.turnAt;item.turnAt=null;item.done=payload.type==='task_complete';item.completedAt=at;item.completedTurnId=payload.turn_id||item.turnId||null;}
         else if(payload.type==='token_count'&&payload.info?.total_token_usage)item.outputTokens=payload.info.total_token_usage.output_tokens||0;
       }
     }
   }
   const activeMs=item.activeMs+(item.turnAt&&item.lastAt?item.lastAt-item.turnAt:0);
-  return {id:meta.id,path:meta.agent_path||null,model:item.model,startedAt:item.startedAt,lastAt:item.lastAt,active:Boolean(item.turnAt),sourceFile:file,outputTokens:item.outputTokens,done:item.done,seconds:activeMs/1000};
+  return {id:meta.id,path:meta.agent_path||null,model:item.model,startedAt:item.startedAt,lastAt:item.lastAt,active:Boolean(item.turnAt),sourceFile:file,outputTokens:item.outputTokens,done:item.done,
+    completedAt:item.completedAt||null,completedTurnId:item.completedTurnId||null,finished:Boolean(item.completedAt),seconds:activeMs/1000};
 }
 // Rollouts live in sessions/YYYY/MM/DD by local start date; subagents of this executor start after binding.
 const metas=new Map();

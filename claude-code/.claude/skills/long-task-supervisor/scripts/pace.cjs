@@ -12,7 +12,7 @@ const MIN_SAMPLES=3;
 const median=values=>{const sorted=[...values].sort((a,b)=>a-b),mid=sorted.length>>1;return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;};
 const round=value=>Math.round(value*10)/10;
 function agentRun(file){
-  const messages=new Map();let startedAt=null,lastAt=null,done=false,model=null,rateLimit=null;
+  const messages=new Map();let startedAt=null,lastAt=null,done=false,model=null,rateLimit=null,completedAt=null,completionId=null;
   for(const line of fs.readFileSync(file,'utf8').split('\n')){
     let row;try{row=JSON.parse(line);}catch{continue;}
     const at=Date.parse(row.timestamp);
@@ -23,10 +23,11 @@ function agentRun(file){
     model=row.message.model||model;
     if(row.message.usage)messages.set(row.message.id||row.uuid,row.message.usage.output_tokens||0);
     done=row.message.stop_reason==='end_turn';
+    completedAt=done&&Number.isFinite(at)?at:null;completionId=done?(row.message.id||row.uuid||completedAt):null;
   }
   const outputTokens=[...messages.values()].reduce((sum,value)=>sum+value,0);
   const seconds=startedAt&&lastAt?(lastAt-startedAt)/1000:0;
-  return {id:path.basename(file,'.jsonl').replace(/^agent-/,''),model,startedAt,lastAt,outputTokens,done,seconds,rateLimit};
+  return {id:path.basename(file,'.jsonl').replace(/^agent-/,''),sourceFile:file,model,startedAt,lastAt,outputTokens,done,completedAt,completionId,seconds,rateLimit};
 }
 function subagentDir(binding){return path.join(path.dirname(binding.executorLog),binding.executorId,'subagents');}
 const agentFiles=dir=>{try{return fs.readdirSync(dir).filter(name=>/^agent-.+\.jsonl$/.test(name)).map(name=>path.join(dir,name));}catch{return [];}};
@@ -41,11 +42,16 @@ function workflowRuns(binding){
     try{for(const line of fs.readFileSync(path.join(root,dir,'journal.jsonl'),'utf8').split('\n')){
       let row;try{row=JSON.parse(line);}catch{continue;}
       if(!row.agentId)continue;const item=events.get(row.agentId)||{};
-      if(row.type==='started')item.label=row.label??null;else if(row.type==='result')item.result=true;else if(row.type==='failed')item.failed=true;
+      if(row.type==='started'){item.label=row.label??null;item.result=false;item.failed=false;item.completedAt=null;item.completionId=null;}
+      else if(row.type==='result'||row.type==='failed'){
+        item[row.type==='result'?'result':'failed']=true;item.completedAt=Date.parse(row.timestamp||row.at)||null;
+        item.completionId=require('node:crypto').createHash('sha256').update(line).digest('hex');
+      }
       events.set(row.agentId,item);
     }}catch{}
     return agentFiles(path.join(root,dir)).map(file=>{const run=agentRun(file),item=events.get(run.id)||{};
-      return {...run,workflow:dir,label:item.label??null,done:Boolean(item.result||item.failed),failed:Boolean(item.failed)};});
+      return {...run,workflow:dir,label:item.label??null,done:Boolean(item.result||item.failed),failed:Boolean(item.failed),
+        completedAt:item.completedAt||run.completedAt,completionId:item.completionId||run.completionId};});
   });
 }
 function agentRuns(binding){return [...agentFiles(subagentDir(binding)).map(agentRun),...workflowRuns(binding)];}

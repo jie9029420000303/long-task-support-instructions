@@ -7,6 +7,8 @@
 - 最終回覆最後一行放事件（一次一行）：`LONG_TASK_EVENT {"kind":"progress","nextAction":"下一步具體工作"}`，或 `LONG_TASK_EVENT {"kind":"waiting","nextAction":"結果出來後要做的事","waitMinutes":15}`（1～120 分鐘）。
 - 提問、阻塞、送驗走原生交接：存 `EVENT.json`（`id` UUID、`kind`、完整正文 `text`，送驗另含 `candidate.cjs` 給的 `revision`、`manifest`）→ `node <skill>/handoff.cjs prepare RUN <EVENT.json>` → 回 `ready:true` 或 `queued:true` 時用原生傳訊送 `targetDesktopId`、`message` 一次 → `handoff.cjs receipt RUN <收據檔>` → 最終回覆加 `finalEventLine`。
 - 送驗清單：`node <skill>/candidate.cjs <新版清單絕對路徑> <候選檔>...`。
+- 一般結果與可自行處理的失敗先回執行主線，完成通知＋定期讀狀態補漏並存，倒數不是最早續接時間；依[執行層完成通知](execution-wake.md)登記工作包資源或 `waitFor:[{"ledger":"/允許根目錄/resources.json","id":"r1"}]`。在原執行 Bash 跑 `node <skill>/execution-watch.cjs register RUN <等待輸入JSON>`，只在 watcherAlive=false 時背景啟動回傳的 watchArgv；最終事件使用回傳的 event。收到 `LONG_TASK_EXECUTION_RESUME:<UUID>` 先讀 state 檔、跑 `execution-watch.cjs receipt RUN UUID`，再核對原始結果與續做。
+
 - 工作包檔 `<狀態目錄>/wp/<id>.md`：`[工作包] id=WP-X；依賴：WP-Y`、`[狀態] {"list":"inFlight","handle":"agent:<id>","baseline":{"minutes":20,"startedAt":"<ISO 時間>","basis":"pace.cjs 估算"}}`、`[驗收條目] A1、A2`、`[共用資源] 帳號:… 瀏覽器:…`。文件工作包在狀態加 `"doc":true`；主線自己做的包 `handle` 寫 `main`。
 - 改狀態：`node <skill>/dispatch.cjs mark RUN <狀態目錄> WP-X '<狀態 JSON>'`。
 - 收包（一步完成標記、證據、驗收表與快照，先驗格式，有錯什麼都不寫）：`node <skill>/dispatch.cjs collect RUN <狀態目錄> WP-X <結果檔絕對路徑>`，結果檔 `{"status":{"list":"completed","handle":"agent:<id>","evidence":["/絕對路徑"]},"acceptance":[{"id":"A1","status":"PASS","evidence":["/絕對路徑"]}]}`。

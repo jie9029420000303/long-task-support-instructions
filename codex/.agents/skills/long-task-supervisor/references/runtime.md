@@ -59,14 +59,14 @@ node <installed-skill>/scripts/supervise.cjs stop RUN "<使用者原話>"
 
 ```text
 LONG_TASK_EVENT {"kind":"progress","nextAction":"接下來要執行的具體工作"}
-LONG_TASK_EVENT {"kind":"waiting","nextAction":"背景工作完成後要做的事","waitMinutes":15}
+LONG_TASK_EVENT {"kind":"waiting","nextAction":"讀回結果後整合與續派","waitMinutes":15,"waitFor":[{"ledger":"/允許根目錄/resources.json","id":"r1"}]}
 LONG_TASK_EVENT {"kind":"progress","nextAction":"背景工作完成後要做的事","waitMinutes":15}
 LONG_TASK_EVENT {"kind":"question"}
 LONG_TASK_EVENT {"kind":"blocked"}
 LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
 ```
 
-普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，到期前不發續接，結果變化或到期才產生 `continue` 事件。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。事件標記那一行本身是完整 JSON 即可，標記後面另起一行的文字會被忽略。新事件先持久保存完整原文，喚醒只傳事件識別、雜湊及 `supervise.cjs context RUN EVENT_ID`；不附整段處理規則或歷史。context 只接受目前待決事件，一次提供 brief 與授權來源；送驗才載完整有效契約。舊版未確認送達的 prompt 保留原文對帳，不在升級時改寫或重送。
+普通 `progress` 只讓背景程式依 `nextAction` 發一則簡短續接訊息，不喚醒監督模型；相同下一步連報兩次則轉成停滯事件交監督。純背景工作已在執行、期限內不需要模型介入時使用 `waiting`，或相容的 `progress + waitMinutes`；`waitMinutes` 必須是 1～120 分鐘，表示原本的查核時間，不是最早可續接時間。依[執行層完成通知與定期補漏](execution-wake.md)登記工作包資源或 `waitFor`；檔案通知與定期讀狀態共用去重及收件，有結果就直接續接綁定執行主線。可觀察的工作仍在跑時不單因到期叫 AI；沒有完成來源的舊等待，到期由執行主線核對現況並補來源。一般失敗先由執行主線處理，需要裁決、授權、獨立驗收或無法恢復才升級監督。等待不是 PASS，也不會關閉監督自己的進度時鐘。文字若包含權限審查、使用者核准、push、merge、發布等真正阻塞，即使標成 `waiting` 也改送監督。普通進度應在回合中通報；回合結束仍有工作才使用事件標記。執行回合結束卻沒有標記、標記格式有誤時會作為異常事件送來，避免無聲停止。事件標記那一行本身是完整 JSON 即可，標記後面另起一行的文字會被忽略。新事件先持久保存完整原文，喚醒只傳事件識別、雜湊及 `supervise.cjs context RUN EVENT_ID`；不附整段處理規則或歷史。context 只接受目前待決事件，一次提供 brief 與授權來源；送驗才載完整有效契約。舊版未確認送達的 prompt 保留原文對帳，不在升級時改寫或重送。
 
 監督一次只處理一個事件。每次讀取只看最新回合，所以背景程式每讀到一個新的完成回合，就從對話紀錄往回補讀（最多 8 個回合，到上一個已處理回合為止）：前一事件未決期間或兩次讀取之間完成的提問、阻塞、送驗、無標記或格式錯誤的回合，依完成先後排進 `eventQueue`，前一事件決策後依序成為待決事件，排在派工檢查與進度時鐘前面；已被後續回合取代的一般進度與等待、沒有最終回覆的回合只記為已處理，不再續接。brief 的 `eventQueue` 列出排隊事件，儀表板顯示件數。佇列裡有較新的送驗時不能接受目前這份（程式會拒絕）：用 observe 寫明「被排隊中的送驗 <id> 取代」，再處理那一份。佇列裡沒有送驗、只有提問或阻塞等事件時，送驗的 context 另附它們的完整原文（`queued`），接受照常；背景程式把它們記為驗收時一併結案（resolved 的 `closedWithAcceptance`），監督把它們列進給使用者的收尾清單。
 

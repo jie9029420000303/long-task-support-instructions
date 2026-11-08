@@ -2,6 +2,8 @@
 
 只在建立 sidecar、派工、前台操作、模型解析、Goal 恢復或驗收證據需要細節時讀本檔；核心分工與錯誤規則以 `SKILL.md` 與 `references/spec.md` 為準，不在此重述。
 
+受監督的背景等待或回合續接，先讀監督技能的[執行層完成通知與定期補漏](../../long-task-supervisor/references/execution-wake.md)：一般結果及可自行處理的失敗回執行主線；完成通知與定期查核並存，只有裁決、授權、獨立驗收或無法恢復才升級監督。
+
 ## Goal 與 sidecar 狀態
 
 原生 Goal 保存目標、運行狀態與 Token 預算；不假定它能保存任意工作包欄位。執行 sidecar 放在 `<專案根>/.codex/long-task/<YYYY-MM-DD>-<slug>/state.md`，證據放同目錄 `evidence/`，工作包 prompt 放 `wp/`；由 `templates/state.md` 複製後填寫。是否納入 git 或 `.gitignore` 由使用者決定。
