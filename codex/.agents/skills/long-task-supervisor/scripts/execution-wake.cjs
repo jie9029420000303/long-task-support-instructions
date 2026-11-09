@@ -117,4 +117,20 @@ const PROGRESS_WAIT_NOTE='\nprogress 一律立即續接，不會等待 waitMinut
 // Every message the supervisor side sends the executor ends with this push (Jay 2026-11-09: 「我希望監督或背景程序可以每次
 // 傳送訊息都積極Push主線「積極派出子代理」全面加速」). It restates the dispatch rule and grants no new authority.
 const EXECUTOR_PUSH='全面加速：除非本訊息要求暫停或停止，請依積極派工（可派即派、不留空席），把已就緒、彼此獨立、資源不衝突的工作立刻派子代理並行，用滿可用席位；主線專注整合、收回成果與裁決。授權、範圍與資源隔離規則照舊。';
-module.exports={allowed,inspect,waitChange,prompt,facts,PROGRESS_WAIT_NOTE,EXECUTOR_PUSH};
+// Subagents above the skill default get one reminder on the next message to the executor (Jay 2026-11-09: since
+// 11/08 22:22 WEB ran 29 subagents on Opus xhigh, and 36 dispatches named no model, so they inherited the main line's).
+// Claude route: Sonnet／Medium (interface Low); OpenAI route: Medium. A raised effort after a quality error is allowed,
+// so this reminds and never blocks. Codex logs record the effort, Claude Code logs only the model. Runs older than 3
+// hours are left alone, so a restarted watcher does not report old runs again.
+const EFFORTS=['none','minimal','low','medium','high','xhigh','max','ultra'],CLAUDE=/claude|opus|sonnet|haiku/i;
+function modelReminder(runs,{mainModel=null,reported=[],now=Date.now(),windowMs=3*3600000}={}){
+  const seen=new Set(reported),claude=CLAUDE.test(String(mainModel||''))||runs.some(item=>CLAUDE.test(String(item.model||'')));
+  const above=runs.filter(item=>item.id&&!seen.has(item.id)&&(item.startedAt||0)>=now-windowMs&&
+    (claude&&/opus/i.test(String(item.model||''))||EFFORTS.indexOf(item.effort)>EFFORTS.indexOf('medium')));
+  if(!above.length)return null;
+  const groups=new Map();
+  for(const item of above){const label=(item.model||'未知模型')+(item.effort?'／'+item.effort:'');groups.set(label,(groups.get(label)||0)+1);}
+  return {ids:above.map(item=>item.id),text:'子代理模型提醒：最近 '+above.length+' 個子代理高於技能預設（'+(claude?'Sonnet／Medium，介面 Sonnet／Low':'Medium')+'）：'+
+    [...groups].map(([label,count])=>label+' ×'+count).join('、')+'。不是品質錯誤後升檔的，下次派工改回預設；每次派工都明確寫出模型（工具支援時連同推理強度），不要省略讓它沿用主線。'};
+}
+module.exports={allowed,inspect,waitChange,prompt,facts,modelReminder,PROGRESS_WAIT_NOTE,EXECUTOR_PUSH};

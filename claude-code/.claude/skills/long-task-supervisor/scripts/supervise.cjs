@@ -152,7 +152,9 @@ function status() {
   return {run,supervisorId:binding.supervisorId,executorId:binding.executorId,
     phase:state.phase,active:alive && ready?.readVerified === true && state.phase==='watching' && hold,hold,
     readVerified:ready?.readVerified === true,reads:state.reads,acceptedAt:state.acceptedAt || null,error:state.error || null,
-    unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{}), queued:handoffQueue(run).length};
+    unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{}), queued:handoffQueue(run).length,
+    // The latest question push that did not reach Jay's phone (Jay 2026-11-09): say so first in the next reply to him.
+    questionPush:pending.pushProblem(run)};
 }
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
 function parallelPreflight(binding,state,event){
@@ -202,13 +204,28 @@ function brief() {
     automations:(state.automations || []).slice(-3), dashboard:path.join(run, require('./dashboard.cjs').FILE),
     executor:{lastActivityAt:iso(state.lastExecutorActivityAt), lastSubagentActivityAt:iso(Math.max(state.lastSubagentActivityAt || 0, subagentActivityAt(binding))),
       lastProcessActivityAt:iso(state.lastProcessActivityAt), lastWorkAt:iso(state.lastExecutorWorkAt), lastRealEventAt:iso(state.lastRealEventAt),
-      settings:state.executorSettings || null, executorDesktopId:binding.executorDesktopId, tail:executorTail(binding.executorLog)},
+      settings:permissionOf(state.executorSettings), executorDesktopId:binding.executorDesktopId, tail:executorTail(binding.executorLog)},
+    // Subagents above the skill default not yet named to the executor: add this after the push line of the next reply.
+    subagentModelReminder:modelReminderOf(binding),
     agentActivity,
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     eventQueue:executorQueue().map(({id, kind, at}) => ({id, kind, at})),
     // The whole pending-decision ledger on every wake, so compaction never loses what waits on Jay.
-    pendingDecisions:pending.view(run, state), recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};
+    pendingDecisions:pending.view(run, state), questionPush:pending.pushProblem(run), recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};
+}
+// The executor's actual permission, checked once at the start (Jay 2026-11-09: 「平台維持完全存取」). Anything short of
+// bypass permissions is put to Jay once as his own action; the run goes on either way.
+function permissionOf(settings) {
+  if (!settings) return null;
+  const fullAccess = settings.permissionMode ? settings.permissionMode === 'bypassPermissions' : null;
+  return {...settings, fullAccess, ...(fullAccess === false ? {ask:'執行對話權限是 ' + settings.permissionMode +
+    '，不是略過權限：開工時登記一項 user_action 待決，請 Jay 把執行對話切成略過權限；只問一次，他沒切也照常進行。'} : {})};
+}
+function modelReminderOf(binding) {
+  let reported = [];
+  try {reported = read(path.join(run, 'model-reminders.json')).reported || [];} catch {}
+  try {return require('./execution-wake.cjs').modelReminder(require('./pace.cjs').agentRuns(binding), {mainModel:'claude', reported})?.text || null;} catch {return null;}
 }
 // After starting the watcher in the background, wait briefly until it reports a verified read.
 function waitActive(seconds) {

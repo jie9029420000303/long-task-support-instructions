@@ -11,6 +11,7 @@ const fallback = require('./model-fallback.cjs');
 const dashboard = require('./dashboard.cjs');
 const pace = require('./pace.cjs');
 const executionWake = require('./execution-wake.cjs');
+const questions = require('./pending-decisions.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
@@ -229,9 +230,18 @@ function markSent(target, key) {
   checkpoint();
 }
 function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
-// Every message to the executor ends with the push to dispatch at full speed (Jay 2026-11-09). Only the sent text carries
-// it: receipts, saved deliveries and their hashes keep the bare prompt, so a delivery saved before an upgrade still matches.
-function outgoing(target,prompt){return target===binding.executorId&&!isPaused()?prompt+'\n\n'+executionWake.EXECUTOR_PUSH:prompt;}
+// Every message to the executor ends with the push to dispatch at full speed (Jay 2026-11-09), and with one reminder
+// about subagents that ran above the skill default since the last one. Only the sent text carries them: receipts, saved
+// deliveries and their hashes keep the bare prompt, so a delivery saved before an upgrade still matches.
+function outgoing(target,prompt){
+  if(target!==binding.executorId||isPaused())return prompt;
+  let reminder='';
+  try{
+    const found=executionWake.modelReminder(pace.agentRuns(binding),{mainModel:state.executorSettings?.model,reported:state.modelReminded||[]});
+    if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
+  }catch{}
+  return prompt+'\n\n'+executionWake.EXECUTOR_PUSH+reminder;
+}
 function assistantMarker(detail) {
   for (const turn of detail.turns || []) {
     const message=(turn.items || []).filter(item=>item.type==='agentMessage').at(-1);
@@ -626,6 +636,16 @@ function writeDashboard() {
     dashboard.write(run,{binding,state,snapshot,paced:clock.paceNow(run,binding,state,snapshot),alive:true,paused:isPaused()});
   } catch (error) { state.dashboardError = {message:error.message,at:now()}; }
 }
+// Jay's questions reach his phone once the supervisor has finished the event that raised them (Jay 2026-11-09: on
+// 11/07 at 23:16 WEB put questions to him and nothing was pushed). pending-decisions decides whether the list is new,
+// retries a failed push every 10 minutes and keeps the failure where the dashboard and status show it.
+async function pushQuestions(){
+  if(state.pending||state.inflight||isPaused())return;
+  try{
+    const result=await questions.pushOpen(run,{title:state.threadTitles?.supervisor});
+    if(!result.skipped||result.error)state.questionPush={ok:result.ok,key:result.key||null,error:result.error||null,at:now()};
+  }catch(error){state.questionPush={ok:false,error:error.message,at:now()};}
+}
 const clockText = ms => new Date(ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 // supervise.cjs amend, run while this watcher is alive, leaves Jay's authorization in amend-request.json. The watcher records
 // it at a safe point (no event waiting for a ruling, no unconfirmed delivery) under its own lock and keeps watching. The
@@ -797,6 +817,7 @@ async function watch() {
     await handleRateLimits();
     if (await handleAmendRequest()) continue;
     writeDashboard();
+    await pushQuestions();
     // The supervisor saw an outage warning: one short note once reads work again, so it does not act on a stale alarm.
     if (state.appHealth?.recoveryNotice && !state.inflight && !state.pending) {
       const since = state.appHealth.recoveryNotice;

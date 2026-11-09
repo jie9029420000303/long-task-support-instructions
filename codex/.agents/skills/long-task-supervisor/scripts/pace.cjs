@@ -51,7 +51,7 @@ function firstLine(file){
 const parsed=new Map();
 function agentRun(file,meta){
   let item=parsed.get(file);
-  if(!item)parsed.set(file,item={offset:0,model:null,startedAt:null,lastAt:null,turnAt:null,activeMs:0,outputTokens:0,done:false});
+  if(!item)parsed.set(file,item={offset:0,model:null,effort:null,startedAt:null,lastAt:null,turnAt:null,activeMs:0,outputTokens:0,done:false});
   const size=fs.statSync(file).size;
   if(size>item.offset){
     const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(size-item.offset);
@@ -63,7 +63,7 @@ function agentRun(file,meta){
         let row;try{row=JSON.parse(line);}catch{continue;}
         const at=Date.parse(row.timestamp),payload=row.payload||{};
         if(Number.isFinite(at)){item.startedAt??=at;item.lastAt=at;}
-        if(row.type==='turn_context')item.model=payload.model||item.model;
+        if(row.type==='turn_context'){item.model=payload.model||item.model;item.effort=payload.effort||item.effort;}
         else if(payload.type==='task_started'){item.turnAt=at;item.turnId=payload.turn_id||null;item.done=false;item.completedAt=null;item.completedTurnId=null;}
         else if(payload.type==='task_complete'||payload.type==='turn_aborted'){if(item.turnAt)item.activeMs+=at-item.turnAt;item.turnAt=null;item.done=payload.type==='task_complete';item.completedAt=at;item.completedTurnId=payload.turn_id||item.turnId||null;}
         else if(payload.type==='token_count'&&payload.info?.total_token_usage)item.outputTokens=payload.info.total_token_usage.output_tokens||0;
@@ -71,7 +71,7 @@ function agentRun(file,meta){
     }
   }
   const activeMs=item.activeMs+(item.turnAt&&item.lastAt?item.lastAt-item.turnAt:0);
-  return {id:meta.id,path:meta.agent_path||null,model:item.model,startedAt:item.startedAt,lastAt:item.lastAt,active:Boolean(item.turnAt),sourceFile:file,outputTokens:item.outputTokens,done:item.done,
+  return {id:meta.id,path:meta.agent_path||null,model:item.model,effort:item.effort,startedAt:item.startedAt,lastAt:item.lastAt,active:Boolean(item.turnAt),sourceFile:file,outputTokens:item.outputTokens,done:item.done,
     completedAt:item.completedAt||null,completedTurnId:item.completedTurnId||null,finished:Boolean(item.completedAt),seconds:activeMs/1000};
 }
 // Rollouts live in sessions/YYYY/MM/DD by local start date; subagents of this executor start after binding.

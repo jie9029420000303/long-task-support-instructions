@@ -15,7 +15,7 @@ result=check();assert.ok(!result?.reasons.includes('permission_review'),'same re
 append({type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'call-b',arguments:JSON.stringify({cmd:'docker build'})}});
 append({type:'response_item',payload:{type:'function_call_output',call_id:'call-b',output:'rejected due to unacceptable risk\nReason: another refusal'}});
 state.executorSettings=null;result=check();assert.ok(result?.reasons.includes('permission_review'),'actual refusal must not be lost when mode is unknown');
-const render=require(path.join(base,'dashboard.cjs')).render;const text=render({binding,state:{executorSettings:{approvalPolicy:'on-request'},phase:'watching'},snapshot:null,paced:{packages:[]},alive:true,paused:false});assert.ok(!text.includes('會被平台擋下'));assert.ok(!text.includes('完全存取'));assert.ok(text.includes('依實際審查結果'));
+const render=require(path.join(base,'dashboard.cjs')).render;const text=render({binding,state:{executorSettings:{approvalPolicy:'on-request'},phase:'watching'},snapshot:null,paced:{packages:[]},alive:true,paused:false});assert.ok(!text.includes('會被平台擋下'));assert.ok(text.includes('不是完全存取，監督會請你切換一次'),'Jay 2026-11-09 keeps executors on full access: the page says so, without claiming a block');assert.ok(text.includes('依實際審查結果'));
 // The scanner is only a lead: a tool can quote denial text, so the dashboard must not assert rejection.
 append({type:'response_item',payload:{type:'function_call',name:'exec_command',call_id:'call-c',arguments:JSON.stringify({cmd:'cat example'})}});
 append({type:'response_item',payload:{type:'function_call_output',call_id:'call-c',output:'Documentation example: Auto-review denied'}});

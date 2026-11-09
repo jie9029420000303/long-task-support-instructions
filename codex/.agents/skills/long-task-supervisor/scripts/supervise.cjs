@@ -96,6 +96,8 @@ function status() {
       finishedWithoutDecision:Boolean(response?.completionRecovery&&!fs.existsSync(require('./decision-commit.cjs').file(run,state.pending.id))),
       reminderSentAt:response?.completionWakeSentAt?new Date(response.completionWakeSentAt).toISOString():null}:null,
     error: state.error || null,
+    // The latest question push that did not reach Jay's phone (Jay 2026-11-09): say so first in the next reply to him.
+    questionPush: pending.pushProblem(run),
     watch: { parentAlive, heartbeatAt: runtime?.heartbeatAt || null, lastReadAt: state.lastReadAt || null,
       appHealth: health.failingSince ? { failingSince: health.failingSince, kind: health.kind || null, lastError: health.lastError || null } : null,
       outage, restartCommand: parentAlive !== false || alive !== false ? null : '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ' + path.join(__dirname, 'run-watch.cjs') + ' ' + run }
@@ -137,7 +139,7 @@ function brief() {
     // Jay is online for 10 minutes after typing in this chat: one of the two times to ask the whole pending ledger.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < require('./guard.cjs').ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
     threads:state.threadTitles || null, paused:fs.existsSync(path.join(run, 'PAUSED.json')) ? read(path.join(run, 'PAUSED.json')) : null,
-    executorPermission:state.executorSettings || null, reviewRejections:(state.reviewRejections || []).slice(-3).map(require('./supervisor-clock.cjs').safeRejection),
+    executorPermission:permissionOf(state.executorSettings), reviewRejections:(state.reviewRejections || []).slice(-3).map(require('./supervisor-clock.cjs').safeRejection),
     instruction:state.instruction || null, modelSwitch:state.modelSwitch || null,
     rateLimits:Object.fromEntries(Object.entries(state.rateLimits || {}).filter(([, item]) => item.until > Date.now()).map(([key, item]) => [key, {until:iso(item.until), basis:item.basis}])),
     // An executor turn the platform ended and the executor has not left yet (Jay 2026-10-14): later wakes see it too.
@@ -161,7 +163,16 @@ function brief() {
     decisionError:(state.pending && state.decisionErrors?.[state.pending.id]) || null,
     // Every decision waiting on Jay, in full, so compaction loses none and a new question is matched against it first.
     pendingDecisions:pending.view(run, state),
+    questionPush:pending.pushProblem(run),
     recentDecisions:resolved};
+}
+// The executor's actual permission, checked once at the start (Jay 2026-11-09: 「平台維持完全存取」). Anything short of
+// full access is put to Jay once as his own action; the run goes on either way.
+function permissionOf(settings) {
+  if (!settings) return null;
+  const fullAccess = require('./model-fallback.cjs').fullAccess(settings);
+  return {...settings, fullAccess, ...(fullAccess === false ? {ask:'執行對話不是完全存取（核准 ' + settings.approvalPolicy + '、沙盒 ' + (settings.sandbox || '未讀到') +
+    '）：開工時登記一項 user_action 待決，請 Jay 在 App 把執行對話切成完全存取；只問一次，他沒切也照常進行。'} : {})};
 }
 function context() {
   const {binding,contract}=load(),state=read(path.join(run,'daemon-state.json'));

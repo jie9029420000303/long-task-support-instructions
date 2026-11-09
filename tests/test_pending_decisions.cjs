@@ -48,7 +48,7 @@ for(const [platform,scripts] of versions){
       assert.throws(()=>change(f,{raise:[item('r24','R24/R21 要怎麼驗？',{recommend:' '})]}),/needs recommend/);
       assert.throws(()=>change(f,{raise:[item('r24','R24/R21 要怎麼驗？',{why:undefined})]}),/needs why/);
       // A typo such as "raises" must fail loudly instead of silently registering nothing.
-      assert.throws(()=>change(f,{raises:[item('r24','R24/R21 要怎麼驗？')]}),/only raise, reopen, withdraw or answer/);
+      assert.throws(()=>change(f,{raises:[item('r24','R24/R21 要怎麼驗？')]}),/only raise, reopen, withdraw, answer or delegate/);
       assert.equal(fs.existsSync(f.ledger),false,'refused changes write nothing');
       const out=change(f,{raise:[item('r24','R24/R21 要 uat2、uat3 重新登入才能跑，要怎麼驗？',{options:['A 兩個都重登','B 只重登 uat2','C 列已知缺口']})]});
       assert.deepEqual(out.raised,['r24']);
@@ -176,6 +176,34 @@ for(const [platform,scripts] of versions){
       assert.match(damaged.error,/unreadable/);assert.deepEqual(damaged.open,[]);
       assert.throws(()=>change(f,{raise:[item('r25','R25 要怎麼驗？')]}),/unreadable/);
       assert.equal(fs.readFileSync(f.ledger,'utf8'),'{"items":[');
+    }finally{f.done();}
+  });
+
+  test(platform+': a decision the supervisor makes in Jay\'s place is recorded with its basis and the way back, and Jay can still overrule it',()=>{
+    // Jay 2026-11-09: of 139 questions he answered in four runs, 66 of 92 decisions took the recommendation; inside the
+    // contract the supervisor now decides and lists what it decided, with how to undo it, instead of waiting for him.
+    const f=fixture(platform);
+    try{
+      assert.equal(pending.KINDS.gate,'你在契約自設的核准關卡');
+      change(f,{raise:[item('layout','首頁卡片要兩欄還是三欄？',{kind:'major_change'}),item('r24','R24/R21 要怎麼驗？')]},0);
+      assert.throws(()=>change(f,{delegate:[{key:'layout',ask:'首頁卡片要兩欄還是三欄？',choice:'三欄',basis:'契約 A3'}]}),/needs revert/);
+      const out=change(f,{delegate:[{key:'layout',ask:'首頁卡片要兩欄還是三欄？',choice:'三欄',basis:'契約 A3 寫明桌機一屏看完',revert:'跟監督說改兩欄'},
+        {key:'retry',ask:'測試失敗要重試幾次？',choice:'重試 2 次',basis:'能自動就不加人工關卡',revert:'改回不重試'}]},1);
+      assert.deepEqual(out.delegatedKeys,['layout','retry']);
+      assert.deepEqual(out.open.map(entry=>entry.key),['r24'],'a delegated item no longer waits on Jay');
+      assert.deepEqual(out.closed,[],'delegated items are listed once, under delegated');
+      const view=pending.view(f.run);
+      assert.deepEqual(view.delegated.map(entry=>[entry.key,entry.choice,entry.revert]),[['layout','三欄','跟監督說改兩欄'],['retry','重試 2 次','改回不重試']]);
+      // Revising its own decision keeps the earlier one on record.
+      change(f,{delegate:[{key:'retry',ask:'測試失敗要重試幾次？',choice:'重試 3 次',basis:'主機偶發逾時',revert:'改回不重試'}]},2);
+      const retry=pending.load(f.run).items.find(entry=>entry.key==='retry');
+      assert.equal(retry.delegated.choice,'重試 3 次');assert.equal(retry.history.at(-1).delegated.choice,'重試 2 次');
+      assert.equal(pending.view(f.run).delegated[0].key,'retry','newest first');
+      // Jay's words replace a delegated decision; an answered item cannot be delegated again.
+      change(f,{answer:[{key:'layout',choice:'B',quote:'B'}]},3);
+      const layout=pending.load(f.run).items.find(entry=>entry.key==='layout');
+      assert.equal(layout.status,'answered');assert.equal(layout.history.at(-1).delegated.choice,'三欄');
+      assert.throws(()=>change(f,{delegate:[{key:'layout',ask:'首頁卡片要兩欄還是三欄？',choice:'三欄',basis:'契約 A3',revert:'改兩欄'}]}),/already answered/);
     }finally{f.done();}
   });
 

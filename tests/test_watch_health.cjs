@@ -131,16 +131,21 @@ for(const [platform,dir] of [['codex',codex],['claude',claude]]){
     }finally{await api.close();fs.rmSync(root,{recursive:true,force:true});}
   });
 
-  test(platform+': questions put to Jay push once per batch, and test runs never reach a real phone',async()=>{
+  test(platform+': questions put to Jay are pushed in full once per version, and test runs never reach a real phone',async()=>{
     const root=fs.mkdtempSync(path.join(os.tmpdir(),'pending-push-')),api=await telegram();
     Object.assign(process.env,env(root,api.url));
     try{
       fresh(dir);delete require.cache[path.join(dir,'pending-decisions.cjs')];
       const pending=require(dir+'/pending-decisions.cjs');
+      // Jay 2026-11-09: a push that said only 「有 2 題」 sent him back to the chat to read them; the questions go out in full.
+      const row=(key,ask)=>({key,kind:'acceptance',ask,recommend:'A',why:'改驗收要你同意',options:[],status:'open',raisedAt:'2026-11-09T00:00:00.000Z',
+        updatedAt:'2026-11-09T00:00:00.000Z',presentedAt:null,answer:null,withdrawn:null,history:[]});
+      save(path.join(root,'pending-decisions.json'),{schema:1,items:[row('k1','第一題'),row('k2','第二題')]});
       const first=await pending.pushShown(root,{shown:['k2','k1'],at:'x'},'區分 Debug 與新功能需求');
       assert.equal(first.push.ok,true);
-      assert.equal(api.messages[0].text,'【開發任務需要你決定】『區分 Debug 與新功能需求』有 2 題要你回答，請打開該監督對話查看。');
-      assert.equal((await pending.pushShown(root,{shown:['k1','k2'],at:'y'},'區分 Debug 與新功能需求')).push.skipped,true,'the same batch is not pushed again');
+      assert.match(api.messages[0].text,/^【開發任務需要你決定】『區分 Debug 與新功能需求』有 2 題要你回答：\n\n1\. 第一題\n建議：A\n原因／影響：改驗收要你同意/);
+      assert.equal((await pending.pushShown(root,{shown:['k1','k2'],at:'y'},'區分 Debug 與新功能需求')).push.skipped,true,'the same questions are not pushed again');
+      save(path.join(root,'pending-decisions.json'),{schema:1,items:[row('k1','第一題'),row('k2','第二題'),row('k3','第三題')]});
       await pending.pushShown(root,{shown:['k1','k2','k3'],at:'z'},'區分 Debug 與新功能需求');
       assert.equal(api.messages.length,2);assert.match(api.messages[1].text,/有 3 題/);
       delete process.env.LONG_TASK_NOTIFY_CONFIG;

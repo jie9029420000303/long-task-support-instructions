@@ -69,7 +69,7 @@ function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   const applied=row.type==='turn_context'?payload:row.type==='event_msg'&&payload.type==='thread_settings_applied'?payload.thread_settings||{}:null;
   if(applied&&(applied.approval_policy||applied.model))state.executorSettings={approvalPolicy:applied.approval_policy||state.executorSettings?.approvalPolicy||null,
     reviewer:applied.approvals_reviewer||state.executorSettings?.reviewer||null,model:applied.model||state.executorSettings?.model||null,
-    effort:applied.effort||state.executorSettings?.effort||null,at};
+    effort:applied.effort||state.executorSettings?.effort||null,sandbox:applied.sandbox_policy?.type||state.executorSettings?.sandbox||null,at};
   if(row.type==='response_item'&&['custom_tool_call_output','function_call_output'].includes(payload.type)){
     const output=typeof payload.output==='string'?payload.output:JSON.stringify(payload.output||'');
     // A real refusal carries the reviewer's reason or the denial notice; output that merely quotes the phrase

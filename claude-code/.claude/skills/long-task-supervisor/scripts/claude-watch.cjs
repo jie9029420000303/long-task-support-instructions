@@ -14,6 +14,7 @@ const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const executionWake=require('./execution-wake.cjs');
 const executionWatch=require('./execution-watch.cjs');
+const questions=require('./pending-decisions.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 const clockSafety=require('./clock-safety.cjs');
 const parallelTestReview=require('./parallel-test-review.cjs');
@@ -397,6 +398,18 @@ function writeDashboard(){
   try{const snapshot=snapshotNow();dashboard.write(run,{binding,state,snapshot,paced:paceNow(snapshot),alive:true,hold:holdAlive(run),paused:paused()});}
   catch(error){state.dashboardError={message:error.message,at:now()};}
 }
+// Jay's questions reach his phone once the supervisor has finished the event that raised them and remounted this
+// watcher (Jay 2026-11-09, Codex parity). pending-decisions decides whether the list is new, retries a failed push
+// every 10 minutes and keeps the failure where the dashboard and status show it.
+let lastQuestionCheckAt=0;
+async function pushQuestions(){
+  if(Date.now()-lastQuestionCheckAt<60000||state.pending||paused())return;
+  lastQuestionCheckAt=Date.now();
+  try{
+    const result=await questions.pushOpen(run,{title:'Claude 的監督對話'});
+    if(!result.skipped||result.error)state.questionPush={ok:result.ok,key:result.key||null,error:result.error||null,at:now()};
+  }catch(error){state.questionPush={ok:false,error:error.message,at:now()};}
+}
 async function waitChange(){
   await new Promise(resolve=>{
     let watcher;
@@ -533,6 +546,7 @@ async function watch(){
       state.lastRealEventAt=at;state.lastExecutorWorkAt=at;state.lastProgressReviewAt=at;state.unplanned={};}
     state.pausedSeen=isPaused;
     writeDashboard();
+    if(!isPaused&&!state.pending&&!state.message?.finalId)await pushQuestions();
     // An unavailable source must not block other events. Recheck deferred reviews on the normal watcher cycle.
     if(!isPaused&&!state.pending&&!state.message?.finalId){
       const event=deferredDispatch.recheck(run,binding,state);

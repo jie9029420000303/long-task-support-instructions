@@ -157,9 +157,15 @@ function settingsOf(threadId){
   for(const line of buffer.toString('utf8').split('\n')){
     if(!line.includes('"turn_context"'))continue;
     try{const row=JSON.parse(line);if(row.type==='turn_context')found={model:row.payload?.model||null,effort:row.payload?.effort||null,
-      approvalPolicy:row.payload?.approval_policy||null,reviewer:row.payload?.approvals_reviewer||null,at:row.timestamp};}catch{}
+      approvalPolicy:row.payload?.approval_policy||null,reviewer:row.payload?.approvals_reviewer||null,sandbox:row.payload?.sandbox_policy?.type||null,at:row.timestamp};}catch{}
   }
   return found;
+}
+// Full access is approval never plus the full-access sandbox; null while nothing is read yet. Jay 2026-11-09 keeps the
+// platform on full access, so the supervisor asks him once at the start when the executor runs under anything else.
+function fullAccess(settings){
+  if(!settings?.approvalPolicy)return null;
+  return settings.approvalPolicy==='never'&&(!settings.sandbox||settings.sandbox==='danger-full-access');
 }
 function publish(run,state,now=Date.now()){
   const limits=Object.fromEntries(Object.entries(state.rateLimits||{}).filter(([,item])=>item.until>now)
@@ -171,4 +177,4 @@ function publish(run,state,now=Date.now()){
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);
   return body;
 }
-module.exports={FALLBACK_MS,LAST_RESORT,hashId,keyOf,chainFor,limited,next,retryAt,errorReset,resetFor,refine,recovered,scan,settingsOf,publish};
+module.exports={FALLBACK_MS,LAST_RESORT,hashId,keyOf,chainFor,limited,next,retryAt,errorReset,resetFor,refine,recovered,scan,settingsOf,fullAccess,publish};

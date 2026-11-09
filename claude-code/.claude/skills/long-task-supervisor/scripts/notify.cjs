@@ -18,10 +18,12 @@ function token(telegram){
   return execFileSync('security',['find-generic-password','-s',telegram.keychainService,'-a',telegram.keychainAccount||'','-w'],
     {encoding:'utf8',stdio:['ignore','pipe','ignore'],timeout:10000}).trim();
 }
-// One try and one retry (Jay 2026-10-29); the caller records a failure where Jay will see it.
+// One try and one retry (Jay 2026-10-29); the caller records a failure where Jay will see it. A push to Jay himself is
+// not an outside send, so no task ban or switch turns it off for a real run (Jay 2026-11-09: GDB started its watcher
+// with LONG_TASK_NOTIFY_DISABLE=1 and none of its 6 question pushes left); the switch only quiets test runs below.
 async function post(text){
   const telegram=settings();
-  if(process.env.LONG_TASK_NOTIFY_DISABLE==='1'||!telegram)return {ok:false,attempts:0,error:'not_configured: '+configFile()};
+  if(!telegram)return {ok:false,attempts:0,error:'not_configured: '+configFile()};
   const base=process.env.LONG_TASK_TELEGRAM_API||'https://api.telegram.org';
   let error;
   for(let attempt=1;attempt<=2;attempt++){
@@ -38,9 +40,10 @@ async function post(text){
 }
 const claimFile=(dir,key)=>path.join(dir,'notifications',String(key).replace(/[^\w.-]+/g,'_').slice(0,120)+'.json');
 function sent(dir,key){return readJson(claimFile(dir,key));}
-// Test runs live under the system temp directory: they never reach Jay's phone unless a test names its own config.
+// Test runs live under the system temp directory: they never reach Jay's phone unless a test names its own config
+// and leaves LONG_TASK_NOTIFY_DISABLE unset. LONG_TASK_TEMP_ROOT lets a test place a real run inside its temp folder.
 const real=file=>{try{return fs.realpathSync(file);}catch{return path.resolve(file);}};
-const temporary=dir=>{const tmp=real(os.tmpdir()),at=real(dir);return at===tmp||at.startsWith(tmp+path.sep);};
+const temporary=dir=>{const tmp=real(process.env.LONG_TASK_TEMP_ROOT||os.tmpdir()),at=real(dir);return at===tmp||at.startsWith(tmp+path.sep);};
 // The first caller to create the claim file sends; any later caller with the same key gets the saved outcome.
 async function sendOnce(dir,key,text){
   const file=claimFile(dir,key);
@@ -49,10 +52,18 @@ async function sendOnce(dir,key,text){
   try{fd=fs.openSync(file,'wx');}
   catch(error){if(error.code==='EEXIST')return {skipped:true,...(sent(dir,key)||{key})};throw error;}
   fs.writeSync(fd,JSON.stringify({key,text,claimedAt:new Date().toISOString()})+'\n');fs.closeSync(fd);
-  const outcome=temporary(dir)&&!process.env.LONG_TASK_NOTIFY_CONFIG?{ok:false,attempts:0,error:'test run under the temp directory'}:await post(text);
-  const record={key,text,at:new Date().toISOString(),...outcome};
+  const test=temporary(dir),disabled=process.env.LONG_TASK_NOTIFY_DISABLE==='1';
+  const outcome=test&&(!process.env.LONG_TASK_NOTIFY_CONFIG||disabled)?{ok:false,attempts:0,error:'test run under the temp directory'}:await post(text);
+  const record={key,text,at:new Date().toISOString(),...outcome,...(disabled&&!test?{disableIgnored:true}:{})};
   fs.writeFileSync(file+'.tmp',JSON.stringify(record,null,2)+'\n');fs.renameSync(file+'.tmp',file);
   return record;
+}
+// Note a notice that went out inside another push (a question or a delegated decision listed in a question push)
+// without sending anything; false when it was already noted.
+function mark(dir,key,extra={}){
+  const file=claimFile(dir,key);fs.mkdirSync(path.dirname(file),{recursive:true});
+  try{fs.writeFileSync(file,JSON.stringify({key,at:new Date().toISOString(),ok:true,marked:true,...extra},null,2)+'\n',{flag:'wx'});return true;}
+  catch(error){if(error.code==='EEXIST')return false;throw error;}
 }
 // Copy the recipient from an existing bot config without printing it; the token stays in the keychain.
 function configure(service,account,source){
@@ -63,7 +74,7 @@ function configure(service,account,source){
     configuredAt:new Date().toISOString()}},null,2)+'\n',{mode:0o600});
   return {configured:true,file:configFile()};
 }
-module.exports={post,sendOnce,sent,settings,configFile,home};
+module.exports={post,sendOnce,sent,mark,settings,configFile,home};
 if(require.main===module){
   const [command,...args]=process.argv.slice(2);
   (async()=>{

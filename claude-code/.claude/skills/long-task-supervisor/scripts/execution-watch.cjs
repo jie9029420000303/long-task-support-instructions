@@ -23,6 +23,18 @@ function request(run,id,binding){
 }
 function snapshot(run,binding){try{return read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'));}catch{return null;}}
 function alive(file){try{return ownerAlive(read(file).pid);}catch{return false;}}
+// Subagents above the skill default get one reminder on the next continuation (Jay 2026-11-09, Codex parity); the ids
+// already named stay in the run, so the same subagents are not reported twice.
+function modelReminder(run,binding){
+  const file=path.join(run,'model-reminders.json');let reported=[];
+  try{reported=read(file).reported||[];}catch{}
+  try{
+    const found=completion.modelReminder(pace.agentRuns(binding),{mainModel:'claude',reported});
+    if(!found)return '';
+    save(file,{reported:[...reported,...found.ids].slice(-500),at:now()});
+    return '\n\n'+found.text;
+  }catch{return '';}
+}
 function register(run,input){
   const binding=load(run),state=read(path.join(run,'daemon-state.json'));
   need(!fs.existsSync(path.join(run,'STOP'))&&state.phase!=='accepted','Stopped or accepted run');
@@ -85,7 +97,7 @@ async function watch(run){
           load(run);
           const marker='LONG_TASK_EXECUTION_RESUME:'+id;
           const prompt=marker+'\n'+completion.prompt(item,inspection)+'\n先讀 '+p.state+'，再以此參數陣列執行收件命令：'+
-            JSON.stringify([process.execPath,__filename,'receipt',run,id])+'；收件不是驗收通過。\n\n'+completion.EXECUTOR_PUSH;
+            JSON.stringify([process.execPath,__filename,'receipt',run,id])+'；收件不是驗收通過。\n\n'+completion.EXECUTOR_PUSH+modelReminder(run,binding);
           status={id,requestSha256:item.sha256,readyAt:now(),sources:inspection.ready,prompt};save(p.state,status);
           if(await sendOwn(prompt)){
             status.socketWrittenAt=now();save(p.state,status);
