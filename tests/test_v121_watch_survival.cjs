@@ -1,6 +1,7 @@
-// v1.2.1 (Jay 2026-11-09「修」): at 16:39 the App moved WEB's supervisor chat to a new log segment and killed the exec
-// session holding run-watch.cjs, and the watcher died with it (same process group). Questions the executor asked at
-// 17:15, 17:29 and 17:52 never reached the supervisor, and the supervisor answered Jay three times without remounting.
+// v1.2.1 (Jay 2026-11-09「修」): at 16:39, after Jay edited a message in WEB's supervisor chat, the App moved the chat to
+// a new log segment and killed the exec session holding run-watch.cjs, and the watcher died with it (same process group).
+// Questions the executor asked at 17:15, 17:29 and 17:52 never reached the supervisor, and the supervisor went through
+// five of Jay's turns without remounting.
 // Now the watcher runs in its own process group and keeps watching; the supervisor runs the start command at the start
 // of every turn, which takes over a watcher still running and never starts a second one.
 const test=require('node:test');
