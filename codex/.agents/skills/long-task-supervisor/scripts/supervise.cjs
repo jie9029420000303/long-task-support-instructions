@@ -82,6 +82,11 @@ function status() {
   // A PID probe is not an App read; unknown means do not claim active or automatically restart.
   const runtimePath = path.join(run, 'runtime-state.json'), runtime = fs.existsSync(runtimePath) ? read(runtimePath) : null;
   const parentAlive = runtime ? probe(runtime.pid) : null;
+  // The App ended the parent but the watcher, in its own process group, still runs (v1.2.1): the start command takes
+  // it over without a second watcher. Paths are quoted: a run directory may hold spaces or parentheses.
+  const orphaned = alive === true && parentAlive === false;
+  const quote = text => "'" + String(text).replace(/'/g, "'\\''") + "'";
+  const startCommand = quote('/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node') + ' ' + quote(path.join(__dirname, 'run-watch.cjs')) + ' ' + quote(run);
   const outage = fs.existsSync(path.join(run, 'watch-health.json')) ? read(path.join(run, 'watch-health.json')).open || null : null;
   const health = state.appHealth || {};
   const response=state.pending&&state.supervisorWake?.[state.pending.id];
@@ -98,9 +103,9 @@ function status() {
     error: state.error || null,
     // The latest question push that did not reach Jay's phone (Jay 2026-11-09): say so first in the next reply to him.
     questionPush: pending.pushProblem(run),
-    watch: { parentAlive, heartbeatAt: runtime?.heartbeatAt || null, lastReadAt: state.lastReadAt || null,
+    watch: { parentAlive, orphaned, heartbeatAt: runtime?.heartbeatAt || null, lastReadAt: state.lastReadAt || null,
       appHealth: health.failingSince ? { failingSince: health.failingSince, kind: health.kind || null, lastError: health.lastError || null } : null,
-      outage, restartCommand: parentAlive !== false || alive !== false ? null : '/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ' + path.join(__dirname, 'run-watch.cjs') + ' ' + run }
+      outage, restartCommand: parentAlive !== false || alive !== false ? null : startCommand, remountCommand: orphaned ? startCommand : null }
   };
 }
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}

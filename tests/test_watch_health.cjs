@@ -157,12 +157,15 @@ for(const [platform,dir] of [['codex',codex],['claude',claude]]){
 
 test('codex: a second run-watch start leaves the live parent alone',async()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'run-watch-once-'));
+  // A stand-in parent: a live process that runs run-watch.cjs. Its heartbeat is half an hour old, as after the Mac slept:
+  // the supervisor starts the watcher at the beginning of every turn (v1.2.1), and that must never add a second parent.
+  const parent=spawn(process.execPath,['-e','setInterval(()=>{},1e9)','run-watch.cjs'],{stdio:'ignore'});
   try{
-    const run=codexRun(root,{},{pid:process.pid,heartbeatAt:new Date().toISOString(),phase:'running',launches:[]});
+    const run=codexRun(root,{},{pid:parent.pid,heartbeatAt:minutesAgo(30),phase:'running',launches:[]});
     const second=spawnSync(process.execPath,[path.join(codex,'run-watch.cjs'),run],{encoding:'utf8',timeout:10000,env:{...process.env,LONG_TASK_REGISTER:'0'}});
-    assert.equal(second.status,0);assert.equal(JSON.parse(second.stdout).alreadyRunning,process.pid);
-    assert.equal(read(path.join(run,'runtime-state.json')).pid,process.pid,'the live parent record is untouched');
-  }finally{fs.rmSync(root,{recursive:true,force:true});}
+    assert.equal(second.status,0);assert.equal(JSON.parse(second.stdout).alreadyRunning,parent.pid);
+    assert.equal(read(path.join(run,'runtime-state.json')).pid,parent.pid,'the live parent record is untouched');
+  }finally{parent.kill('SIGKILL');fs.rmSync(root,{recursive:true,force:true});}
 });
 
 test('codex: the watcher warns the supervisor chat once when it cannot watch for 10 minutes',async()=>{

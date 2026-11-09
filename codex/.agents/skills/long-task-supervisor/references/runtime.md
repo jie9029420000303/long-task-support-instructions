@@ -47,7 +47,7 @@ node <installed-skill>/scripts/supervise.cjs shown RUN KEY...
 node <installed-skill>/scripts/supervise.cjs stop RUN "<使用者原話>"
 ```
 
-`run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。等待期間是本機程式而非模型：每 3 分鐘用 `read_thread` 讀一次執行對話與監督對話（使用者 2026-10-29 定案），不用 `wait_threads`（它綁在監督當下的回合，回合一結束就失敗）。執行對話回合一結束（它自己的 rollout 出現 `task_complete` 或 `turn_aborted`），背景程式幾秒內就提前讀取；App 還沒顯示該回合完成時，每 2 秒重讀一次、最多 5 次，並各跑一次進度時鐘，之後回到 3 分鐘補漏（使用者 2026-11-08）。同一 run 已有活著的父程序時，第二次啟動直接退出並印出 `alreadyRunning`，不會搶鎖。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
+`run-watch.cjs` 在 App 持有的本機工具 session 執行，使用可回傳 session ID 的背景命令方式；不要用父程序立即退出的 detached 啟動。啟動指令要單獨執行，不加 `cd`、分號、`&&` 或管線，工作目錄用工具參數指定（2026-11-09 實測：同一條指令單獨執行可連線，後面加 `; echo` 讓 shell 留在中間就被 App 拒絕；改用系統安裝的 node 也被拒）。父程序啟動的 `native-watch.cjs` 在自己的程序群組、以技能的 `scripts` 目錄為工作目錄執行（脫離父程序後不會被執行端的資源檢查當成任務裡未登記的程序），輸出附加寫進 run 的 `native-watch.log`：App 結束父程序所在的工作階段時，子程序沿用原連線照常讀取與送訊，但 App 不接受它再開新連線，所以父程序仍要由監督重掛（2026-11-09 實測：父程序群組被強制結束後，子程序約 15 分鐘內讀取 12 次、送訊 1 次都成功，期間電腦曾睡眠；新連線一律回 "Codex app tools pipe closed"）。等待期間是本機程式而非模型：每 3 分鐘用 `read_thread` 讀一次執行對話與監督對話（使用者 2026-10-29 定案），不用 `wait_threads`（它綁在監督當下的回合，回合一結束就失敗）。執行對話回合一結束（它自己的 rollout 出現 `task_complete` 或 `turn_aborted`），背景程式幾秒內就提前讀取；App 還沒顯示該回合完成時，每 2 秒重讀一次、最多 5 次，並各跑一次進度時鐘，之後回到 3 分鐘補漏（使用者 2026-11-08）。監督每個回合第一步都跑這個啟動指令，可以重複執行：同一 run 已有活著的父程序（PID 在、執行的是 `run-watch.cjs`）時，不論心跳新舊都直接退出並印出 `alreadyRunning`，不會搶鎖；PID 已被其他程式使用就照常啟動；父程序不在、`watcher.lock` 的子程序還在時，新父程序接管它（`runtime-state.json` 的 launch 記 `adopted:true`），等它結束才開新的，不開第二組；run 已有 STOP、accepted、stopped 或等人工收件對帳時印 `ended` 直接退出。啟動後 status 必須同時是 active、readVerified，且指定 executorId 正確，才回報已啟動。若平台權限需要核准，走該工具的原生核准機制；沒有權限時如實回報，不能繞過本機 socket 限制。
 
 開工時（續接也一樣）跑 `node <installed-skill>/scripts/watch-guard.cjs status`：`loaded` 不是 true 就跑一次 `watch-guard.cjs install`（系統排程，launchd 每 3 分鐘、不叫模型，見下方「監看中斷」）；`notify.configured` 不是 true 時小秘書推播不會送出，登記待決帳（`user_action`）請使用者提供推播設定，其餘照常開工。
 
@@ -166,11 +166,11 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 
 使用者 2026-10-29 定案：監看停住要在 10 分鐘內讓他知道（先前三次停擺都是幾小時後才被發現，合計空等約 18 小時）。
 
-- 判定：只有成功讀到執行對話才算監看在運作。連續讀不到（`daemon-state` 的 `appHealth.failingSince`）、程式反覆出錯、父程序 `run-watch.cjs` 整個消失（`runtime-state.json` 的 PID 不在、心跳停了），都算沒在運作。
+- 判定：只有成功讀到執行對話才算監看在運作。連續讀不到（`daemon-state` 的 `appHealth.failingSince`）、程式反覆出錯、父程序 `run-watch.cjs` 與子程序 `native-watch.cjs` 都消失（`runtime-state.json` 與 `watcher.lock` 的 PID 都不在），都算沒在運作；只有父程序被結束、子程序還在讀取時不算，中斷時間從子程序最後一次寫狀態起算。
 - 通知：滿 10 分鐘時，`watch-health.cjs`（父程序每分鐘、系統排程 `watch-guard.cjs` 每 3 分鐘各查一次）用「Jay的小秘書」推一則「【開發任務中止，需要開啟查看】…請打開監督對話『…』查看」，並在儀表板最上方標示；同一次中斷只推一則，恢復時再推一則「【已恢復，不用處理】」。推播失敗重試一次，仍失敗就寫在儀表板。App 還收得到訊息時，監督對話另外收到一則 `LONG_TASK_WATCH_ALERT`；恢復後收到 `LONG_TASK_WATCH_RECOVERED`，用一句話結束回合即可。
 - 推播設定：Telegram bot 金鑰在鑰匙圈，收件對象在 `~/.config/long-task-supervisor/notify.json`（`notify.cjs status` 檢查、`notify.cjs configure` 設定）；兩者都不寫進 run 或技能 repo。訊息不放按鈕。推播給使用者本人不算對外發送：任務禁令或 `LONG_TASK_NOTIFY_DISABLE` 都不關閉正式 run 的推播，這個開關只在測試用暫存目錄有效（2026-11-06～08 GDB 監看以 `LONG_TASK_NOTIFY_DISABLE=1` 啟動，6 則題目推播都沒送出）。
-- 重開：子程序 `native-watch.cjs` 掛掉由父程序自動重開。父程序整個消失時，系統排程無法從 App 外重開它（2026-10-29 實測：App 只接受它自己啟動的程式連線），所以只推播；監督在下一個回合重掛。
-- **監督每個回合結束前**跑 `supervise.cjs status RUN`：`active` 為 true 才能宣稱監看啟動；`readVerified` 只代表先前讀取成功，要搭配 `readVerifiedAt`、`lastReadAt` 及實際讀取判斷目前連線。若 `active` 或 `parentAlive` 任一為 `null`，優先視為狀態不明：監督先核對 PID、父子程序、鎖、心跳及收件，不宣稱已停止或已連線，不自動重掛；其他已授權工作繼續。只有核對確認舊父程序與其他存活監看均不存在，且 run 沒有 STOP／accepted／stopped，才依上方啟動指令重掛。新 run 剛初始化、尚無 ready 或監看紀錄時，先確認確實尚未啟動且沒有舊程序或鎖，再依啟動步驟首次啟動，不等待只能由監看產生的 ready 檔。父程序還在但 `appHealth` 顯示讀不到，依 `lastError` 處理（例如執行對話被封存或刪除就登記待決帳），不另開第二組監看。
+- 重開：子程序 `native-watch.cjs` 掛掉由父程序自動重開；父程序被 App 結束時子程序照常監看。父程序消失時，系統排程無法從 App 外重開它（2026-10-29 實測：App 只接受它自己啟動的程式連線），所以子程序也停了才推播；監督每個回合第一步跑啟動指令重掛，子程序還在就由新父程序接管。
+- **監督每個回合結束前**跑 `supervise.cjs status RUN`：`active` 為 true 才能宣稱監看啟動；`readVerified` 只代表先前讀取成功，要搭配 `readVerifiedAt`、`lastReadAt` 及實際讀取判斷目前連線。`watch.orphaned` 為 true 表示父程序已被結束、子程序仍在監看：跑 `watch.remountCommand`（就是上方啟動指令）接管，不另開第二組。若 `active` 或 `parentAlive` 任一為 `null`，優先視為狀態不明：監督先核對 PID、父子程序、鎖、心跳及收件，不宣稱已停止或已連線，不另行手動重掛；其他已授權工作繼續。重掛一律用上方啟動指令，由程式核對舊父程序、子程序與 STOP／accepted／stopped。新 run 剛初始化、尚無 ready 或監看紀錄時，先確認確實尚未啟動且沒有舊程序或鎖，再依啟動步驟首次啟動，不等待只能由監看產生的 ready 檔。父程序還在但 `appHealth` 顯示讀不到，依 `lastError` 處理（例如執行對話被封存或刪除就登記待決帳），不另開第二組監看。
 
 ## 原契約、使用者修訂與舊 run 接入
 

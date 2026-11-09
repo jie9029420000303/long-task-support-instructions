@@ -23,6 +23,7 @@
 
 ## 監督
 
+- 每個回合第一步（背景程式要求一句話結束回合的短訊除外）：用可回傳 session ID 的背景命令單獨跑 `/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node <skill>/run-watch.cjs RUN`（不加 `cd`、分號、`&&` 或管線，工作目錄用工具參數）。印 `alreadyRunning` 是監看在跑；印 `ended` 是 run 已結束，不重掛；沒有立即結束就是已重掛或接管了留下的監看，這個 session 不要結束（見 runtime「監看中斷」）。
 - 處理事件：`node <skill>/supervise.cjs context RUN <事件 ID>`，決策寫到它給的 `decisionPath`，寫完跑 `supervise.cjs decision RUN <決策檔>`，通過才結束回合；已有答案先提交、確認送達，再處理延展討論。只有模型輸出、沒有決策不算處理完。
 - 決策檔（`eventId` 與事件相同）：
   - 代答或退件：`{"eventId":"…","disposition":"reply","reply":"具體指示","instruction":{"what":"…","doneWhen":"…","deadlineMinutes":30}}`；退件把 disposition 換成 `reject`。
@@ -34,5 +35,5 @@
 - 待決帳：`supervise.cjs pending RUN <變更檔>`，變更檔 `{"raise":[{"key":"k","kind":"acceptance","ask":"…","recommend":"…","why":"…","options":["…"]}],"reopen":[{"key":"k","fact":"新事實"}],"withdraw":[{"key":"k","reason":"…"}],"answer":[{"key":"k","choice":"A","quote":"使用者原話"}],"delegate":[{"key":"k","ask":"…","choice":"監督的選擇","basis":"契約條文或選擇原則","revert":"怎麼改回"}]}`。kind：irreversible、paid、delete、credential、external、prohibition、acceptance、user_action、major_change、gate；代決的 kind 選填。
 - 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，先前已列而未答的可簡述題意、推薦與後果；列出當回合跑 `supervise.cjs shown RUN <全部 key>`（背景程式還沒推過的題目一併推到小秘書；背景程式在監督處理完事件後也會自己推）。`brief.questionPush` 不是 null 時，下一則給使用者的回覆先說推播沒送出。背景事件沒有新進展或新決定時不重問，回合結尾只用一句話說明仍在監看或等待。
 - 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<ISO 時間>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。監看在跑時直接跑、不停監看；回 `queued` 就等本對話的 `LONG_TASK_AMEND_RECORDED` 再交主線，收到 `LONG_TASK_AMEND_FAILED` 就修正輸入後重跑。
-- 每個回合結束前：`supervise.cjs status RUN` 的 `active` 為 true 才可稱監看啟動；同時看 `pendingDecision` 是否仍有漏交決策，先處理原事件；若狀態不明，先核對 PID、心跳與收件，不自動重掛，其他已授權工作繼續。核對確認舊父程序與其他存活監看均不存在後才重掛；新 run 尚未啟動過時先核對無舊程序與鎖，再依啟動步驟首次啟動（見 runtime「監看中斷」）。
+- 每個回合結束前：`supervise.cjs status RUN` 的 `active` 為 true 才可稱監看啟動；`watch.orphaned` 為 true 就跑 `watch.remountCommand` 接管；同時看 `pendingDecision` 是否仍有漏交決策，先處理原事件；若狀態不明，先核對 PID、心跳與收件，不另行手動重掛，其他已授權工作繼續。新 run 尚未啟動過時先核對無舊程序與鎖，再依啟動步驟首次啟動（見 runtime「監看中斷」）。
 - 收到 `LONG_TASK_WATCH_RECOVERED`、`LONG_TASK_KEEPALIVE` 或 `LONG_TASK_MODEL_RESTORED`：用一句話結束回合。

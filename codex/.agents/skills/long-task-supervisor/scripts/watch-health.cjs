@@ -32,12 +32,18 @@ function outageOf(run,now=Date.now()){
     return base;
   }
   // Codex: the App-owned parent restarts its child; if the parent itself is gone, nothing outside the App can restart
-  // it (2026-10-29: the App tools pipe closes on a process the App did not start), so this is Jay's push.
+  // it (2026-10-29: the App tools pipe closes on a process the App did not start), so this is Jay's push. Since v1.2.1
+  // the child runs in its own process group and outlives a parent the App ended (2026-11-09 16:39, WEB): while it still
+  // runs, the run is watched and the supervisor's next turn remounts a parent over it.
   const runtime=readJson(path.join(run,'runtime-state.json'));
-  const parentState=runtime?require('./process-probe.cjs').probe(runtime.pid):null;
+  const {probe,runs}=require('./process-probe.cjs');
+  const parentState=runtime?probe(runtime.pid):null;
   if(runtime&&parentState===false){
-    const lastSeen=Math.max(Date.parse(runtime.heartbeatAt)||0,Date.parse(runtime.endedAt)||0,Date.parse(runtime.startedAt)||0);
-    return {...base,kind:'watcher_dead',since:lastSeen||now,detail:runtime.phase};
+    const watcher=readJson(path.join(run,'watcher.lock'))?.pid??state.pid;
+    if(!(probe(watcher)===true&&runs(watcher,'native-watch.cjs')!==false)){
+      const lastSeen=Math.max(Date.parse(runtime.heartbeatAt)||0,Date.parse(runtime.endedAt)||0,Date.parse(runtime.startedAt)||0,Date.parse(state.updatedAt)||0);
+      return {...base,kind:'watcher_dead',since:lastSeen||now,detail:runtime.phase};
+    }
   }
   const health=state.appHealth;
   if(health?.failingSince)return {...base,kind:health.kind==='read'?'read_failing':'watcher_error',since:Date.parse(health.failingSince)||now,detail:health.lastError};
