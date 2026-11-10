@@ -35,7 +35,7 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 | `ready` | `independent`、`safe`、`dependencies`、`exclusiveResources`、`evidence` | 已拆好、可交付的待派工作；依賴列工作包 ID |
 | `inFlight` | `handle`、`exclusiveResources`、`evidence`、`baseline`（見下） | 平台實際在跑的子代理及可查證識別 |
 | `returned` | `integrated`、`resultEvidence` | 已回報成果及主線是否已核對收回 |
-| `blocked` | `kind`、`exclusiveResources`、`evidence` | 具體阻塞；排他資源衝突用 `resource_conflict` |
+| `blocked` | `kind`、`exclusiveResources`、`evidence` | 具體阻塞，只限四種原因（見[受阻只限四種](#受阻只限四種)）；排他資源衝突用 `resource_conflict` |
 | `completed` | `acceptanceIds`、`evidence` | 已核對工作與所支援的驗收條目；不是監督已接受 |
 | `recurringRework` | `count`、`evidence` | 同一項已重做至少兩次，交監督判斷是否有效重驗 |
 
@@ -72,6 +72,19 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 - ready、inFlight、blocked、returned 的工作包可附 `acceptanceIds:["條件ID"]`，標明它推進哪幾條驗收條件。快照的 `acceptance.items` 中，FAIL／PENDING／INCONCLUSIVE 的條件若沒有任何工作包標到它，且持續 30 分鐘（扣掉電腦睡眠）、執行端已閒置，背景程式的監督時鐘發 `unplanned_criteria` 進度查核原因，附空著的子代理席位數；同一組條件只發一次，只剩等使用者核准或暫停中不發。只能等使用者核准或外部結果的條件，列進 blocked 並標上 acceptanceIds。
 - 開工拆包時，部署腳本、回退步驟、規格草稿、發布說明等準備工作一開始就列為 ready，和測試並行，不留到最後。
 - 同一包重做 2 次仍沒送驗就凍結（recurringRework 的 count 達 2 即送監督）：監督指定新做法或改派其他子代理，不讓它原樣再跑第三次。
+
+## 受阻只限四種
+
+使用者 2026-11-10：「不要因為等待我就停下來動作」。WEB 11/09 22:52 起 12 分鐘可派 0、進行中 0、受阻 14，多數受阻包只是排在後面（例如文件排在 D5 之後、F1 排在文件之後、準備單輪到才寫）。
+
+- 工作包只有四種原因能列 `blocked`；`kind` 寫對應的值，evidence 寫具體原因：
+  - 前置結果還沒出來：`dependency` 寫等哪一包；`external` 寫等哪個人或系統的什麼結果。
+  - 要使用者本人：`user`，寫要他決定或做什麼，以及待決帳的 key。
+  - 資源正被占用：`resource_conflict`，寫哪個資源被哪一包占用。
+  - 時間還沒到：`time`，只限[時間條件縮短驗證](acceptance.md#時間條件縮短驗證)允許真等的情況，寫出條文或外部限制的出處。
+- 排在計畫後面不算受阻：輪到才做、等別包做完再一起做、文件排在最後、最終回歸，都列 ready，或拆出能先做的準備包（規格草稿、測試腳本、部署與回退步驟、唯讀查核、事實紀錄）。只有前一包的結果會改寫它的範圍或判準時，才算前置結果還沒出來。
+- 執行端宣告等待或說「沒有可並行工作」時，逐包列出受阻原因與已派出的準備包。監督逐包核對：kind 寫成計畫順序或沒有具體原因的，請它改列 ready 或拆準備包並當輪派出；籠統的「沒有可並行工作」不接受。
+- 背景程式在派工快照沒有 ready、沒有 inFlight、剩下全部在 blocked，且執行端閒置 5 分鐘（扣掉電腦睡眠）時，發 `all_blocked` 進度查核原因，附 `allBlocked.packages`（每包的 id、kind、依賴、驗收條件與前兩筆證據）與已持續的分鐘數。同一組受阻包只發一次；這組出現後監督已對執行端事件提交過判定，就當作已在 `brief.allBlocked` 看過、不發；等使用者核准不擋這個提醒。context 的 `brief.allBlocked` 隨時列出這組受阻包，不是 null 時，處理等待與進度事件都要逐包核對。
 
 ## 決策更新與派工對帳
 

@@ -48,7 +48,9 @@ test('a result appearing early returns through the original executor Bash when o
   assert.equal(result.fallback,true);assert.equal(result.id,item.id);assert.equal(output.length,1);
   assert.match(output[0],new RegExp('LONG_TASK_EXECUTION_RESUME:'+item.id));
   // Jay 2026-11-09: every message to the executor pushes it to dispatch subagents at full speed, this background resume too.
-  assert.ok(output[0].endsWith(require('../claude-code/.claude/skills/long-task-supervisor/scripts/execution-wake.cjs').EXECUTOR_PUSH));
+  // Jay 2026-11-10: the last line is the Taipei time the program sent it, so the next time the executor writes starts from the clock.
+  assert.ok(output[0].includes('\n\n'+require('../claude-code/.claude/skills/long-task-supervisor/scripts/execution-wake.cjs').EXECUTOR_PUSH+'\n'));
+  assert.match(output[0].split('\n').at(-1),/^背景程式送出時間（台北）：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   const state=read(api.paths(f.run,item.id).state);assert.ok(state.readyAt);assert.ok(state.fallbackAt);
   assert.equal(fs.existsSync(api.paths(f.run,item.id).receipt),false,'transport must not manufacture a model-read receipt');
   assert.equal(api.receipt(f.run,item.id).executorId,f.executorId);

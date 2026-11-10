@@ -17,7 +17,8 @@ function validate(progress,contract){
       const a=item.lastAttempt;need(text(a.id)&&text(a.caseId)&&text(a.revision)&&text(a.reason),item.id+' attempt needs id, stable caseId, revision and reason');
       need(['PASS','FAIL','BLOCKED','INCONCLUSIVE'].includes(a.outcome),item.id+' has invalid attempt outcome');
       evidence(a.evidence,item.id+' attempt');
-      need(Number.isFinite(Date.parse(a.startedAt))&&Number.isFinite(Date.parse(a.finishedAt))&&Date.parse(a.finishedAt)>=Date.parse(a.startedAt),item.id+' attempt needs actual start/end timestamps');
+      const {exactTime,notLater}=require('./contract-state.cjs'),started=exactTime(a.startedAt),finished=exactTime(a.finishedAt);
+      need(started!==null&&notLater(finished)&&finished>=started,item.id+' attempt needs actual start/end timestamps with date, time and zone, not later than now');
     }
   }
   need(seen.size===expected.size,'acceptance.items must cover every locked criterion');

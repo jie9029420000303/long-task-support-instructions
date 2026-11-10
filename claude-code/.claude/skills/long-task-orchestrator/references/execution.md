@@ -42,7 +42,7 @@
 
 ```
 [工作包] id、類型（A 查核／B 技術／C 研究／介面操作）、依賴、目前錯誤次數與本次 effort 檔
-[狀態] 一行 JSON，是這包狀態的唯一紀錄：新建 {"list":"ready"}；派出 {"list":"inFlight","handle":"agent:<id>","baseline":{…}}；收回 {"list":"returned","resultEvidence":["<回報檔>"]}；核對完 {"list":"completed"}；受阻 {"list":"blocked","kind":"…"}；不再是當前工作 {"list":"archived"}。受監督時用 `dispatch.cjs mark` 改，同一指令重產派工快照
+[狀態] 一行 JSON，是這包狀態的唯一紀錄：新建 {"list":"ready"}；派出 {"list":"inFlight","handle":"agent:<id>","baseline":{…}}；收回 {"list":"returned","resultEvidence":["<回報檔>"]}；核對完 {"list":"completed"}；受阻 {"list":"blocked","kind":"…"}（kind 只限四種原因，見 SKILL「積極派工」第 8 點）；不再是當前工作 {"list":"archived"}。受監督時用 `dispatch.cjs mark` 改，同一指令重產派工快照
 [驗收條目] 這包推進的驗收條件 ID（受監督時成為快照的 acceptanceIds）；沒有就省略
 [候選版] 版號／雜湊、來源路徑或 URL
 [工作區] 每行一個：path:<絕對路徑>、worktree:<唯一識別值>、base:<commit 或 SHA-256>

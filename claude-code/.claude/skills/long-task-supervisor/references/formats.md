@@ -20,6 +20,9 @@
 
 - 新定案登記、壓縮續接、收包及等待前，用 `dispatch.cjs reconcile RUN` 核對有效決策、可派包與前置；核對後在原 mark／collect／from-wp 命令加 `--reviewed "核對依據與結果"`。未定案討論不改既有派工原則，真實阻塞只停該動作。
 - `capacity.verified` 記實際總席位；已有節流用 `capacity.throttle:{limit,reason,evidence,reviewWhen}` 另記，沿用限制數字及來源，不自行改設定。
+- 受阻只限四種，`kind` 寫 `dependency`／`external`（前置結果還沒出來）、`user`（要使用者本人）、`resource_conflict`（資源被占用）、`time`（條文明定要真等的時長），evidence 寫具體原因；排在後面不算受阻，列 ready 或拆準備包。宣告等待或說沒有可並行工作前，逐包列出原因與已派的準備包。
+- 時間條件（排程、間隔、逾時、到期、N 天）直接觸發或縮短時間驗，週期至少看到兩次，正式值用設定讀回或自動化測試確認；只有條文明定觀察時長才真等；不自行排「幾點以後」。
+- 時間取系統時鐘（同一步 `TZ=Asia/Taipei date '+%F %T'`），不推估、不寫 05:5x；時間欄位用含時區的 ISO（例如 `2026-11-10T12:30:00+08:00`），不能晚於現在。
 
 ## 監督
 
@@ -33,5 +36,8 @@
 - 有推薦且在本案授權範圍內、不受禁令或適用專案規則限制時就照推薦直接回覆執行端；只有推薦的那條路本身要改驗收條件、刪除或永久改動既有資料，或碰到開工時沒授權或超出上限的付費、帳號密碼、正式部署，以及改寫 Git 歷史、寄信與對客戶或公開的正式發送、推翻使用者禁令、使用者自設的核准關卡、本人須到場或動手或只有他知道的事實、超出契約目標或範圍的變更，或本案有效授權、禁令及適用專案規則明寫監督不得代確認，才登記待決帳問使用者；契約範圍內的其他事依規格代決，用 `delegate` 登記後直接回覆。
 - 待決帳：`supervise.cjs pending RUN <變更檔>`，變更檔 `{"raise":[{"key":"k","kind":"acceptance","ask":"…","recommend":"…","why":"…","options":["…"]}],"reopen":[{"key":"k","fact":"新事實"}],"withdraw":[{"key":"k","reason":"…"}],"answer":[{"key":"k","choice":"A","quote":"使用者原話"}],"delegate":[{"key":"k","ask":"…","choice":"監督的選擇","basis":"契約條文或選擇原則","revert":"怎麼改回"}]}`。kind：irreversible、paid、delete、credential、external、prohibition、acceptance、user_action、major_change、gate；代決的 kind 選填。
 - 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，先前已列而未答的可簡述題意、推薦與後果；背景事件沒有新進展或新決定時不重問，回合結尾只用一句話說明仍在監看或等待。出卡的同回合跑 `supervise.cjs shown RUN <全部 key>`（背景程式還沒推過的題目一併推到小秘書；背景程式在監督處理完事件後也會自己推）。`brief.questionPush` 不是 null 時，下一則給使用者的回覆先說推播沒送出。
-- 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<ISO 時間>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。
+- 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<含時區的 ISO 時間，例如 2026-11-10T08:48:00+08:00>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。
 - 每次決策後重掛唯一的背景接收器 `claude-watch.cjs RUN`（沒有活的才掛），結束回合前 `supervise.cjs status RUN` 的 `active` 要是 true。
+- 時間：用 `brief.now`、`status.nowTaipei` 或同一步的 `TZ=Asia/Taipei date`；amend 的 `authority.at` 要含時區的完整 ISO 時間、不晚於現在，否則程式拒收。指令輸出前面的語系警告不要當成結果。
+- `all_blocked` 或 `brief.allBlocked` 不是 null：逐包核對受阻四種原因，排在後面的請改 ready、拆準備包並當輪派出；不接受籠統的「沒有可並行工作」。
+- 時間條件用直接觸發或縮短時間驗（監督代決，不問使用者）；不自排「幾點以後」；驗收收尾附上線後觀察清單。

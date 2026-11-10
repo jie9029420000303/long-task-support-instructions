@@ -177,7 +177,7 @@ test('a refusal whose named reset already passed keeps the model and continues t
     await until(()=>f.calls().some(call=>/已過/.test(call.prompt)));
     const resume=f.calls().find(call=>/已過/.test(call.prompt));
     assert.equal(resume.threadId,'executor-qa');assert.equal(resume.model,opus,'no move to the paid key for a limit that is over');
-    assert.ok(resume.prompt.endsWith(EXECUTOR_PUSH));
+    assert.ok(resume.prompt.includes('\n\n'+EXECUTOR_PUSH+'\n'));assert.match(resume.prompt.split('\n').at(-1),/^背景程式送出時間（台北）：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     assert.ok(!f.calls().some(call=>call.model===paid));
     assert.equal(read(f.statePath).rateLimits['anthropic/'].fromError,true);
   }finally{await f.stop();}
@@ -225,15 +225,18 @@ test('a supervisor moved to the paid key gets its model back once its route work
   }finally{await g.stop();}
 });
 
-test('every message to the executor ends with the full-speed push; receipts keep the bare prompt and a paused run gets none',async()=>{
+test('every message to the executor carries the full-speed push and ends with its Taipei send time; receipts keep the bare prompt and a paused run gets none',async()=>{
   assert.match(EXECUTOR_PUSH,/積極派工/);assert.match(EXECUTOR_PUSH,/子代理/);assert.match(EXECUTOR_PUSH,/暫停或停止/);
   const f=fixture({finals:['LONG_TASK_EVENT {"kind":"progress","nextAction":"run the B6 checks"}']});
   try{
     f.start();
     await until(()=>f.calls().some(call=>call.prompt.includes('run the B6 checks')));
     const sent=f.calls().find(call=>call.prompt.includes('run the B6 checks'));
-    assert.equal(sent.threadId,'executor-qa');assert.ok(sent.prompt.endsWith('\n\n'+EXECUTOR_PUSH));
-    const [marker,...rest]=sent.prompt.split('\n'),key=marker.replace('LONG_TASK_DELIVERY:',''),bare=rest.join('\n').slice(0,-(EXECUTOR_PUSH.length+2));
+    assert.equal(sent.threadId,'executor-qa');
+    // Only the Taipei time the program read from the clock follows the push (Jay 2026-11-10); the receipt hash still covers the bare prompt.
+    const tail='\n\n'+EXECUTOR_PUSH+'\n',at=sent.prompt.lastIndexOf(tail);
+    assert.ok(at>0);assert.match(sent.prompt.slice(at+tail.length),/^背景程式送出時間（台北）：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    const [marker,...rest]=sent.prompt.slice(0,at).split('\n'),key=marker.replace('LONG_TASK_DELIVERY:',''),bare=rest.join('\n');
     const receipt=path.join(f.run,'receipt-'+key+'.json');
     await until(()=>fs.existsSync(receipt)&&read(receipt).confirmed);
     assert.equal(read(receipt).promptSha256,crypto.createHash('sha256').update(bare).digest('hex'),'deliveries saved before the upgrade still reconcile');

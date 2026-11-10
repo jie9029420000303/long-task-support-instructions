@@ -92,6 +92,8 @@ function status() {
   const response=state.pending&&state.supervisorWake?.[state.pending.id];
   return {
     run, executorId: binding.executorId, supervisorId: binding.supervisorId,
+    // The system clock, for every time written this turn (2026-11-10): copy it, never estimate or convert by hand.
+    nowTaipei: require('./execution-wake.cjs').taipei(),
     phase: state.phase, active: ['watching', 'awaiting_decision', 'needs_user'].includes(state.phase) ? alive : false,
     readVerified: Boolean(ready && ready.readVerified && ready.executorId === binding.executorId), readVerifiedAt:ready?.at || null,
     reads: state.reads, messages: state.messages.length, acceptedAt: state.acceptedAt || null,
@@ -140,7 +142,9 @@ function brief() {
   const latestAgents=new Map();
   for(const item of observedAgents||[]){const id=item.path||item.id;if(id&&(!latestAgents.has(id)||(item.lastAt||0)>(latestAgents.get(id).lastAt||0)))latestAgents.set(id,item);}
   const crossChecks = snapshot ? require('./dispatch-audit.cjs').crossCheck(run,binding,snapshot,state,observedAgents||[],checkCoverage) : [];
-  return {status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
+    // The system clock, for every time written this turn (2026-11-10): copy it, never estimate or convert by hand.
+  return {now:{utc:new Date().toISOString(), taipei:require('./execution-wake.cjs').taipei()},
+    status:status(), pending:require('./review-context.cjs').summary(state.pending), pace:paced, sleeps:(state.sleeps || []).slice(-5),
     // Jay is online for 10 minutes after typing in this chat: one of the two times to ask the whole pending ledger.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < require('./guard.cjs').ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
     threads:state.threadTitles || null, paused:fs.existsSync(path.join(run, 'PAUSED.json')) ? read(path.join(run, 'PAUSED.json')) : null,
@@ -155,6 +159,8 @@ function brief() {
       lastProcessActivityAt:iso(state.lastProcessActivityAt), tail:executorTail(state.executorLog || pace.sessionFile(binding.executorId))},
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
+    // Every remaining package blocked with none ready or in flight (2026-11-10): check each reason before accepting a wait.
+    allBlocked:snapshot ? require('./dispatch-audit.cjs').allBlocked(snapshot) : null,
     dispatchReconciliation:snapshot?require('./dispatch-audit.cjs').planReview(snapshot,binding):null,
     // Executor events waiting behind the pending one, oldest first; native-watch hands them over one by one.
     eventQueue:(state.eventQueue || []).map(({id, kind, at}) => ({id, kind, at})),

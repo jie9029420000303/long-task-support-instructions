@@ -100,7 +100,10 @@ test('a watcher recovers a review that spoke but did not decide, deduplicates ac
   save(path.join(run,'binding.json'),binding);save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0});
   const fixture=path.join(root,'mock.json'),sent=path.join(root,'sent.json'),activity=path.join(root,'model-spoke'),completed=path.join(root,'turn-ended');
   save(fixture,{supervisorId:binding.supervisorId,executorId:binding.executorId,final:'Need review.\nLONG_TASK_EVENT {"kind":"question"}',supervisorActivityGate:activity,supervisorCompletedGate:completed});
-  const env={...process.env,CODEX_HOME:path.join(root,'empty-home'),CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sent,CODEX_SUPERVISOR_WAKE_MS:'30',CODEX_SUPERVISOR_DECISION_POLL_MS:'20'};
+  // The first wake check comes SUPERVISOR_WAKE_MS after delivery. At 30 ms the test had to write the model-spoke gate within
+  // about 50 ms of seeing the delivery; under load it missed, the reminder went out and the test timed out (2026-11-10:
+  // 4 failures, also reproduced on v1.2.1 by writing the gate 200 ms late). 1.5 s keeps the same path without the race.
+  const env={...process.env,CODEX_HOME:path.join(root,'empty-home'),CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sent,CODEX_SUPERVISOR_WAKE_MS:'1500',CODEX_SUPERVISOR_DECISION_POLL_MS:'20'};
   let child,stderr='';const start=()=>{child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});child.stderr.on('data',b=>stderr+=b);};
   const state=()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))),calls=()=>fs.existsSync(sent)?JSON.parse(fs.readFileSync(sent)):[];
   const stop=()=>stopChild(child);

@@ -67,6 +67,18 @@ function smallerRead(args){
   if((args.maxOutputCharsPerItem||500)>500)return {...args,maxOutputCharsPerItem:Math.max(500,Math.floor(args.maxOutputCharsPerItem/4))};
   return null;
 }
+// Even 1 turn at 500 characters can be too large: the App cannot return a single oversized turn (2026-11-09 OPS: one
+// executor turn from 21:44 to 04:03 restarted the watcher 11 times, and the read kept failing after the turn ended
+// until a new one began). The thread's own rollout on this Mac holds the same turns: read them there, at the size first
+// asked for, so a final answer keeps its event line.
+function rolloutRead(args){
+  let turns=[];
+  try{const file=pace.sessionFile(args.threadId);if(file)turns=require('./rollout-turns.cjs').recent(file,args);}catch{}
+  if(!turns.length)return null;
+  (state.rolloutReads||=[]).push({threadId:args.threadId,turnLimit:args.turnLimit||1,latestTurn:turns[0].id,at:now()});
+  if(state.rolloutReads.length>20)state.rolloutReads.splice(0,state.rolloutReads.length-20);
+  return {content:[{type:'text',text:JSON.stringify({thread:{id:args.threadId,status:{type:turns[0].status==='inProgress'?'active':'idle'}},turns,source:'local rollout'})}]};
+}
 // Whether the watch works, kept across restarts in daemon-state: watch-health.cjs (the parent each minute, the system
 // guard every 3 minutes) pushes Jay after 10 minutes. Only a successful read of the bound executor counts as working;
 // a send that gets through while reads fail does not end the outage.
@@ -87,6 +99,7 @@ function appFailing(kind,message){
   checkpoint();
 }
 async function rpc(name, args, timeout = 75000) {
+  const asked=args;
   for(let attempt=0;;attempt++){
     const response = await client.request('tools/call',{name,arguments:args,_meta:meta},timeout);
     if (!(response.error || response.result?.isError)) {
@@ -100,6 +113,8 @@ async function rpc(name, args, timeout = 75000) {
       if(state.readShrinks.length>20)state.readShrinks.splice(0,state.readShrinks.length-20);
       args=smaller;attempt--;continue;
     }
+    const local=oversized?rolloutRead(asked):null;
+    if(local){if(asked.threadId===binding.executorId)appOk();return local;}
     const transient=name==='read_thread'&&isAppToolFailure(response.error);
     if(transient&&attempt<READ_RETRY_MS.length){
       (state.readRetries||=[]).push({tool:name,attempt:attempt+1,at:now()});if(state.readRetries.length>20)state.readRetries.splice(0,state.readRetries.length-20);
@@ -230,9 +245,10 @@ function markSent(target, key) {
   checkpoint();
 }
 function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
-// Every message to the executor ends with the push to dispatch at full speed (Jay 2026-11-09), and with one reminder
-// about subagents that ran above the skill default since the last one. Only the sent text carries them: receipts, saved
-// deliveries and their hashes keep the bare prompt, so a delivery saved before an upgrade still matches.
+// Every message to the executor ends with the push to dispatch at full speed (Jay 2026-11-09), with one reminder about
+// subagents that ran above the skill default since the last one, and with the Taipei time it was sent (2026-11-10).
+// Only the sent text carries them: receipts, saved deliveries and their hashes keep the bare prompt, so a delivery
+// saved before an upgrade still matches.
 function outgoing(target,prompt){
   if(target!==binding.executorId||isPaused())return prompt;
   let reminder='';
@@ -240,7 +256,7 @@ function outgoing(target,prompt){
     const found=executionWake.modelReminder(pace.agentRuns(binding),{mainModel:state.executorSettings?.model,reported:state.modelReminded||[]});
     if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
   }catch{}
-  return prompt+'\n\n'+executionWake.EXECUTOR_PUSH+reminder;
+  return prompt+'\n\n'+executionWake.EXECUTOR_PUSH+reminder+'\n'+executionWake.sentLine();
 }
 function assistantMarker(detail) {
   for (const turn of detail.turns || []) {

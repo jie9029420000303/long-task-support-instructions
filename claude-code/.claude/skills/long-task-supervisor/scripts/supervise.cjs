@@ -149,7 +149,8 @@ function status() {
   if (ready && ready.pid === state.pid) {try {process.kill(ready.pid,0);alive=true;} catch {}}
   // Watching means the supervisor can be woken: the watcher reads, and the hold keeps the chat loaded when it hands off.
   const hold = holdAlive(run);
-  return {run,supervisorId:binding.supervisorId,executorId:binding.executorId,
+    // The system clock, for every time written this turn (2026-11-10): copy it, never estimate or convert by hand.
+  return {run,supervisorId:binding.supervisorId,executorId:binding.executorId,nowTaipei:require('./execution-wake.cjs').taipei(),
     phase:state.phase,active:alive && ready?.readVerified === true && state.phase==='watching' && hold,hold,
     readVerified:ready?.readVerified === true,reads:state.reads,acceptedAt:state.acceptedAt || null,error:state.error || null,
     unconfirmedDeliveries:Object.keys(state.unconfirmedDeliveries||{}), queued:handoffQueue(run).length,
@@ -194,7 +195,9 @@ function brief() {
   const resolved = Object.entries(state.resolved || {}).slice(-3).map(([id, item]) => ({id, kind:item.event?.kind, reasons:item.event?.reasons,
     disposition:item.obsolete ? 'obsolete' : item.closedWithAcceptance ? 'closed_with_acceptance' : item.decision?.disposition, at:item.event?.at}));
   const pausedFile = path.join(run, 'PAUSED.json');
-  return {status:status(), pending:review.summary(state.pending,binding), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt),
+    // The system clock, for every time written this turn (2026-11-10): copy it, never estimate or convert by hand.
+  return {now:{utc:new Date().toISOString(), taipei:require('./execution-wake.cjs').taipei()},
+    status:status(), pending:review.summary(state.pending,binding), pace:pace.inFlight(binding, snapshot, Date.now(), state.sleeps, state.lastExecutorWorkAt),
     sleeps:(state.sleeps || []).slice(-5),
     // Jay is online for 10 minutes after typing in the supervisor chat: then ask every open ledger item at once.
     user:{online:Boolean(state.lastUserInputAt && Date.now() - state.lastUserInputAt < ONLINE_MS), lastInputAt:iso(state.lastUserInputAt)},
@@ -210,6 +213,8 @@ function brief() {
     agentActivity,
     dispatch:snapshot ? {activity:snapshot.activity, planningRevision:snapshot.planningRevision, ready:(snapshot.packages?.ready || []).map(item => item.id),
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
+    // Every remaining package blocked with none ready or in flight (2026-11-10): check each reason before accepting a wait.
+    allBlocked:snapshot ? require('./dispatch-audit.cjs').allBlocked(snapshot) : null,
     eventQueue:executorQueue().map(({id, kind, at}) => ({id, kind, at})),
     // The whole pending-decision ledger on every wake, so compaction never loses what waits on Jay.
     pendingDecisions:pending.view(run, state), questionPush:pending.pushProblem(run), recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};

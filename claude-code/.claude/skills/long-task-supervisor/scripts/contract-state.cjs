@@ -5,6 +5,17 @@ const digest=value=>crypto.createHash('sha256').update(JSON.stringify(value)).di
 const read=file=>JSON.parse(fs.readFileSync(file,'utf8'));
 const need=(ok,message)=>{if(!ok)throw Error(message);};
 const text=value=>typeof value==='string'&&value.trim();
+// A time a model writes names its date, clock time and zone, and reads back as that instant (2026-11-10: Node's
+// Date.parse took the perl locale warning 'LC_ALL = "C.UTF-8",' as 2001-07-31, and an OPS amendment recorded it as
+// Jay's time). Returns epoch ms, or null for anything else, such as '11/10 08:48' or '05:5x'.
+const EXACT_TIME=/^(\d{4})-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+function exactTime(value){
+  const match=typeof value==='string'&&EXACT_TIME.exec(value);
+  const ms=match?Date.parse(value):NaN,year=match?Number(match[1]):0;
+  return Number.isFinite(ms)&&year>=2020&&year<2100?ms:null;
+}
+// A time already past may be rounded up to the minute, so up to one minute after the clock still counts as now.
+const notLater=ms=>ms!==null&&ms<=Date.now()+60000;
 function inside(file,root){const rel=path.relative(root,file);return rel===''||(!rel.startsWith('..'+path.sep)&&rel!=='..'&&!path.isAbsolute(rel));}
 const journal=run=>{const file=path.join(run,'contract-amendments.jsonl');return fs.existsSync(file)?fs.readFileSync(file,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)):[];};
 // No live process may write the run while its contract state is changed or copied. self: the PID of a Codex watcher
@@ -133,6 +144,9 @@ function append(run,binding,input,options={}){
   if(prior){const {previousSha256,...saved}=prior;need(JSON.stringify(saved)===JSON.stringify(input),'Recorded amendment is immutable');return {recorded:true,alreadyRecorded:true};}
   const current=effective(run,binding);
   validateRow(input,binding,contract,new Set([...current.criteria,...(current.excluded||[])].map(item=>item.id)));
+  // A new row only: rows already in the journal replay as recorded (an OPS row of 2026-11-10 holds the warning text).
+  need(notLater(exactTime(input.authority.at)),'authority.at must be the time of Jay\'s words with date, time and zone, not later than now (for example '+
+    new Date().toISOString()+'); got '+JSON.stringify(input.authority.at));
   const row={...input,previousSha256:rows.length?digest(rows.at(-1)):binding.contractSha256};
   // Validate the proposed complete scope before committing its immutable journal entry.
   const allExcluded=new Set(effective(run,binding).excluded?.map(item=>item.id)||[]);
@@ -165,5 +179,5 @@ function update(run,binding,work,options={}){
   fs.writeFileSync(file,JSON.stringify({pid:process.pid,at:new Date().toISOString()})+'\n',{flag:'wx'});
   try{return work();}finally{fs.unlinkSync(file);}
 }
-module.exports={effective,safePoint,supervisorOnly,userSource,journal,inherit,startContract,append:(run,binding,input,options)=>update(run,binding,()=>append(run,binding,input,options),options),
+module.exports={effective,safePoint,supervisorOnly,userSource,journal,inherit,startContract,exactTime,notLater,append:(run,binding,input,options)=>update(run,binding,()=>append(run,binding,input,options),options),
   attachAcceptance:(run,binding,input)=>update(run,binding,()=>attachAcceptance(run,binding,input))};

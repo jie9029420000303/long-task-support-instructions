@@ -332,6 +332,20 @@ function supervisorClock(){
   if(longUncovered.length&&idle&&once('unplanned:'+longUncovered.join(','))){
     unplanned={criteria:longUncovered,freeCapacity:freeCapacity(snapshot),minutes:Math.round(Math.min(...longUncovered.map(id=>awake(plan[id])))/60000)};
   }
+  // Every remaining package blocked, none ready or in flight, while the executor is idle (Jay 2026-11-10: 「不要因為等待
+  // 我就停下來動作」; WEB 11/09 22:52 idled 12 minutes with 14 packages blocked, most only later in the plan). Every event
+  // review shows the set in brief.allBlocked; the clock wakes the supervisor once per set, and only when no ruling on an
+  // executor event came while the set stood, as when the executor waits inside a turn. Waiting on Jay's approval does
+  // not silence it: that is the wait it is for.
+  const blockedSet=require('./dispatch-audit.cjs').allBlocked(snapshot);
+  let allBlocked=null;
+  if(blockedSet){
+    const key='all_blocked:'+require('node:crypto').createHash('sha256').update(blockedSet.packages.map(item=>item.id+'='+item.kind).sort().join('\n')).digest('hex').slice(0,16);
+    if(state.allBlocked?.key!==key)state.allBlocked={key,since:Date.now()};
+    if((state.lastDecisionAt||0)>=state.allBlocked.since)once(key);
+    else if(!limited&&!executorBusy(state)&&awake(Math.max(state.allBlocked.since,idleSince))>=IDLE_WORK_MS&&once(key))
+      allBlocked={...blockedSet,minutes:Math.round(awake(state.allBlocked.since)/60000)};
+  }else delete state.allBlocked;
   // A supervisor instruction not acted on by its deadline: no completed executor turn and no snapshot update since it
   // was sent. Action closes it even while Jay's approval is awaited; only the overdue notice waits.
   let instructionOverdue=null;const sent=state.instruction;
@@ -370,7 +384,7 @@ function supervisorClock(){
     devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(usedMs/60000),basis:budget.basis,estimate:budget.estimate||null}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(idleWork?['idle_with_work']:[]),
-    ...(noEventHour?['no_event_hour']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
+    ...(noEventHour?['no_event_hour']:[]),...(unplanned?['unplanned_criteria']:[]),...(allBlocked?['all_blocked']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automations.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(rateReset?['rate_limit_reset']:[]),
     ...(platformError?['platform_error']:[]),...(executorModel?['executor_model']:[]),...(docBudget?['doc_budget']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
@@ -387,7 +401,7 @@ function supervisorClock(){
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:binding.executorLog}})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awake(lastEvent)/60000)}}:{}),
-    ...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
+    ...(unplanned?{unplannedCriteria:unplanned}:{}),...(allBlocked?{allBlocked}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
     ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(platformError?{platformError}:{}),...(executorModel?{executorModel}:{}),
     ...(docBudget?{docBudget}:{})};
 }
@@ -609,7 +623,7 @@ async function watch(){
         machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,
         ...(parallelTest?{parallelTestReview:parallelTest}:{}),
-        ...Object.fromEntries(['noEventHour','unplannedCriteria','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel','docBudget']
+        ...Object.fromEntries(['noEventHour','unplannedCriteria','allBlocked','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel','docBudget']
           .filter(key=>clock?.[key]).map(key=>[key,clock[key]])),at:now()};
       state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=event;state.phase='awaiting_decision';checkpoint();
       wake(event);

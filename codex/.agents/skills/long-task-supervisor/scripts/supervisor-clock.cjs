@@ -287,6 +287,20 @@ function check(run,binding,state,force=false){
     const seats=Number(snapshot?.capacity?.verified)||0,inFlight=require('./dispatch-audit.cjs').agentSeatCount(snapshot?.packages?.inFlight||[]);
     unplanned={criteria:longUncovered,freeCapacity:Math.max(0,seats-inFlight),minutes:Math.round(Math.min(...longUncovered.map(id=>awakeSince(state,plan[id])))/60000)};
   }
+  // Every remaining package blocked, none ready or in flight, while the executor is idle (Jay 2026-11-10: 「不要因為等待
+  // 我就停下來動作」; WEB 11/09 22:52 idled 12 minutes with 14 packages blocked, most only later in the plan). Every event
+  // review shows the set in brief.allBlocked; the clock wakes the supervisor once per set, and only when no ruling on an
+  // executor event came while the set stood, as when the executor waits inside a turn. Waiting on Jay's approval does
+  // not silence it: that is the wait it is for.
+  const blockedSet=require('./dispatch-audit.cjs').allBlocked(snapshot);
+  let allBlocked=null;
+  if(blockedSet){
+    const key='all_blocked:'+crypto.createHash('sha256').update(blockedSet.packages.map(item=>item.id+'='+item.kind).sort().join('\n')).digest('hex').slice(0,16);
+    if(state.allBlocked?.key!==key)state.allBlocked={key,since:Date.now()};
+    if((state.lastDecisionAt||0)>=state.allBlocked.since)once(key);
+    else if(!executorBusy(state)&&awakeSince(state,Math.max(state.allBlocked.since,idleSince))>=IDLE_WORK_MS&&once(key))
+      allBlocked={...blockedSet,minutes:Math.round(awakeSince(state,state.allBlocked.since)/60000)};
+  }else delete state.allBlocked;
   // A supervisor instruction not acted on by its deadline: no real event and no snapshot update since it was sent.
   // Action closes it even while Jay's approval is awaited; only the overdue notice waits (2026-10-11 A: an instruction
   // acted on at 23:17 stayed open behind an approval wait and would have fired as overdue the moment Jay switched).
@@ -332,7 +346,7 @@ function check(run,binding,state,force=false){
     devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(usedMs/60000),basis:budget.basis,estimate:budget.estimate||null}:null;
   const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
-    ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
+    ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(allBlocked?['all_blocked']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(platformError?['platform_error']:[]),
     ...(docBudget?['doc_budget']:[]),...(testLeads.length?['parallel_test_review']:[])];
   if(Date.now()-(state.lastHealthAt||0)>=REVIEW_INTERVAL_MS){
@@ -348,7 +362,7 @@ function check(run,binding,state,force=false){
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
     failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:state.executorLog||null,at:item.lastAt}})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
-    ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
+    ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(allBlocked?{allBlocked}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
     ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{}),
     ...(docBudget?{docBudget}:{}),...(testLeads.length?{parallelTestReview:{tests:testLeads,fingerprint:testFingerprint}}:{})};
 }

@@ -24,20 +24,20 @@ function parse(snapshot,binding){
     need(t&&Number.isInteger(t.limit)&&t.limit>=0&&t.limit<=snapshot.capacity.verified,'capacity.throttle.limit must be within verified capacity');
     need(nonEmpty(t.reason)&&nonEmpty(t.reviewWhen),'capacity.throttle needs reason and reviewWhen');evidence(t.evidence,'capacity.throttle');}
   if(snapshot.planningReview!==undefined){const p=snapshot.planningReview;
-    need(p&&/^[a-f0-9]{64}$/.test(p.basis)&&nonEmpty(p.reason)&&Number.isFinite(Date.parse(p.at)),'planningReview needs basis, reason and at');}
+    need(p&&/^[a-f0-9]{64}$/.test(p.basis)&&nonEmpty(p.reason)&&contractState.notLater(contractState.exactTime(p.at)),'planningReview needs basis, reason and at (a time with date, time and zone, not later than now)');}
   need(snapshot.packages&&typeof snapshot.packages==='object','packages is required');
   const p=snapshot.packages;
   for(const name of ['ready','inFlight','returned','blocked','completed','recurringRework'])records(p[name],name);
   for(const item of [...p.ready,...p.inFlight,...p.blocked])resources(item.exclusiveResources,item.id);
   for(const item of p.ready){need(typeof item.independent==='boolean'&&typeof item.safe==='boolean',item.id+' needs independent and safe');need(Array.isArray(item.dependencies),item.id+' dependencies must be an array');evidence(item.evidence,item.id);}
   for(const item of p.inFlight){need(nonEmpty(item.handle),item.id+' needs a platform handle');evidence(item.evidence,item.id);
-    if(item.baseline!==undefined){const b=item.baseline;need(b&&Number.isFinite(b.minutes)&&b.minutes>0,item.id+' baseline.minutes must be positive');need(Number.isFinite(Date.parse(b.startedAt)),item.id+' baseline.startedAt must be a time');need(nonEmpty(b.basis),item.id+' baseline.basis is required');}}
+    if(item.baseline!==undefined){const b=item.baseline;need(b&&Number.isFinite(b.minutes)&&b.minutes>0,item.id+' baseline.minutes must be positive');need(contractState.notLater(contractState.exactTime(b.startedAt)),item.id+' baseline.startedAt must be a time with date, time and zone, not later than now');need(nonEmpty(b.basis),item.id+' baseline.basis is required');}}
   for(const item of p.returned){need(typeof item.integrated==='boolean',item.id+' needs integrated');evidence(item.resultEvidence,item.id);}
   for(const item of p.blocked){need(nonEmpty(item.kind),item.id+' needs kind');evidence(item.evidence,item.id);}
   for(const item of p.completed){need(Array.isArray(item.acceptanceIds),item.id+' acceptanceIds must be an array');evidence(item.evidence,item.id);}
   for(const item of p.recurringRework){need(Number.isInteger(item.count)&&item.count>=2,item.id+' recurring count must be at least 2');evidence(item.evidence,item.id);}
   // The budget is 1.5x the measured development time; more needs the amendment where Jay allowed it.
-  if(snapshot.docBudget!==undefined){const b=snapshot.docBudget;need(b&&Number.isFinite(Date.parse(b.startedAt)),'docBudget.startedAt must be a time');
+  if(snapshot.docBudget!==undefined){const b=snapshot.docBudget;need(b&&contractState.notLater(contractState.exactTime(b.startedAt)),'docBudget.startedAt must be a time with date, time and zone, not later than now');
     need(Number.isFinite(b.devMinutes)&&b.devMinutes>0&&Number.isFinite(b.minutes)&&b.minutes>0,'docBudget.devMinutes and docBudget.minutes must be positive');
     need(nonEmpty(b.basis),'docBudget.basis is required');
     need(b.minutes<=b.devMinutes*DOC_BUDGET_RATIO+0.5||nonEmpty(b.approval),'docBudget.minutes above 1.5x devMinutes needs approval naming where Jay allowed it');
@@ -233,4 +233,14 @@ function markAnnounced(state,event){const audit=state.dispatchAudit||{};const va
 function releaseAnnounced(state,event){const keys=new Set(event.dispatchIssueKeys||[]),audit=state.dispatchAudit||{};audit.announced=(audit.announced||[]).filter(key=>!keys.has(key));state.dispatchAudit=audit;}
 function stillCurrent(run,binding,state,event){const result=inspect(run,binding,state);const active=new Set(result.issues.map(item=>item.key)),unknown=new Set(result.unknown||[]);
   return {current:event.dispatchIssueKeys?.some(key=>unknown.has(key))?null:event.dispatchIssueKeys?.every(key=>active.has(key)),result};}
-module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,crossCheck,agentSeatCount,planningBasis,planReview,docBudgetStage,trackDocTime,DOC_BUDGET_RATIO};
+// Every remaining package is blocked and none is ready or in flight (Jay 2026-11-10: 「不要因為等待我就停下來動作」; WEB
+// 11/09 22:52 idled 12 minutes with 14 packages blocked, most of them only later in the plan). The supervisor checks each
+// reason: a missing earlier result (an outside party's included), Jay himself, a resource in use, or a real duration the
+// contract names or an outside time limit with its source. Coming later in the plan is not blocked.
+function allBlocked(snapshot){
+  const p=snapshot?.packages;
+  if(!p||(p.inFlight||[]).length||(p.ready||[]).length||!(p.blocked||[]).length)return null;
+  return {packages:p.blocked.map(item=>({id:item.id,kind:item.kind,...(Array.isArray(item.dependencies)&&item.dependencies.length?{dependencies:item.dependencies}:{}),
+    ...(Array.isArray(item.acceptanceIds)&&item.acceptanceIds.length?{acceptanceIds:item.acceptanceIds}:{}),evidence:(item.evidence||[]).slice(0,2)}))};
+}
+module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,crossCheck,agentSeatCount,planningBasis,planReview,docBudgetStage,trackDocTime,allBlocked,DOC_BUDGET_RATIO};

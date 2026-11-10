@@ -20,6 +20,9 @@
 - 開發中只記事實紀錄（改了什麼、版號、部署讀回值），不寫文件；全部非文件驗收通過後，依最終結果一次寫文件。
 - 文件時間預算（派工快照 `docBudget`）：`{"startedAt":"<ISO 時間>","devMinutes":76,"minutes":114,"basis":"開發 76 分鐘 × 1.5","estimate":[{"item":"說明 .md","minutes":40},{"item":"Archify 流程圖與圖片檢查","minutes":60}]}`。開寫前逐項估時；只算真正在寫文件的時間。
 - 提問 30 分鐘沒人答：可撤回的執行細節照自己的推薦做、事後補報；改驗收、刪除或永久改動既有資料、未授權的付費／帳號密碼／正式部署、改寫 Git 歷史、非測試的正式對外發送不適用，繼續等並先做別的。
+- 受阻只限四種，`kind` 寫 `dependency`／`external`（前置結果還沒出來）、`user`（要使用者本人）、`resource_conflict`（資源被占用）、`time`（條文明定要真等的時長），evidence 寫具體原因；排在後面不算受阻，列 ready 或拆準備包。宣告等待或說沒有可並行工作前，逐包列出原因與已派的準備包。
+- 時間條件（排程、間隔、逾時、到期、N 天）直接觸發或縮短時間驗，週期至少看到兩次，正式值用設定讀回或自動化測試確認；只有條文明定觀察時長才真等；不自行排「幾點以後」。
+- 時間取系統時鐘（同一步 `TZ=Asia/Taipei date '+%F %T'`），不推估、不寫 05:5x；時間欄位用含時區的 ISO（例如 `2026-11-10T12:30:00+08:00`），不能晚於現在。
 
 ## 監督
 
@@ -34,6 +37,9 @@
 - 有推薦且在本案授權範圍內、不受禁令或適用專案規則限制時就照推薦直接回覆執行端；只有推薦的那條路本身要改驗收條件、刪除或永久改動既有資料，或碰到開工時沒授權或超出上限的付費、帳號密碼、正式部署，以及改寫 Git 歷史、寄信與對客戶或公開的正式發送、推翻使用者禁令、使用者自設的核准關卡、本人須到場或動手或只有他知道的事實、超出契約目標或範圍的變更，或本案有效授權、禁令及適用專案規則明寫監督不得代確認，才登記待決帳問使用者；契約範圍內的其他事依規格代決，用 `delegate` 登記後直接回覆。
 - 待決帳：`supervise.cjs pending RUN <變更檔>`，變更檔 `{"raise":[{"key":"k","kind":"acceptance","ask":"…","recommend":"…","why":"…","options":["…"]}],"reopen":[{"key":"k","fact":"新事實"}],"withdraw":[{"key":"k","reason":"…"}],"answer":[{"key":"k","choice":"A","quote":"使用者原話"}],"delegate":[{"key":"k","ask":"…","choice":"監督的選擇","basis":"契約條文或選擇原則","revert":"怎麼改回"}]}`。kind：irreversible、paid、delete、credential、external、prohibition、acceptance、user_action、major_change、gate；代決的 kind 選填。
 - 問使用者：`supervise.cjs ask RUN`，把全部未決項寫在同一則，先前已列而未答的可簡述題意、推薦與後果；列出當回合跑 `supervise.cjs shown RUN <全部 key>`（背景程式還沒推過的題目一併推到小秘書；背景程式在監督處理完事件後也會自己推）。`brief.questionPush` 不是 null 時，下一則給使用者的回覆先說推播沒送出。背景事件沒有新進展或新決定時不重問，回合結尾只用一句話說明仍在監看或等待。
-- 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<ISO 時間>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。監看在跑時直接跑、不停監看；回 `queued` 就等本對話的 `LONG_TASK_AMEND_RECORDED` 再交主線，收到 `LONG_TASK_AMEND_FAILED` 就修正輸入後重跑。
+- 授權或驗收修訂：`supervise.cjs amend RUN <檔>`，檔案 `{"id":"AMEND-…","contractSha256":"<binding 裡的值>","authority":{"role":"user","quote":"原話","locator":"訊息位置","at":"<含時區的 ISO 時間，例如 2026-11-10T08:48:00+08:00>"},"changes":[{"action":"authorization","id":"…","scope":"…","instruction":"…"}],"pendingKeys":["k"]}`；`changes` 另有 add、replace、exclude、restore。原文快照依 authorization.md。監看在跑時直接跑、不停監看；回 `queued` 就等本對話的 `LONG_TASK_AMEND_RECORDED` 再交主線，收到 `LONG_TASK_AMEND_FAILED` 就修正輸入後重跑。
 - 每個回合結束前：`supervise.cjs status RUN` 的 `active` 為 true 才可稱監看啟動；`watch.orphaned` 為 true 就跑 `watch.remountCommand` 接管；同時看 `pendingDecision` 是否仍有漏交決策，先處理原事件；若狀態不明，先核對 PID、心跳與收件，不另行手動重掛，其他已授權工作繼續。新 run 尚未啟動過時先核對無舊程序與鎖，再依啟動步驟首次啟動（見 runtime「監看中斷」）。
 - 收到 `LONG_TASK_WATCH_RECOVERED`、`LONG_TASK_KEEPALIVE` 或 `LONG_TASK_MODEL_RESTORED`：用一句話結束回合。
+- 時間：用 `brief.now`、`status.nowTaipei` 或同一步的 `TZ=Asia/Taipei date`；amend 的 `authority.at` 要含時區的完整 ISO 時間、不晚於現在，否則程式拒收。指令輸出前面的語系警告不要當成結果。
+- `all_blocked` 或 `brief.allBlocked` 不是 null：逐包核對受阻四種原因，排在後面的請改 ready、拆準備包並當輪派出；不接受籠統的「沒有可並行工作」。
+- 時間條件用直接觸發或縮短時間驗（監督代決，不問使用者）；不自排「幾點以後」；驗收收尾附上線後觀察清單。

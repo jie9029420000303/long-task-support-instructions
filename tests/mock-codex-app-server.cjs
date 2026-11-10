@@ -39,6 +39,8 @@ function call(name,args) {
     if (args.maxOutputCharsPerItem>20000) return {isError:true,content:[{type:'text',text:'too big'}]};
     // The App refuses a read whose reply would be too large, every time with the same arguments.
     if (data.sizeLimitChars && args.turnLimit*args.maxOutputCharsPerItem>data.sizeLimitChars) return {isError:true,content:[{type:'text',text:'Tool response exceeds the size limit'}]};
+    // One executor turn can be too large to return at any size (2026-11-10 OPS); this is the App's own reply.
+    if (data.oversizedExecutor && args.threadId===data.executorId) return {isError:true,content:[{type:'text',text:'Tool response exceeds the size limit. Request fewer turns or omit outputs. A single oversized turn cannot be returned by this tool.'}]};
     if (args.threadId===data.executorId) {
       if (args.turnLimit===1 && executorPollReads++>0) advance();
       const finals=data.finals||[data.final],turnId='executor-turn-'+(currentTurn+1);

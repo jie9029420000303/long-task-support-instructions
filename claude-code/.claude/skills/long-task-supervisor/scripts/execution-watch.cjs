@@ -97,7 +97,7 @@ async function watch(run){
           load(run);
           const marker='LONG_TASK_EXECUTION_RESUME:'+id;
           const prompt=marker+'\n'+completion.prompt(item,inspection)+'\n先讀 '+p.state+'，再以此參數陣列執行收件命令：'+
-            JSON.stringify([process.execPath,__filename,'receipt',run,id])+'；收件不是驗收通過。\n\n'+completion.EXECUTOR_PUSH+modelReminder(run,binding);
+            JSON.stringify([process.execPath,__filename,'receipt',run,id])+'；收件不是驗收通過。\n\n'+completion.EXECUTOR_PUSH+modelReminder(run,binding)+'\n'+completion.sentLine();
           status={id,requestSha256:item.sha256,readyAt:now(),sources:inspection.ready,prompt};save(p.state,status);
           if(await sendOwn(prompt)){
             status.socketWrittenAt=now();save(p.state,status);

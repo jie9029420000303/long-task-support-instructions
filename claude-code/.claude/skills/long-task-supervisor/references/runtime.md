@@ -83,6 +83,8 @@ reply／reject 在呼叫桌面原生傳訊前先執行 `node <skill>/scripts/sup
 
 決策檔已處理後，同一檔重查會回傳 `processed:true`；事後改動會被拒絕。背景工具停止、App 關閉或綁定檔損壞時停止宣稱即時監看，從既有狀態及 transcript 對帳後續接。
 
+**時間**：`supervise.cjs status` 附 `nowTaipei`，`context` 的 brief 開頭是 `now:{utc,taipei}`，都是讀取當下由程式取系統時鐘；監督寫給使用者、執行端或紀錄的時間以它們或同一步跑的 `TZ=Asia/Taipei date` 為準。背景程式送給執行主線的續接訊息最後一行是「背景程式送出時間（台北）：YYYY-MM-DD HH:MM:SS」，由程式產生。程式拒收不合格的新時間欄位：修訂的 `authority.at`、驗收實測的 `lastAttempt.startedAt`／`finishedAt`、派工快照的 `planningReview.at`、`baseline.startedAt` 與 `docBudget.startedAt`，都要含日期、時間與時區（`Z` 或 `+08:00`），不能晚於現在（容許 1 分鐘）；已登記的舊修訂照常讀取。
+
 ## 待決帳
 
 要使用者決定的事登記在 `RUN/pending-decisions.json`，只經監督對話的 `supervise.cjs pending` 寫入（執行對話寫不進去）；背景程式、儀表板與狀態面板只讀。一份變更檔可含四種清單：
@@ -114,7 +116,7 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 
 ## 主動進度查核
 
-監督有自己的進度時鐘，不以執行者宣告的等待為準：`waiting` 的 `waitMinutes` 只是參考；監督裁決後仍沒有原生續接的等待，有結果或到期另以 `continue` 喚醒。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題）；只有發現問題才輸出 `progress_review` 喚醒模型，`reasons` 標明原因。執行端忙碌時（有指令在跑，只輪詢或背景執行的不算；或正在等監督核對過的外部結果 `external_result`。執行端自己宣告的 `waitMinutes` 不算忙碌，監督照樣用自己的時鐘，使用者 2026-10-07 定案），`silence`、`idle_with_work`、`unplanned_criteria` 不發，`overdue`、`executor_blocked`、`process_stalled`、`no_event_hour` 照發（使用者 2026-10-29 定案：GDB V32 監督被誤報叫醒 23 次）。
+監督有自己的進度時鐘，不以執行者宣告的等待為準：`waiting` 的 `waitMinutes` 只是參考；監督裁決後仍沒有原生續接的等待，有結果或到期另以 `continue` 喚醒。時鐘分層：背景程式每分鐘用程式確認工作有在動、在途包是否超過 AI 時程基準，每 30 分鐘在 `RUN/clock.jsonl` 留一筆查核紀錄（活動時間、各包經過／基準、發現的問題）；只有發現問題才輸出 `progress_review` 喚醒模型，`reasons` 標明原因。執行端忙碌時（有指令在跑，只輪詢或背景執行的不算；或正在等監督核對過的外部結果 `external_result`。執行端自己宣告的 `waitMinutes` 不算忙碌，監督照樣用自己的時鐘，使用者 2026-10-07 定案），`silence`、`idle_with_work`、`unplanned_criteria`、`all_blocked` 不發，`overdue`、`executor_blocked`、`process_stalled`、`no_event_hour` 照發（使用者 2026-10-29 定案：GDB V32 監督被誤報叫醒 23 次）。
 
 `parallel_test_review` 是可辨識的完整測試或閘門的查核線索，不是閒置或違規：只辨識 Bash 呼叫第一個非空行為 `# LONG_TASK_LONG_TEST` 且後續有指令，或執行名稱明確為 `*-gate.sh`／`gate.sh` 的腳本。一般聊天、讀取檔案與未辨識的指令不當成測試；未辨識是未知。工具呼叫本身不代表已獲准，須由同一呼叫的工具結果提供平台 `backgroundTaskId` 才知已啟動；拒絕或已完成的呼叫不提醒。前景長測試若沒有可驗證的啟動識別，只標未知，不以其他同名程序推定，仍依既有進度事件查核；背景測試在監督處理時是否仍在執行亦須重查。每個工具呼叫至多送一次；只在同一輪取得平台 `TaskOutput` 對各代理的 `running` 回覆，且與有效快照及代理紀錄一致顯示席位全滿時暫不提醒；下輪沒有可信即時狀態則回到未知並最多提醒一次，不以歷史派出或缺少結束標記推定滿席。多個同時觀察到的呼叫合併一則，STOP／暫停優先；不增加等待分鐘數，也不改既有忙碌抑制。僅保存 transcript 位置、呼叫 ID、時間與命令雜湊，不保存命令或其輸出。`brief.agentActivity` 獨立讀子代理紀錄：沒有結束標記只表示待查，來源不可讀標 unknown，不把空快照當真實空席。
 
@@ -128,6 +130,7 @@ node "<skill>/scripts/supervise.cjs" dispatch-preflight "<RUN>" "<EVENT_ID>"
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有可立即開跑的工作包在等同一個資源。只算可派的包：就緒包須 `independent`、`safe`、依賴全部完成（都在 `completed`）、排他資源沒被在途包占用；受阻包只算 kind 為 `resource_conflict` 的；且它用到的每個已宣告資源空位都夠它的 `units`。依賴未完成或名額不夠的不算。同一資源的可派包集合沒變就不再叫醒，包開始或結束造成的已用數變動不算新事件（2026-10-14～15 IA 叫醒 19 次，15 次監督判不用動，多半就是依賴未完成或名額不夠）。監督評估能否並行，例如同一身分同時跑兩題、但同一題號不同時跑。
 - `repeat`：同一條指令連續失敗 3 次；同一指令成功即清除它的失敗計數，處理過一次進度查核後重新計數。同一個 `nextAction` 連報兩次則直接成為 `stalled` 事件。
 - `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠；只有背景指令在跑也算停），從執行端工作、子代理活動與監督最後一次裁決執行端事件（`lastDecisionAt`）中最晚者起算，派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景（`TaskOutput`、`BashOutput`、只有 sleep 的 Bash 等）時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，只剩等使用者核准時不發，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
+- `all_blocked`：派工快照沒有 ready、也沒有 inFlight，剩下的工作包全部在 blocked，執行端不忙且已閒置 5 分鐘（扣掉電腦睡眠；從這組受阻包出現與執行端開始閒置兩者較晚的時間起算；限速等待中不發）。同一組受阻包（每包的 id 與 kind）只通知一次，換一組才重新計時；這組出現後監督已對執行端事件提交過判定（`lastDecisionAt`），表示已在 `brief.allBlocked` 看過，就不通知；等使用者核准不擋這個提醒（使用者 2026-11-10：「不要因為等待我就停下來動作」；WEB 11/09 22:52 起 12 分鐘可派 0、進行中 0、受阻 14）。事件附 `allBlocked:{packages,minutes}`，處理見[單次事件處理](event-review.md)與[受阻只限四種](dispatch.md#受阻只限四種)。
 - `unplanned_criteria`：快照 `acceptance.items` 中 FAIL／PENDING／INCONCLUSIVE 的條件，30 分鐘（扣掉電腦睡眠）沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它，而且執行端正閒置（同 `idle_with_work` 的判斷）；執行端在忙時不發（2026-10-29 由 10 分鐘、在忙也發改成這樣：排下一包常超過 10 分鐘，多半是誤報）。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途子代理數；main 與 resource 工作不佔子代理席位，未知 handle 保守計入。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
 - `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）只算真正在寫文件的時間：有標 `"doc":true`（或 id 以 DOC 開頭）的文件包在途，且執行端或子代理 5 分鐘內有活動，兩次檢查相隔超過 5 分鐘的那段不算（使用者 2026-10-29 定案：V32 把等待也算進去，誤報用了 728 分鐘）。用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis,estimate}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；限速等待中或等使用者核准時不發。
 - `instruction_overdue`、`permission_review`、`permission_changed`、`automation_found`、`login_expired`、`rate_limit_reset`、`platform_error`、`executor_model`：見[下節](#指令期限權限模式排程登入限速儀表板與暫停)。
@@ -156,7 +159,7 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 
 先讀 [授權承接](authorization.md)，核對真實使用者原文。`supervise.cjs effective-contract RUN` 輸出原契約加已核准修訂的有效範圍、排除項、授權更新及 contractStateSha256。監督、執行、派工查核和最後接受都讀同一有效範圍。
 
-在原監督的安全停點（無 pending、無 inflight、舊 watcher 與 dispatch writer 已退出，STOP/accepted/stopped 不改）用 `supervise.cjs amend RUN INPUT.json` 登記修訂。使用者的修訂與授權收到就登記，不等下一個事件，也不只存成檔案或寫在決策帳（那樣換 run 續接、壓縮後的程式與執行端授權表都讀不到）：正在處理事件時，在 `decision` 之後、重掛接收器之前登記；接收器在跑時，先用 TaskStop 停掉它、確認它的 PID 已退出（停掉時若剛交出事件，先處理該事件），立刻登記，再重掛唯一一個接收器；保持載入不是寫入者，不必停。它回答或解決的待決項列在同一份 INPUT 的 `pendingKeys`，登記時一併以修訂 ID 結案；登記後才把授權交給執行端。INPUT 含 id、原 contractSha256、authority:{role:"user",quote:"逐字原話",locator:"原對話訊息／文件位置",at:"來源時間",source:{path:"允許根目錄內的原文快照",sha256:"實算雜湊"}}、changes:[{id:"原條文ID",action:"exclude/replace/restore/add"}]。replace 另填完整 requirement、verify；add 新增條件，id 不得與既有條文重複，同樣必填 requirement、verify；授權更新用 action:"authorization"、固定 id、scope、instruction；選填 `pendingKeys`（見[待決帳](#待決帳)）。代理提案不能冒填 role:user，來源檔須含原話，語意與操作範圍由監督實際查原對話核實。工具只檢查來源完整性，不能證明任意檔案作者真是使用者。
+在原監督的安全停點（無 pending、無 inflight、舊 watcher 與 dispatch writer 已退出，STOP/accepted/stopped 不改）用 `supervise.cjs amend RUN INPUT.json` 登記修訂。使用者的修訂與授權收到就登記，不等下一個事件，也不只存成檔案或寫在決策帳（那樣換 run 續接、壓縮後的程式與執行端授權表都讀不到）：正在處理事件時，在 `decision` 之後、重掛接收器之前登記；接收器在跑時，先用 TaskStop 停掉它、確認它的 PID 已退出（停掉時若剛交出事件，先處理該事件），立刻登記，再重掛唯一一個接收器；保持載入不是寫入者，不必停。它回答或解決的待決項列在同一份 INPUT 的 `pendingKeys`，登記時一併以修訂 ID 結案；登記後才把授權交給執行端。INPUT 含 id、原 contractSha256、authority:{role:"user",quote:"逐字原話",locator:"原對話訊息／文件位置",at:"來源時間（含日期、時間與時區的 ISO，例如 2026-11-10T08:48:00+08:00，不晚於現在）",source:{path:"允許根目錄內的原文快照",sha256:"實算雜湊"}}、changes:[{id:"原條文ID",action:"exclude/replace/restore/add"}]。replace 另填完整 requirement、verify；add 新增條件，id 不得與既有條文重複，同樣必填 requirement、verify；授權更新用 action:"authorization"、固定 id、scope、instruction；選填 `pendingKeys`（見[待決帳](#待決帳)）。代理提案不能冒填 role:user，來源檔須含原話，語意與操作範圍由監督實際查原對話核實。工具只檢查來源完整性，不能證明任意檔案作者真是使用者。
 
 修訂另存不可改寫的 contract-amendments.jsonl，保留原 contract.json；遺失、變動、衝突皆先對帳，不清檔重置。接受決策必須帶當前 contractStateSha256，結果只對有效條文逐條 PASS；排除項明列 EXCLUDED 及核准來源，不能偽填 PASS。
 
