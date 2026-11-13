@@ -415,9 +415,11 @@ test('a bridge failure without the MCP prefix is retried like the prefixed one',
 });
 
 // 2026-10-19 V32: the executor's last 8 turns at 20000 characters each no longer fit and the watcher stopped for 3 hours.
-test('a read over the size limit is shrunk instead of failing the same way every time',async()=>{
+// 2026-11-13 OPS: App 26.1106 reworded the reply; the watcher matched only the old text and restarted in a loop.
+for(const [label,sizeLimitText] of [['the first wording',undefined],['the App 26.1106 wording','Thread history exceeds the read size limit. Try fewer turns. A single oversized turn cannot be read by this tool.']])
+test('a read over the size limit is shrunk instead of failing the same way every time ('+label+')',async()=>{
   const f=fixture({final:'Need the approved source.\nLONG_TASK_EVENT {"kind":"question"}'});
-  const mock=read(f.mock);mock.sizeLimitChars=50000;save(f.mock,mock);f.start();
+  const mock=read(f.mock);mock.sizeLimitChars=50000;if(sizeLimitText)mock.sizeLimitText=sizeLimitText;save(f.mock,mock);f.start();
   try{
     await until(()=>pending(f)?.kind==='question'&&sends(f).length===1);
     const state=read(f.statePath);

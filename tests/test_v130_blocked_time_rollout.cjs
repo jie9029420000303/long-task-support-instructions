@@ -225,11 +225,15 @@ function executorTurn(file,id,finalText){
   line(file,{type:'event_msg',payload:{type:'task_complete',turn_id:id,last_agent_message:finalText}});
 }
 
-test('Codex: when the App cannot return one oversized executor turn, the watcher reads it from the local rollout and keeps going',async()=>{
+// 2026-11-13 OPS: App 26.1106 reworded the reply ("Thread history exceeds the read size limit. Try fewer turns. A single
+// oversized turn cannot be read by this tool"); the watcher matched only the first wording, never reached the rollout
+// and restarted 14 times in 5 minutes. Both wordings must reach the rollout read.
+for(const [label,sizeLimitText] of [['the first wording',undefined],['the App 26.1106 wording','Thread history exceeds the read size limit. Try fewer turns. A single oversized turn cannot be read by this tool.']])
+test('Codex: when the App cannot return one oversized executor turn, the watcher reads it from the local rollout and keeps going ('+label+')',async()=>{
   const f=codexRun();
   const sent=path.join(f.root,'sent.json'),mockFile=path.join(f.root,'mock.json'),usage=path.join(f.root,'usage.jsonl'),quota=path.join(f.root,'quota.json');
   fs.writeFileSync(usage,JSON.stringify({conversationId:'unrelated',status:200})+'\n');
-  save(mockFile,{supervisorId:'supervisor-qa',executorId:'executor-qa',noTurn:true,oversizedExecutor:true});
+  save(mockFile,{supervisorId:'supervisor-qa',executorId:'executor-qa',noTurn:true,oversizedExecutor:true,...(sizeLimitText?{sizeLimitText}:{})});
   const env={...process.env,CODEX_HOME:f.home,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mockFile,MOCK_CODEX_SENT:sent,
     OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:quota,CHROME_RELAY_BIN:path.join(f.root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200'};
   delete env.CODEX_THREAD_ID;

@@ -61,7 +61,11 @@ const READ_RETRY_MS=[2000,5000,15000];
 // A read_thread over the bridge size limit fails every time with the same arguments (2026-10-19 V32: the executor's
 // last 8 turns at 20000 chars per item no longer fit, and the watcher stopped after 3 hours of reconnects). Shrink the
 // read instead: fewer turns first, then shorter items. Callers only scan recent turns, so a smaller window is safe.
-const SIZE_LIMIT_TEXT='Tool response exceeds the size limit';
+// The App has worded this reply two ways: "Tool response exceeds the size limit ... A single oversized turn cannot be
+// returned by this tool" and, from App 26.1106, "Thread history exceeds the read size limit. Try fewer turns. A single
+// oversized turn cannot be read by this tool" (2026-11-13 OPS: the old text no longer matched, so neither the smaller
+// read nor the rollout read engaged and the watcher restarted every 10 to 40 seconds from 16:45 Taipei). Match both.
+const SIZE_LIMIT=/exceeds the (?:read )?size limit|oversized turn cannot be/i;
 function smallerRead(args){
   if((args.turnLimit||1)>1)return {...args,turnLimit:Math.max(1,Math.floor(args.turnLimit/2))};
   if((args.maxOutputCharsPerItem||500)>500)return {...args,maxOutputCharsPerItem:Math.max(500,Math.floor(args.maxOutputCharsPerItem/4))};
@@ -106,7 +110,7 @@ async function rpc(name, args, timeout = 75000) {
       if(name==='read_thread'&&args.threadId===binding.executorId)appOk();
       return response.result;
     }
-    const oversized=name==='read_thread'&&response.result?.isError&&JSON.stringify(response.result).includes(SIZE_LIMIT_TEXT);
+    const oversized=name==='read_thread'&&response.result?.isError&&SIZE_LIMIT.test(JSON.stringify(response.result));
     const smaller=oversized?smallerRead(args):null;
     if(smaller){
       (state.readShrinks||=[]).push({from:{turnLimit:args.turnLimit,maxOutputCharsPerItem:args.maxOutputCharsPerItem},to:{turnLimit:smaller.turnLimit,maxOutputCharsPerItem:smaller.maxOutputCharsPerItem},at:now()});
