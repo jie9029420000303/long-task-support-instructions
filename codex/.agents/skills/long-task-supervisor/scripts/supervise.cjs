@@ -110,6 +110,16 @@ function status() {
       outage, restartCommand: parentAlive !== false || alive !== false ? null : startCommand, remountCommand: orphaned ? startCommand : null }
   };
 }
+// The fixed steps of an event turn in two calls instead of four (Jay 2026-11-12; A WebRPA's supervisor made 1,407 such
+// calls in five days, each carrying its whole context): context reports whether the watch runs, so a turn the watch
+// itself woke need not run the start command first, and a committed decision returns the turn-end status.
+function watchNow() {
+  let s;
+  // A status that cannot be read is reported, not fatal: the supervisor then runs the start command and status itself.
+  try { s = status(); } catch (error) { return { unavailable: error.message }; }
+  return { nowTaipei: s.nowTaipei, phase: s.phase, active: s.active, pendingDecision: s.pendingDecision, questionPush: s.questionPush, error: s.error,
+    watch: { parentAlive: s.watch.parentAlive, orphaned: s.watch.orphaned, outage: s.watch.outage, restartCommand: s.watch.restartCommand, remountCommand: s.watch.remountCommand } };
+}
 function snapshotOf(binding) {try {return read(path.join(run, binding.dispatchAudit?.snapshot || 'dispatch.json'));} catch {return null;}}
 // The last assistant texts of the executor, read from its rollout's tail. Tool output fills a Codex rollout
 // (the 2026-10-08 executor: 5.6 MB, its last message 667 KB from the end), so the window grows until it has them.
@@ -192,7 +202,7 @@ function context() {
   need(event && event.id===other,'No matching pending event; do not replay an old review');
   const review=require('./review-context.cjs'),saved=review.persist(run,event);
   const operational=['progress_review','dispatch_review','continue'].includes(event.kind);
-  return {eventId:event.id,stopped:fs.existsSync(path.join(run,'STOP')),event:saved,
+  return {eventId:event.id,stopped:fs.existsSync(path.join(run,'STOP')),watch:watchNow(),event:saved,
     brief:brief(),...(!operational?{detail:event}:{}),
     authorization:operational ? {command:"supervise.cjs authorization RUN",contractSha256:binding.contractSha256,contractStateSha256:contract.contractStateSha256||null} : review.authorization(contract,binding),
     ...(event.kind==='submission'?{contract}:{}),
@@ -215,10 +225,10 @@ function decision() {
   // A decision processed before v0.25.1 may carry pendingApprovals; it stays valid as recorded.
   const { pendingApprovals: _legacy, ...current } = input;
   const proposed = validateDecision(binding, contract, event, resolved ? current : input, resolved ? [] : state.eventQueue);
-  if (resolved) return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: true, queued: 0 };
+  if (resolved) return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: true, queued: 0, status: watchNow() };
   need(path.resolve(other) === require('./decision-commit.cjs').draft(run,event.id), 'Use the new isolated draft path from context; reconcile old drafts before copying them');
   const submitted = require('./decision-commit.cjs').submit(run,binding,contract,event,state,input,bytes);
-  return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: false, queued:(state.eventQueue || []).length, ...submitted };
+  return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: false, queued:(state.eventQueue || []).length, ...submitted, status: watchNow() };
 }
 function stop() {
   const {binding} = load();

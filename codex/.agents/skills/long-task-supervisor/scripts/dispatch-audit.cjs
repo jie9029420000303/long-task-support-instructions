@@ -230,6 +230,21 @@ function eventFor(result){
   return {id:'dispatch-'+digest(items).slice(0,24),kind:'dispatch_review',dispatchIssueKeys:items.map(item=>item.key),issues:items,snapshot:result.file,at:new Date().toISOString()};
 }
 function markAnnounced(state,event){const audit=state.dispatchAudit||{};const values=new Set(audit.announced||[]);for(const key of event.dispatchIssueKeys||[])values.add(key);audit.announced=[...values];state.dispatchAudit=audit;}
+// Three kinds of lead often clear themselves between two snapshot writes (A WebRPA 11/07-11/12: 91 reviews, 45 of them
+// only recorded; Jay 2026-11-12 approved a programmed re-check first). The watcher holds a new one for 3 minutes and
+// wakes the supervisor only if the next inspections still find it; one that clears is dropped unannounced. Other
+// kinds wake at once. LONG_TASK_DISPATCH_HOLD_MS=0 turns the hold off.
+const HOLD_KINDS=['ready_capacity','snapshot_mismatch','untracked_agent'];
+const DISPATCH_HOLD_MS=process.env.LONG_TASK_DISPATCH_HOLD_MS===undefined||!Number.isFinite(Number(process.env.LONG_TASK_DISPATCH_HOLD_MS))?180000:Number(process.env.LONG_TASK_DISPATCH_HOLD_MS);
+function hold(state,newIssues,holdMs=DISPATCH_HOLD_MS,at=Date.now()){
+  const seen=state.dispatchHold||={},keys=new Set(newIssues.map(item=>item.key));
+  for(const key of Object.keys(seen))if(!keys.has(key))delete seen[key];
+  return newIssues.filter(item=>{
+    if(!(holdMs>0)||!HOLD_KINDS.includes(item.kind))return true;
+    seen[item.key]??=at;
+    return at-seen[item.key]>=holdMs;
+  });
+}
 function releaseAnnounced(state,event){const keys=new Set(event.dispatchIssueKeys||[]),audit=state.dispatchAudit||{};audit.announced=(audit.announced||[]).filter(key=>!keys.has(key));state.dispatchAudit=audit;}
 function stillCurrent(run,binding,state,event){const result=inspect(run,binding,state);const active=new Set(result.issues.map(item=>item.key)),unknown=new Set(result.unknown||[]);
   return {current:event.dispatchIssueKeys?.some(key=>unknown.has(key))?null:event.dispatchIssueKeys?.every(key=>active.has(key)),result};}
@@ -243,4 +258,4 @@ function allBlocked(snapshot){
   return {packages:p.blocked.map(item=>({id:item.id,kind:item.kind,...(Array.isArray(item.dependencies)&&item.dependencies.length?{dependencies:item.dependencies}:{}),
     ...(Array.isArray(item.acceptanceIds)&&item.acceptanceIds.length?{acceptanceIds:item.acceptanceIds}:{}),evidence:(item.evidence||[]).slice(0,2)}))};
 }
-module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,stillCurrent,crossCheck,agentSeatCount,planningBasis,planReview,docBudgetStage,trackDocTime,allBlocked,DOC_BUDGET_RATIO};
+module.exports={parse,derive,inspect,eventFor,markAnnounced,releaseAnnounced,hold,stillCurrent,crossCheck,agentSeatCount,planningBasis,planReview,docBudgetStage,trackDocTime,allBlocked,DOC_BUDGET_RATIO};

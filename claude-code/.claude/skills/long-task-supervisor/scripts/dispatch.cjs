@@ -5,7 +5,7 @@ const path=require('node:path');
 const {parse,planningBasis,planReview}=require('./dispatch-audit.cjs');
 const acceptance=require('./acceptance-audit.cjs');
 const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
-const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [same options]';
+const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]]] [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [PACKAGE_ID ABSOLUTE_RESULT_JSON ...] [same options]';
 
 // Work-package files are the bookkeeping (Jay 2026-10-15). In GDB v1.2.0 the main line spent 99 minutes and 506 turns
 // on records alone, rewriting snapshot JSON and a generator of its own by hand. Each wp/<id>.md carries one
@@ -36,6 +36,17 @@ function collected(file){
   if(missing.length)throw Error('RESULT_JSON evidence does not exist: '+missing.join(', '));
   return {state,updates};
 }
+// Fewer bookkeeping calls (Jay 2026-11-12; A WebRPA's main line made 516 collect and 150 estimate calls in five days,
+// 160 collects within 3 minutes of another and 81 estimates next to a mark, each call carrying its whole context):
+// collect takes several packages in one validated write, and mark --estimate fills the in-flight baseline with the
+// same formula as pace.cjs estimate.
+function estimated(binding,state,spec){
+  if(spec===undefined)return state;
+  const match=/^(.+?)(?::(\d+(?:\.\d+)?))?(?::(\d+(?:\.\d+)?))?$/.exec(spec.trim());
+  if(!match||state.list!=='inFlight')throw Error('--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]] applies to a package marked inFlight');
+  const pace=require('./pace.cjs');
+  return {...state,baseline:{...pace.baseline({model:match[1],estimatedOutputTokens:Number(match[2]),toolMinutes:Number(match[3]||0)},pace.speed(pace.agentRuns(binding))),startedAt:new Date().toISOString()}};
+}
 function applyAcceptance(value,updates){
   if(!updates.length)return;
   if(!value.acceptance)throw Error('The snapshot has no acceptance table yet; write it once with --base before collecting results into it');
@@ -47,14 +58,14 @@ function applyAcceptance(value,updates){
     if(update.lastAttempt)item.lastAttempt=update.lastAttempt;
   }
 }
-function packagesFrom(stateDir,override){
+function packagesFrom(stateDir,overrides){
   const dir=path.join(stateDir,'wp');
   const realDir=fs.realpathSync(dir);
   const files=fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>{const file=path.join(dir,name);
     if(path.dirname(fs.realpathSync(file))!==realDir)throw Error('Work-package file leaves its trusted directory');return file;});
   const out=Object.fromEntries(LISTS.map(name=>[name,[]])),missing=[];
   for(const file of files){
-    const text=fs.readFileSync(file,'utf8'),raw=override?.file===file?override.state:tagLine(text,'狀態');
+    const text=fs.readFileSync(file,'utf8'),over=(overrides||[]).find(item=>item.file===file),raw=over?over.state:tagLine(text,'狀態');
     if(raw===null){missing.push(file);continue;}
     const {list,...extra}=status(raw,file);if(list==='archived')continue;
     const header=tagLine(text,'工作包')||'',ids=listOf(tagLine(text,'驗收條目'));
@@ -77,11 +88,11 @@ function trustedPackageDir(binding,stateDir){
   if(!roots.some(root=>dir===root||dir.startsWith(root+path.sep)))throw Error('Work-package directory is outside allowed roots');
   return dir;
 }
-function build(run,binding,stateDir,options,override,packageDir){
+function build(run,binding,stateDir,options,overrides,packageDir){
   const file=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
   const previous=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{},base=options.base?JSON.parse(fs.readFileSync(options.base,'utf8')):{};
   if(!previous.capacity&&!base.capacity)throw Error('The first snapshot needs --base ABSOLUTE_JSON with capacity (and acceptance when this run tracks it)');
-  const packages=packagesFrom(stateDir,override);
+  const packages=packagesFrom(stateDir,overrides);
   // Defaults keep missed dispatch visible: nothing in flight reads as waiting, so ready work still raises a review.
   const activity=options.activity||(packages.inFlight.length?'working':packages.returned.some(item=>!item.integrated)?'integrating':'waiting');
   return {...previous,...base,schemaVersion:1,executorId:binding.executorId,planningRevision:options.revision||base.planningRevision||previous.planningRevision||'wp',
@@ -123,7 +134,7 @@ try{
   const absolute=value=>path.isAbsolute(value||'');
   const positional=args.filter((value,at)=>!value.startsWith('--')&&!(at>0&&args[at-1].startsWith('--')));
   const valid={write:absolute(positional[2]),summary:true,reconcile:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
-    collect:absolute(positional[2])&&positional[3]&&absolute(positional[4])}[command];
+    collect:absolute(positional[2])&&positional.length>=5&&positional.length%2===1&&positional.slice(3).every((value,at)=>at%2?absolute(value):Boolean(value))}[command];
   if(!valid||!absolute(runArg)||(flag('base')!==undefined&&!absolute(flag('base'))))throw Error(USAGE);
   const run=path.resolve(runArg),binding=JSON.parse(fs.readFileSync(path.join(run,'binding.json'),'utf8'));
   if(!binding.dispatchAudit?.enabled&&!fs.existsSync(path.join(run,'DISPATCH_AUDIT')))throw Error('Dispatch auditing is not attached to this run');
@@ -137,22 +148,26 @@ try{
     const stateDir=path.resolve(positional[2]),options={activity:flag('activity'),revision:flag('revision'),base:flag('base')};
     const packageDir=trustedPackageDir(binding,stateDir);
     acquire(run);
-    let override,wpFile,wpText,updates=[];
+    const overrides=[],updates=[];
     if(command==='mark'||command==='collect'){
-      const result=command==='collect'?collected(positional[4]):{state:status(positional[4],'STATUS_JSON'),updates:[]};
-      const id=positional[3],state=result.state,dir=path.join(stateDir,'wp');updates=result.updates;
-      if(!/^[A-Za-z0-9_-]+$/.test(id))throw Error('Invalid work-package ID');
-      wpFile=[path.join(dir,id+'.md'),...fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>path.join(dir,name))]
-        .find(file=>fs.existsSync(file)&&path.dirname(fs.realpathSync(file))===packageDir&&packageId(fs.readFileSync(file,'utf8'),file)===id);
-      if(!wpFile)throw Error('No work-package file for '+id+' under '+dir);
-      const text=fs.readFileSync(wpFile,'utf8'),line='[狀態] '+JSON.stringify(state);
-      wpText=/^\[狀態\].*$/m.test(text)?text.replace(/^\[狀態\].*$/m,()=>line):/^\[工作包\].*$/m.test(text)?text.replace(/^\[工作包\].*$/m,match=>match+'\n'+line):line+'\n'+text;
-      override={file:wpFile,state};
+      const pairs=command==='collect'?positional.slice(3):[positional[3],positional[4]],dir=path.join(stateDir,'wp');
+      for(let at=0;at<pairs.length;at+=2){
+        const id=pairs[at],result=command==='collect'?collected(pairs[at+1]):{state:estimated(binding,status(pairs[at+1],'STATUS_JSON'),flag('estimate')),updates:[]};
+        if(!/^[A-Za-z0-9_-]+$/.test(id))throw Error('Invalid work-package ID');
+        const wpFile=[path.join(dir,id+'.md'),...fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>path.join(dir,name))]
+          .find(file=>fs.existsSync(file)&&path.dirname(fs.realpathSync(file))===packageDir&&packageId(fs.readFileSync(file,'utf8'),file)===id);
+        if(!wpFile)throw Error('No work-package file for '+id+' under '+dir);
+        if(overrides.some(item=>item.file===wpFile))throw Error('Work package '+id+' is named twice in one collect');
+        const text=fs.readFileSync(wpFile,'utf8'),line='[狀態] '+JSON.stringify(result.state);
+        overrides.push({file:wpFile,state:result.state,
+          text:/^\[狀態\].*$/m.test(text)?text.replace(/^\[狀態\].*$/m,()=>line):/^\[工作包\].*$/m.test(text)?text.replace(/^\[工作包\].*$/m,match=>match+'\n'+line):line+'\n'+text});
+        updates.push(...result.updates);
+      }
     }
-    // Validate the whole snapshot before touching the package file, so a rejected change leaves both as they were.
-    const draft=build(run,binding,stateDir,options,override,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
+    // Validate the whole snapshot before touching any package file, so a rejected change leaves everything as it was.
+    const draft=build(run,binding,stateDir,options,overrides,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
     const value=checked(run,binding,draft);
-    if(wpFile){const temporary=wpFile+'.tmp-'+process.pid;fs.writeFileSync(temporary,wpText,{flag:'wx'});fs.renameSync(temporary,wpFile);}
+    for(const item of overrides){const temporary=item.file+'.tmp-'+process.pid;fs.writeFileSync(temporary,item.text,{flag:'wx'});fs.renameSync(temporary,item.file);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
     console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));

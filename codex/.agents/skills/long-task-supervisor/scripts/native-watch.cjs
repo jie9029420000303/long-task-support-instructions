@@ -12,7 +12,7 @@ const dashboard = require('./dashboard.cjs');
 const pace = require('./pace.cjs');
 const executionWake = require('./execution-wake.cjs');
 const questions = require('./pending-decisions.cjs');
-const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
+const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent, hold:holdDispatch } = require('./dispatch-audit.cjs');
 const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
 const binding = read(path.join(run, 'binding.json'));
@@ -875,6 +875,8 @@ async function watch() {
       if(Date.now()-lastMentionCheck>=60000){lastMentionCheck=Date.now();state.executorKnowsRun=contains(await rpc('read_thread',{threadId:binding.executorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}),run);}
       if(!state.executorKnowsRun)audit.newIssues=audit.newIssues.filter(item=>item.kind!=='snapshot_missing');
     }
+    // Unfilled seats, an unlisted agent and a package-file mismatch are re-checked for 3 minutes before they wake the model.
+    audit.newIssues=holdDispatch(state,audit.newIssues);
     const auditEvent=paused?null:dispatchEvent(audit);checkpoint();
     if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
     const response = await waitExecutor();

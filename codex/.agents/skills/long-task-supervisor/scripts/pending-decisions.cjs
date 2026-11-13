@@ -13,7 +13,7 @@ const FILE='pending-decisions.json';
 // spec; only these floors still wait on him, named by these labels on his dashboard. Of 139 questions he answered
 // across four runs, 66 of 92 decisions took the recommendation and 13 more chose the option that asked less of him.
 const KINDS={irreversible:'不可逆（改寫 Git 歷史、未授權的正式部署等）',paid:'付費（開工時沒授權或超出上限的）',delete:'刪除或永久改動既有資料（開發過程產物除外）',credential:'帳號或憑證（開工時沒授權的）',external:'正式對外發送（寄信、對客戶或公開發布；非測試）',
-  prohibition:'推翻你的禁令',acceptance:'改驗收條文（縮窄、列例外、換證據）',user_action:'要你本人操作，或只有你知道的事實',major_change:'超出契約目標或範圍的變更',gate:'你在契約自設的核准關卡'};
+  prohibition:'推翻你的禁令',acceptance:'改驗收條文（縮窄、列例外、換證據）',user_action:'要你本人操作，或只有你知道的事實',major_change:'超出契約目標或範圍、沒有明確推薦的變更',gate:'你在契約自設的核准關卡'};
 const FIELDS=['kind','ask','recommend','why','options'],OPS=['raise','reopen','withdraw','answer','delegate'];
 const KEY=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const need=(ok,message)=>{if(!ok)throw Error(message);};

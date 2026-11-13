@@ -11,7 +11,23 @@ function validateWait(config,wait){
   }
   if(wait.resumeAt!==undefined)need(Number.isFinite(Date.parse(wait.resumeAt))&&Date.parse(wait.resumeAt)>Date.now(),'Wait resumeAt must be a future, source-backed deadline');
   need(wait.kind==='user_approval'||wait.conditions.length||wait.resumeAt,'External wait needs an observable result or deadline');
+  if(wait.dependsOn!==undefined){
+    need(wait.kind==='user_approval'&&Array.isArray(wait.dependsOn),'dependsOn belongs to a user_approval wait and must be a list');
+    for(const item of wait.dependsOn)need(item&&[item.id,item.pendingKey,item.reason].every(value=>typeof value==='string'&&value.trim()),
+      'Each dependsOn entry needs id, pendingKey and reason（每條未通過條文寫明依賴哪個待決 key 與原因）');
+  }
   return wait;
+}
+// Jay 2026-11-13: 「等我回覆期間，跟這沒關係的工作應該要求執行主線繼續做，而不是整個停下來等我」. A WebRPA 11/07-11/12 stood
+// still 7.2 hours behind questions for Jay. An approval wait silences the idle and hourly reviews only when nothing is
+// ready and every open criterion is named in dependsOn against a pending item that is still open; otherwise those
+// reviews fire as usual. A run without an acceptance table cannot be compared and keeps the earlier behaviour.
+function silencesIdle(wait,snapshot,openKeys){
+  if(wait?.kind!=='user_approval')return false;
+  if(!snapshot?.acceptance)return true;
+  if((snapshot.packages?.ready||[]).length)return false;
+  const named=new Map((wait.dependsOn||[]).map(item=>[item.id,item.pendingKey]));
+  return (snapshot.acceptance.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).every(item=>named.has(item.id)&&openKeys.has(named.get(item.id)));
 }
 function remember(state,decision,binding){
   if(!decision.wait)return;
@@ -48,4 +64,4 @@ function observeSupervisorInput(state,detail){
   const human=turn?.items?.filter(item=>item.type==='userMessage'&&!JSON.stringify(item).includes('LONG_TASK_DELIVERY:')).at(-1);
   if(human)state.lastSupervisorInputMarker=human.id||turn.id;
 }
-module.exports={validateWait,remember,unchanged,supervisorInput,observeSupervisorInput};
+module.exports={validateWait,silencesIdle,remember,unchanged,supervisorInput,observeSupervisorInput};

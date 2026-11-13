@@ -1,5 +1,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
+// These tests exercise the dispatch review itself; the 3-minute re-check before it (v1.5.0) has its own test.
+process.env.LONG_TASK_DISPATCH_HOLD_MS='0';
 const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');

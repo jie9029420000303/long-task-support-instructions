@@ -116,7 +116,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
  "answer":[{"key":"r24-r21-relogin","choice":"A","quote":"R24R21: A 兩個都重登"}]}
 ```
 
-- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人到場或動手，或只有他知道的事實）、major_change（超出契約目標或範圍的變更；範圍內的設計、資訊架構與技術路線由監督依規格代決）、gate（使用者在契約自設的核准關卡，只擋依賴它的工作）；其他類程式拒收，由監督自己決定並用 `delegate` 登記。kind 只逼監督寫出理由，不證明真的該問。 依[預設類別授權](authorization.md#長任務預設類別授權)，有推薦、Git 操作、標明測試的對外發送、開工已授權的帳號密碼／付費／正式部署、開發過程產物的刪除，須先確認預設授權適用且無本案限制，才不登記：paid、credential 只用在開工沒授權的部分，irreversible 用在改寫 Git 歷史、未授權的正式部署或本案須確認的其他不可逆操作，delete 只用在既有資料，external 用在非測試的正式發送或本案須確認的對外發送。`ask`、`recommend`、`why` 必填，`options` 選填。
+- `kind` 只能是 irreversible（不可逆）、paid（付費）、delete（刪除，測試中間產物除外）、credential（帳號或憑證）、external（對外發送）、prohibition（推翻禁令）、acceptance（改驗收條文）、user_action（要本人到場或動手，或只有他知道的事實）、major_change（沒有明確推薦的超出契約目標或範圍的變更；有明確推薦時監督照推薦用 `delegate` 登記、不等使用者，範圍內的設計、資訊架構與技術路線由監督依規格代決）、gate（使用者在契約自設的核准關卡，只擋依賴它的工作）；其他類程式拒收，由監督自己決定並用 `delegate` 登記。kind 只逼監督寫出理由，不證明真的該問。 依[預設類別授權](authorization.md#長任務預設類別授權)，有推薦、Git 操作、標明測試的對外發送、開工已授權的帳號密碼／付費／正式部署、開發過程產物的刪除，須先確認預設授權適用且無本案限制，才不登記：paid、credential 只用在開工沒授權的部分，irreversible 用在改寫 Git 歷史、未授權的正式部署或本案須確認的其他不可逆操作，delete 只用在既有資料，external 用在非測試的正式發送或本案須確認的對外發送。`ask`、`recommend`、`why` 必填，`options` 選填。
 - `delegate` 記監督依[依規格代決](authorization.md#依規格代決)替使用者做的決定：`key`、`ask`、`choice`、`basis`（契約條文、使用者原話或哪條選擇原則）、`revert`（怎麼改回）必填，`kind` 選填。未決的同一 key 改成已代決；已代決的 key 再 delegate 是修改原決定（舊內容留在 history）；新 key 直接記為已代決。使用者之後要改回，用 `answer` 記他的原話，該項改成已答。代決不等使用者，登記後照常回覆執行端；背景程式下次推題目時附上還沒通知過的代決，儀表板「監督已代決」列出最近 20 項。
 - 同一 key 再 raise 是更新原項；kind、ask、recommend、why、options 完全相同時不算變動，不留歷史、不需重列。已回答或已撤下的 key 只能用 `reopen` 附改變題目的新事實重開，舊答案留在 history。問題文字和任何一項相同（不論狀態）的會被拒：未決的請更新那個 key，已結的請 reopen 那個 key。換了說法的重複，由監督對照 context 附的完整清單自己判斷。
 - 使用者的回答要登記成授權或驗收修訂（同意某動作、給授權範圍、改驗收條文）時，唯一做法是 `supervise.cjs amend RUN FILE`，在修訂 JSON 加 `pendingKeys`（它回答的待決 key，每項是 key 字串或 `{"key":…,"choice":…}`）：一步登記修訂並以修訂 id 結案這些項（`answer.amendmentId`），不再另跑 `pending` 的 `answer`。任一 key 不在待決帳、已撤下或已由別的回答結案時整筆不寫，修訂帳與待決帳都不變；同一修訂重送只結案仍未決的項，修訂不重複登記。先 `answer` 原話再另做 `amend`，兩邊會連不起來（2026-10-15 IA 10 項待決的 `answer.amendmentId` 全空）。`pending` 的 `answer` 只用於不需登記修訂的回答（例如本人已切好權限選單），或結掉已被先前登記的修訂解決的項目（附那筆 `amendmentId`）。
@@ -127,7 +127,7 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 
 ## 派工檢查事件
 
-啟用、快照格式與判斷見[派工狀態協定](dispatch.md)。`dispatch_review` 是背景程式產生的監督事件，不是執行者要貼的最終回覆事件。監督核對快照和真實來源後，照原流程寫具體 reply 決策；不要自行傳訊。resident watcher 在真正送出前重查，目前已解決的事件會記為 obsolete，不送舊指示；同一事件中仍有未處理問題則重新形成事件。外部 `dispatch-preflight` 僅供唯讀查核，不改 daemon state。新 run 預設啟用；既有 run 使用 `attach-dispatch`，不改驗收契約，也不因掛載而清 STOP 或重新啟動。
+啟用、快照格式與判斷見[派工狀態協定](dispatch.md)。`dispatch_review` 是背景程式產生的監督事件，不是執行者要貼的最終回覆事件。監督核對快照和真實來源後，照原流程寫具體 reply 決策；不要自行傳訊。resident watcher 在真正送出前重查，目前已解決的事件會記為 obsolete，不送舊指示；同一事件中仍有未處理問題則重新形成事件。有空席未派、未登記子代理與工作包檔不符三類線索先由程式複查 3 分鐘才形成事件（見 dispatch.md「監督處理」）。外部 `dispatch-preflight` 僅供唯讀查核，不改 daemon state。新 run 預設啟用；既有 run 使用 `attach-dispatch`，不改驗收契約，也不因掛載而清 STOP 或重新啟動。
 
 ## 主動進度查核
 
@@ -144,9 +144,9 @@ LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-
 - `resource_underused`：派工快照宣告的真實資源（主機排查名額、測試身分）還有空位，卻有依賴已全部完成、可立即開跑的包在等同一個資源；監督評估能否並行。可立即開跑＝就緒包須 `independent`、`safe`、依賴全部完成、排他資源沒被在途包占用；受阻包只算 kind 為 `resource_conflict` 的；且它用到的每個已宣告資源空位都夠它的 units。`resourceUnderused[].waiting` 只列這些包；依賴還沒完成或實際互斥的等待包不算。同一資源的可派包集合沒變就不再叫醒，包開始或結束只改變已用名額時不重叫（2026-10-15 IA 19 次叫醒中 15 次監督判 observe，因為舊去重以已用數與等待清單為準）。
 - `parallel_test_review`：可辨識的完整閘門工具呼叫，或開頭以獨立一行 `# LONG_TASK_LONG_TEST` 明確標註的長測試呼叫，仍有程序開始證據或工具回傳持續執行線索時，按每次呼叫最多提示一次；多個同輪線索合併。若曾觀察到工具程式仍在跑、之後工具程式結束但底層測試是否結束無可靠證據，最多保留一次狀態未知的線索，監督查證後即結束；不得把自由文字中的 session 字樣當程序 ID。已明確完成或拒絕的不提示。監督查真實代理活動、未拆工作與資源，不把零代理、待決或長測試本身當違規；無法查證就是未知。快照與代理紀錄都可能過期，不以兩者一致就自動判滿席；代理紀錄或快照發生變化只是重新查證的線索。無法辨識的舊命令不代表沒有長測試，依其他事件持續查核；不同平台的工具回傳若無可靠在途識別也只可記未知。本線索不更動既有忙碌抑制、30 分鐘條件或整套測試規則；同一項使用者待決不妨礙核對其他已授權工作。
 - `repeat`：綁定後同一條指令連續失敗 3 次。處理過一次進度查核後重新計數。
-- `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠；停頓從執行端最後活動或監督對它事件的判定套用時（`lastDecisionAt`）起算，取較晚者），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe。這類事件不是 silence，observe 不需 wait。
+- `idle_with_work`：執行端與所有子代理都停了 5 分鐘（扣掉電腦睡眠；停頓從執行端最後活動或監督對它事件的判定套用時（`lastDecisionAt`）起算，取較晚者），派工快照卻還有未通過的驗收條件（FAIL／PENDING／INCONCLUSIVE）或就緒包。執行端只在輪詢背景程序或等待工具時也算停；真正下指令、改檔或思考都算活動。每段停頓通知一次，事件附 `idleWithWork:{idleMinutes,openCriteria,readyPackages}`。監督核對後用 reply 請執行端把能並行的派出去（依驗收條件分線、查核與測試交子代理、批次派工），或說明為何只能依序；剩下的都只差使用者核准或外部結果時用 observe；等使用者核准的附含 `dependsOn` 的 wait，之後才不再為同一批條文提醒。這類事件不是 silence，其餘 observe 不需 wait。
 - `all_blocked`：派工快照沒有 ready、也沒有 inFlight，剩下的工作包全部在 blocked，執行端不忙且已閒置 5 分鐘（扣掉電腦睡眠；從這組受阻包出現與執行端開始閒置兩者較晚的時間起算）。同一組受阻包（每包的 id 與 kind）只通知一次，換一組才重新計時；這組出現後監督已對執行端事件提交過判定（`lastDecisionAt`），表示已在 `brief.allBlocked` 看過，就不通知；等使用者核准不擋這個提醒（使用者 2026-11-10：「不要因為等待我就停下來動作」；WEB 11/09 22:52 起 12 分鐘可派 0、進行中 0、受阻 14）。事件附 `allBlocked:{packages,minutes}`，處理見[單次事件處理](event-review.md)與[受阻只限四種](dispatch.md#受阻只限四種)。
-- `unplanned_criteria`：未通過的驗收條件 30 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），而且執行端正閒置（同 `idle_with_work` 的判斷）；執行端在忙時不發（2026-10-29 由 10 分鐘、在忙也發改成這樣：排下一包常超過 10 分鐘，多半是誤報）。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；只剩等使用者核准或暫停中不發，暫停解除後重新計時。
+- `unplanned_criteria`：未通過的驗收條件 30 分鐘沒有任何 ready／inFlight／blocked／returned 工作包用 `acceptanceIds` 標到它（扣掉電腦睡眠），而且執行端正閒置（同 `idle_with_work` 的判斷）；執行端在忙時不發（2026-10-29 由 10 分鐘、在忙也發改成這樣：排下一包常超過 10 分鐘，多半是誤報）。同一組條件只通知一次，事件附 `unplannedCriteria:{criteria,freeCapacity,minutes}`，freeCapacity 是快照驗證過的子代理席位減在途包數。監督用 reply 逐條點名要派的工作包；暫停中不發，等使用者核准時比照 `idle_with_work`（checked wait 已用 `dependsOn` 逐條寫明依賴才不發），暫停解除後重新計時。
 - `doc_budget`：派工快照的 `docBudget`（文件時間預算＝開發實測分鐘 × 1.5，2026-10-15 定案；格式見[派工快照協定](dispatch.md#文件時間預算)）只算真正在寫文件的時間：有標 `"doc":true`（或 id 以 DOC 開頭）的文件包在途，且執行端或子代理 5 分鐘內有活動，兩次檢查相隔超過 5 分鐘的那段不算（使用者 2026-10-29 定案：V32 把等待也算進去，誤報用了 728 分鐘）。用掉一半時叫醒一次（`stage:"half"`），用完時再叫醒一次（`stage:"spent"`）；事件附 `docBudget:{stage,startedAt,devMinutes,budgetMinutes,usedMinutes,basis,estimate}`。同一份預算每一級只叫醒一次，`startedAt` 或 `minutes` 改變才算新預算；等使用者核准時不發。
 
 事件附 `pace`（每個在途包的開始時間、扣掉睡眠後的經過分鐘、睡眠分鐘、基準分鐘、比值、是否已做完、程序是否還活著、執行端與監督各自算的基準及是否差超過一半、子代理已輸出 token、最後活動時間、本場各模型實測每秒輸出 token）、`executorBlocked`、`machineSlept`、`overdue`、`nearOverdue`、`baselineMissing`、`processStalled`、`resourceUnderused`、`failedCommands` 與各類最後活動時間（含監督最近一次判定套用的 `lastDecisionAt`）。
@@ -161,7 +161,7 @@ AI 時程基準＝預估輸出 token ÷ 本場同模型實測每秒輸出 token�
 
 ### checked wait（已核對的等待）
 
-`wait:{kind:"user_approval",conditions:[]}` 用於已提出且沒有其他可行工作的使用者核准。外部結果用 `kind:"external_result"`，至少有可觀察條件檔 `conditions:[{path:"絕對路徑",sha256:"當下實際雜湊"}]` 或已有依據的 `resumeAt`。等待尚未出現的檔案時 sha256 填 null。只能列本 run 允許根目錄內的檔案；用具體結果或授權檔，勿列每次輪詢都改的 daemon-state。resumeAt 只承接原訂工作／業務期限，不自行設定新門檻。等待仍不是 PASS 或授權，STOP 優先。
+`wait:{kind:"user_approval",conditions:[]}` 用於已提出且沒有其他可行工作的使用者核准；另填 `dependsOn:[{"id":"<未通過條文 ID>","pendingKey":"<待決帳 key>","reason":"<為何依賴>"}]`：每個 FAIL／PENDING／INCONCLUSIVE 條文都列到、對應的待決項仍未決、且沒有可派工作包，閒置與整點提醒才靜音。有條文不依賴它就不是「沒有其他可行工作」，改用 reply 交辦那些工作。外部結果用 `kind:"external_result"`，至少有可觀察條件檔 `conditions:[{path:"絕對路徑",sha256:"當下實際雜湊"}]` 或已有依據的 `resumeAt`。等待尚未出現的檔案時 sha256 填 null。只能列本 run 允許根目錄內的檔案；用具體結果或授權檔，勿列每次輪詢都改的 daemon-state。resumeAt 只承接原訂工作／業務期限，不自行設定新門檻。等待仍不是 PASS 或授權，STOP 優先。
 
 ### 延遲收件恢復
 
@@ -211,5 +211,5 @@ App 持有的 `run-watch.cjs` 遇 needs_reconcile 且有 saved inflight 時，�
 - `監督儀表板.md`：每分鐘更新一次，包括監看狀態、執行對話權限、限速換模型、平台錯誤、等待中的指示、逐條驗收、在途工作與剩餘時間。剩餘時間依「沒有量測就不填估計值」：只用派工快照裡剩餘工作包的 AI 時程基準並註明依據——剩下的都是在途包且都有未超過的基準時，取各包「基準減已跑時間」最晚的一包；還有就緒或受阻包（尚無基準）、在途包沒填基準或已超過基準時，顯示「未估」並列出這些包；不以每小時通過條數換算剩餘條數（多數條目要等部署後一起通過，2026-10-15 GDB 因此顯示 19.7 小時，嚴重高估）。
 - 暫停：`supervise.cjs pause RUN "<使用者原話>"` 寫入 `PAUSED.json`。暫停期間不送時鐘與派工事件，執行對話交回的真正事件照常處理；`supervise.cjs resume RUN "<使用者原話>"` 解除暫停並重新起算各時鐘。pause 與 stop 都要附使用者原話，程式在監督對話紀錄中核對這句話是本回合收到的（使用者輸入或別的對話轉來）；壓縮後重現的舊訊息會被拒絕。
 - 保持載入：App 會卸載閒置約 3 小時的對話並終止它啟動的程序（2026-10-12 量到）；App 在記憶體壓力下是否也會暫停 Codex 對話，目前未量測。監看必須在監督對話自己的工作階段啟動；監督連續閒置 150 分鐘（`CODEX_KEEPALIVE_MS`）時，監看送一則 `LONG_TASK_KEEPALIVE` 短訊讓監督對話保持載入，每段閒置一則。待監督決策的期間也沿用同一個 150 分鐘計時，不因 pending 分支跳過；仍在進行的監督回合不打斷，使用者暫停期間不喚醒。保持載入和喚醒備援分開：這則短訊是讓對話不被卸載；事件送達 45 秒的補喚醒跟監看同在這個工作階段，對話被卸載或暫停時一起停，只在對話保持載入時有效，所以不能當作對抗卸載的手段。
-- 等監督裁決：執行端回報即使標成 `progress` 或 `waiting`，內容在等監督裁決、決定或回覆時，改當 `question` 立即交給監督。另外，只剩等使用者核准（checked wait 的 kind 為 user_approval）時，不發 `no_event_hour` 和 `idle_with_work`。
+- 等監督裁決：執行端回報即使標成 `progress` 或 `waiting`，內容在等監督裁決、決定或回覆時，改當 `question` 立即交給監督。另外，等使用者核准的 checked wait（kind 為 user_approval）只有在 `dependsOn` 逐條寫明每個未通過條文依賴哪個仍未決的待決 key、且派工快照沒有可派工作包時，才不發 `no_event_hour` 和 `idle_with_work`；沒寫或沒寫全就照發（使用者 2026-11-13：「等我回覆期間，跟這沒關係的工作應該要求執行主線繼續做，而不是整個停下來等我」；A WebRPA 11/07～11/12 等他回覆時整條線停了 7.2 小時）。沒有驗收逐條表的舊 run 無從對照，照舊不發。
 - 線上狀態：使用者 10 分鐘內在監督對話打過字，context 的 `brief.user.online` 為 true。brief 另附 `pendingDecisions`（完整待決帳，見[待決帳](#待決帳)）、`eventQueue`（排隊的執行對話事件）與 `decisionError`（目前事件上一版決策檔沒通過檢查的原因）。

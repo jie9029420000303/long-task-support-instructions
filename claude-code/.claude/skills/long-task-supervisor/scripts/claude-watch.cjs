@@ -18,7 +18,7 @@ const questions=require('./pending-decisions.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 const clockSafety=require('./clock-safety.cjs');
 const parallelTestReview=require('./parallel-test-review.cjs');
-const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,docBudgetStage,trackDocTime,freeCapacity}=require('./dispatch-audit.cjs');
+const {inspect:inspectDispatch,eventFor:dispatchEvent,markAnnounced,hold:holdDispatch,docBudgetStage,trackDocTime,freeCapacity}=require('./dispatch-audit.cjs');
 const deferredDispatch=require('./deferred-dispatch.cjs');
 const {digest,promoteNext,ownerAlive}=require('./handoff-lib.cjs');
 const run=path.resolve(process.argv[2]||'');
@@ -271,6 +271,9 @@ function supervisorClock(){
   const awake=from=>awakeSince(state.sleeps,from);
   // A checked wait on Jay's approval already says what is missing, and a rate limit is a known wait: asking again only spends turns.
   const waitingUser=state.checkedWait?.kind==='user_approval',limited=rateLimited();
+  // The idle and hourly reviews stay quiet only while that wait names why every open criterion depends on a pending
+  // item (Jay 2026-11-13: work unrelated to his answer goes on); see checked-wait.cjs silencesIdle.
+  const idleSilenced=waitingUser&&checkedWait.silencesIdle(state.checkedWait,snapshot,new Set(questions.view(run,state).open.map(item=>item.key)));
   // Rule A (Jay 2026-10-13): each baseline wakes the supervisor once at 1.5x and once more at 3x, whether or not the
   // package still produces, to judge whether it runs, is stuck, can go faster or grew in scope (GDB and IA: 12
   // packages past 1.5x, 3 analysed). A rate-limited supervisor cannot act, so the tier waits for the reset.
@@ -311,13 +314,13 @@ function supervisorClock(){
     {who:failed.who,since:new Date(failed.since).toISOString(),kind:failed.kind,status:failed.status,text:failed.text,textSha256:failed.textSha256,source:failed.source}:null;
   // The hour counts from the executor's last event or the supervisor's ruling on one, whichever is later (lastDecisionAt).
   const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awake(lastEvent)>=NO_EVENT_REVIEW_MS;
-  const noEventHour=quietEvent&&!waitingUser&&!limited&&once('no_event_hour:'+lastEvent);
+  const noEventHour=quietEvent&&!idleSilenced&&!limited&&once('no_event_hour:'+lastEvent);
   // A background job running alone is still idle capacity: only the executor's own work and its subagents count;
   // a turn that only polls a job or sleeps is not work. Waiting for the supervisor's ruling is not idle (lastDecisionAt).
   const idleSince=Math.max(state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
-  const idle=awake(idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser&&!limited&&!executorBusy(state);
+  const idle=awake(idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!idleSilenced&&!limited&&!executorBusy(state);
   const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round(awake(idleSince)/60000),openCriteria,readyPackages}:null;
   // An open criterion no live package names (acceptanceIds) for 30 minutes while the executor is idle: the supervisor
   // names the packages to dispatch (Jay 2026-10-29: 30-minute grace, only when idle).
@@ -571,6 +574,8 @@ async function watch(){
     }
     if(!isPaused&&!state.pending&&!state.message?.finalId){const audit=inspectDispatch(run,binding,state);
       if(!state.executorKnowsRun&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS)audit.newIssues=audit.newIssues.filter(item=>item.kind!=='snapshot_missing');
+      // Unfilled seats, an unlisted agent and a package-file mismatch are re-checked for 3 minutes before they wake the model.
+      audit.newIssues=holdDispatch(state,audit.newIssues);
       const auditEvent=dispatchEvent(audit);if(auditEvent){
       auditEvent.preflightArgv=[process.execPath,path.join(__dirname,'supervise.cjs'),'dispatch-preflight',run,auditEvent.id];
       markAnnounced(state,auditEvent);state.pendingSupervisorOffset=binding.supervisorLog?fs.statSync(binding.supervisorLog).size:null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();

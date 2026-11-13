@@ -259,18 +259,22 @@ function check(run,binding,state,force=false){
   for(const [,item] of repeated)item.announced=now();
   // A checked wait on Jay's approval already says what is missing: asking again every hour only spends turns.
   const waitingUser=state.checkedWait?.kind==='user_approval';
+  // The idle and hourly reviews stay quiet only while that wait names why every open criterion depends on a pending
+  // item (Jay 2026-11-13: work unrelated to his answer goes on); see checked-wait.cjs silencesIdle.
+  const idleSilenced=waitingUser&&require('./checked-wait.cjs').silencesIdle(state.checkedWait,snapshot,
+    new Set(require('./pending-decisions.cjs').view(run,state).open.map(item=>item.key)));
   // A recognizable long-test call is a single lead for cross-checking, not proof that work can be parallelized.
   // It is independent of readyPackages and does not change the existing busy/idle suppression rules.
   const testLeads=parallelTest.leads(state,once);
   const testFingerprint=testLeads.length?parallelTest.fingerprint(snapshot,parallelTest.observedAgents(binding,state)):null;
   // The hour restarts when the supervisor's ruling on an executor event is applied: the executor waited for it.
   const lastEvent=Math.max(state.lastRealEventAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now(),quietEvent=awakeSince(state,lastEvent)>=NO_EVENT_REVIEW_MS;
-  const noEventHour=quietEvent&&!waitingUser&&once('no_event_hour:'+lastEvent);
+  const noEventHour=quietEvent&&!idleSilenced&&once('no_event_hour:'+lastEvent);
   // A background job running alone is still idle capacity: only the executor's own turns and its subagents count.
   const idleSince=Math.max(state.lastExecutorActivityAt||0,state.lastExecutorWorkAt||0,state.lastSubagentActivityAt||0,state.lastDecisionAt||0)||Date.parse(binding.createdAt)||Date.now();
   const openCriteria=(snapshot?.acceptance?.items||[]).filter(item=>['FAIL','PENDING','INCONCLUSIVE'].includes(item.status)).map(item=>item.id);
   const readyPackages=(snapshot?.packages?.ready||[]).map(item=>item.id);
-  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!waitingUser&&!executorBusy(state);
+  const idle=awakeSince(state,idleSince)>=IDLE_WORK_MS&&Boolean(openCriteria.length||readyPackages.length)&&!idleSilenced&&!executorBusy(state);
   const idleWork=idle&&once('idle:'+idleSince)?{idleMinutes:Math.round(awakeSince(state,idleSince)/60000),openCriteria,readyPackages}:null;
   // An open criterion no live package names (acceptanceIds) for 30 minutes while the executor is idle: the supervisor
   // names the packages to dispatch (Jay 2026-10-11; 30 minutes and idle only, 2026-10-29). Kept in the clock so
