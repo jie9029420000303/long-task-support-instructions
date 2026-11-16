@@ -89,6 +89,7 @@ function start() {
   // process outside the App's tree keeps its connection but cannot open a new one. It runs from this directory: left
   // without a parent it belongs to launchd, and the executor's resource check counts such a process as an unregistered
   // task resource when its working directory is inside the task.
+  require('./machine.cjs').rotate(logPath);
   const log = fs.openSync(logPath, 'a');
   try {
     fs.writeSync(log, '[' + new Date().toISOString() + '] parent ' + process.pid + ' starts the watcher\n');

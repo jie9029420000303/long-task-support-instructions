@@ -12,9 +12,20 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
            close：wp＝所屬工作包判定後關（預設）；final＝宣稱完成前關；acceptance＝最終候選版預覽留給使用者驗收
            （須 --reason，未給 --ttl 時 72h）；external＝不屬本任務、只登記不關（須 --reason）。
   register --state S --wp ID (--pid N | --compose-project 名 | --container 名) [--close …] [--reason …]
-           登記自己脫離的資源（docker compose up -d、docker run、已在跑的程序）。
-  stop     --state S (--id R | --wp ID | --all) [--include-acceptance]
+           [--ttl 72h] 登記自己脫離的資源（docker compose up -d、已在跑的程序）；--ttl 只記到期時間、不自動關。
+           --worktree 路徑：登記工作包專用的 git worktree，供判定後移除。
+  run-container --state S --wp ID --name 名 --ttl 4h [--close …] [--reason …] [--memory 1g] [--protect]
+           -- <docker run 的其餘參數與映像>
+           單一容器一律用這個：一步完成 docker run -d、貼上任務／工作包／關閉時點／帳本位置四個標籤、登記與到期時間。
+           到期（從建立或最後一次 renew 起算）由背景計時自動「停止」這一個容器，不刪除；記憶體資料庫與正式資料副本
+           （參數含 tmpfs，或加 --protect）不自動停，只由主線 stop。
+  renew    --state S --id R --ttl 4h
+           還要用就續期，到期時間從現在起算；重開機後要繼續用的容器也用它重新掛上計時。
+  stop     --state S (--id R | --wp ID | --all) [--include-acceptance] [--remove [--integrated-into REF]]
            關閉並核對已停止；只動帳本內、啟動時間核對相符的資源，external 不動。
+           --remove：停止後移除（容器連同匿名資料卷；worktree 另須 --integrated-into 候選版的 commit 或分支，分支不刪）。
+           只移除所屬工作包已判定 PASS、且識別值不在驗收結果帳、evidence/ 與決策帳裡的資源；每筆先記進 deletions.md、
+           刪後讀回。FAIL 或主線接手的只停不刪。
   wait     --timeout 30m [--interval 20s] -- 查核指令…
            每隔 interval 跑一次查核指令，exit 0 就結束；逾時 exit 124。逾時必填。
   check    --state S [--final]
@@ -23,7 +34,11 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
 exit：0 通過；2 參數或檔案錯誤；4 有資源需要收尾或登記；124 wait 逾時。
 check 與守門只報告，不自動關閉任何資源。未登記資源＝在「任務建立」到「狀態檔最後寫入」之間啟動、已脫離 session（父程序是 1）、
 同一使用者、非 launchd 常駐、工作目錄在任務範圍內的程序，以及 compose working_dir 在同範圍內或帶
-`lt.task=<任務目錄名>` 標籤的容器；已登記在任何任務帳本（含 external）的資源不列。
+`lt.task=<任務目錄名>` 標籤的容器；已登記在任何任務帳本（含 external）的資源不列。另外只列出、不算需處理的兩種：
+本任務已停止卻還沒移除的容器，以及任務期間啟動、沒有任務標籤、不屬 compose、也不在任何帳本裡的執行中容器
+（2026-11-14：4 個沒標籤的容器與 316 個已停止容器，守門原本看不到）。
+每本帳本的位置記在本機的 <LONG_TASK_HOME 或 ~/.config/long-task-supervisor>/ledgers.json（不同步雲端），讓不同專案的
+任務也認得彼此登記過的資源；索引只用來找帳本，內容仍以各帳本與系統實況為準。
 任務範圍＝專案根＋任務紀錄（state.md、archive.md、wp/*.md）裡的 `path:` 工作區＋紀錄裡提到的同 repo worktree
 ——整合候選版的 worktree 不屬任何工作包、已結束的工作包會封存進 archive.md，只看工作包表會漏掉這兩種。
 時間上限用任務紀錄最後寫入（狀態檔與 wp/*.md 取較晚者）：主線本來就是先更新紀錄再跑守門；2026-10-15 起狀態檔只在
@@ -41,6 +56,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 CLOSE_KINDS = ("wp", "final", "acceptance", "external")
@@ -48,6 +64,8 @@ NEEDS_REASON = {"acceptance", "external"}
 ACCEPTANCE_TTL = 72 * 3600
 ROW = re.compile(r"^\|(?!\s*:?-{3})")
 JUDGED = re.compile(r"PASS|FAIL|主線接手")
+PASSED = re.compile(r"PASS")
+NOT_PASSED = re.compile(r"FAIL|主線接手")
 CREATED = re.compile(r"建立[：:]\s*(\d{4}-\d{2}-\d{2} \d{1,2}:\d{2})")
 PATH_FIELD = re.compile(r"path:\s*(/[^\s|／，；;、`]+)")
 PATH_TOKEN = re.compile(r"(?:^|[\s:：])(/[^\s|／，；;、`]+)")
@@ -61,6 +79,12 @@ DOCKER_FORMAT = "\t".join([
     "{{.ID}}", "{{.Names}}", "{{.CreatedAt}}", '{{.Label "com.docker.compose.project"}}',
     '{{.Label "com.docker.compose.project.working_dir"}}', '{{.Label "lt.task"}}',
 ])
+# 含已停止容器的完整清單，另帶狀態與 run-container 貼的身分標籤。
+ALL_FORMAT = "\t".join([DOCKER_FORMAT, "{{.State}}", '{{.Label "lt.wp"}}', '{{.Label "lt.close"}}',
+                        '{{.Label "lt.ledger"}}'])
+LABELS = ("task", "wp", "close", "ledger")
+DELETIONS_HEAD = ("# 刪除清冊\n\n| 時間 | 項目與識別 | 產生者 | 為何屬中間產物 | 引用搜尋結果 | 刪後讀回 |\n"
+                  "|---|---|---|---|---|---|\n")
 
 
 def duration(text):
@@ -97,6 +121,45 @@ def load(path):
     return {"resources": []}
 
 
+def local_home():
+    """本機、不同步雲端的位置；與監督技能的通知設定、監看登記同一處。"""
+    return Path(os.environ.get("LONG_TASK_HOME") or Path.home() / ".config" / "long-task-supervisor")
+
+
+def temporary(path):
+    tmp, real = os.path.realpath(tempfile.gettempdir()), os.path.realpath(path)
+    return real == tmp or real.startswith(tmp.rstrip(os.sep) + os.sep)
+
+
+def indexed_ledgers():
+    try:
+        known = json.loads((local_home() / "ledgers.json").read_text(encoding="utf-8")).get("ledgers", {})
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [Path(p) for p in known if os.path.isfile(p)]
+
+
+def index_ledger(path):
+    """把帳本位置記進全機索引。系統暫存目錄下的測試帳本不記（測試自己指定 LONG_TASK_HOME 時除外）；寫不進去不影響帳本。"""
+    if temporary(path) and not os.environ.get("LONG_TASK_HOME"):
+        return
+    real, index = os.path.realpath(path), local_home() / "ledgers.json"
+    try:
+        index.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(index) + ".lock", "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            known = json.loads(index.read_text(encoding="utf-8")).get("ledgers", {}) if index.is_file() else {}
+            if real in known:
+                return
+            known = {p: at for p, at in known.items() if os.path.isfile(p)}
+            known[real] = now().isoformat()
+            tmp = Path(str(index) + ".tmp")
+            tmp.write_text(json.dumps({"ledgers": known}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, index)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 @contextlib.contextmanager
 def locked(path):
     """鎖住帳本讀改寫；主線與子代理可能同時登記，所以一律經過檔案鎖與原子替換。"""
@@ -109,6 +172,7 @@ def locked(path):
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, path)
+    index_ledger(path)
 
 
 def ledger_of(args):
@@ -133,6 +197,32 @@ def mark_stopped(path, rid, note):
             if res.get("id") == rid and not res.get("stopped_at"):
                 res["stopped_at"] = now().isoformat()
                 res["stop_note"] = note
+
+
+def note_resource(path, rid, **fields):
+    with locked(path) as data:
+        for res in data["resources"]:
+            if res.get("id") == rid:
+                res.update(fields)
+
+
+def expiry(ttl):
+    return (now() + dt.timedelta(seconds=ttl)).isoformat() if ttl else None
+
+
+def overdue(res):
+    with contextlib.suppress(ValueError, TypeError):
+        if res.get("expires_at") and dt.datetime.fromisoformat(res["expires_at"]) <= now():
+            return f"；已過到期時間 {res['expires_at']}，還要用就 renew，不用就 stop"
+    return ""
+
+
+def arm_expiry(path, rid, seconds):
+    """背景計時，到點呼叫 _expire 停止這一筆。工作目錄放 /：守門才不會把它當成任務範圍內未登記的程序。"""
+    subprocess.Popen(
+        ["/bin/sh", "-c", 'sleep "$1"; exec "$2" "$3" _expire --ledger "$4" --id "$5"', "lt-expire",
+         str(int(seconds) + 1), sys.executable, str(Path(__file__).resolve()), str(path), rid],
+        cwd="/", stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 # ---------- 系統實況 ----------
@@ -197,10 +287,9 @@ def launchd_pids():
     return {int(f[0]) for f in (line.split() for line in out.splitlines()[1:]) if f and f[0].isdigit()}
 
 
-def docker_containers():
-    """執行中的容器清單；docker 不可用時回 None（照實回報「沒掃」，不當成沒有）。"""
+def _docker_ps(extra, fmt):
     try:
-        result = subprocess.run(["docker", "ps", "--no-trunc", "--format", DOCKER_FORMAT],
+        result = subprocess.run(["docker", "ps", *extra, "--no-trunc", "--format", fmt],
                                 capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -215,8 +304,21 @@ def docker_containers():
             created = dt.datetime.strptime(f[2][:25], "%Y-%m-%d %H:%M:%S %z").astimezone().replace(tzinfo=None)
         except ValueError:
             created = None
-        found.append({"id": f[0], "name": f[1], "created": created, "project": f[3], "working_dir": f[4], "task": f[5]})
+        item = {"id": f[0], "name": f[1], "created": created, "project": f[3], "working_dir": f[4], "task": f[5]}
+        if len(f) >= 10:
+            item.update(state=f[6], wp=f[7], close=f[8], ledger=f[9])
+        found.append(item)
     return found
+
+
+def docker_containers():
+    """執行中的容器清單；docker 不可用時回 None（照實回報「沒掃」，不當成沒有）。"""
+    return _docker_ps([], DOCKER_FORMAT)
+
+
+def docker_all():
+    """所有容器（含已停止），每筆另有 state 與 run-container 貼的 wp／close／ledger 標籤；docker 不可用時回 None。"""
+    return _docker_ps(["-a"], ALL_FORMAT)
 
 
 def take_snapshot():
@@ -225,7 +327,9 @@ def take_snapshot():
     detached = [p["pid"] for p in procs.values() if p["ppid"] == 1 and p["uid"] == uid]
     for pid, cwd in cwds(detached).items():
         procs[pid]["cwd"] = cwd
-    return {"procs": procs, "uid": uid, "launchd": launchd_pids(), "containers": docker_containers()}
+    everything = docker_all()
+    running = None if everything is None else [c for c in everything if c.get("state") == "running"]
+    return {"procs": procs, "uid": uid, "launchd": launchd_pids(), "containers": running, "all_containers": everything}
 
 
 def start_of(pid, procs=None):
@@ -279,6 +383,8 @@ def container_identity(c):
 
 
 def inactive_note(res, snap):
+    if res["kind"] == "worktree":
+        return "工作樹已不存在（帳本尚未標記）"
     if res["kind"] == "process":
         return "已不在執行（帳本尚未標記停止）"
     candidates = container_candidates(res, snap) or []
@@ -292,6 +398,8 @@ def inactive_note(res, snap):
 
 def alive(res, snap):
     """True／False；容器在 docker 不可用時回 None（無法確認）。"""
+    if res["kind"] == "worktree":
+        return Path(res.get("path") or "").is_dir()
     if res["kind"] == "process":
         return bool(members(res, snap))
     found = containers_of(res, snap)
@@ -303,6 +411,7 @@ def describe(res):
         "process": f"pid {res.get('pgid') or res.get('pid')}" + (f"、port {res['port']}" if res.get("port") else ""),
         "compose": f"compose 專案 {res.get('project')}",
         "container": f"容器 {res.get('container')}",
+        "worktree": f"工作樹 {res.get('path')}",
     }[res["kind"]]
     cmd = (res.get("command") or "")[:80]
     return f"{res['id']}［{res.get('wp')}／{res.get('close')}］{target}" + (f"：{cmd}" if cmd else "")
@@ -400,12 +509,15 @@ def task_scope(state, lines):
 
 
 def registered(state, worktrees=()):
-    """所有任務帳本（本任務、同專案與同 repo 其他 worktree 的任務）裡還沒停止的資源；這些都有主人，不算未登記。"""
-    keys = {"pids": set(), "pgids": set(), "projects": set(), "containers": set()}
+    """所有任務帳本（本任務、同專案與同 repo 其他 worktree 的任務、全機索引記到的其他專案任務）裡還沒停止的資源；
+    這些都有主人，不算未登記。"""
+    keys = {"pids": set(), "pgids": set(), "projects": set(), "containers": set(), "ids": set()}
     ledgers = {state.parent / "resources.json"} | set(state.parent.parent.glob("*/resources.json"))
     for tree in worktrees:
         for pattern in (".claude/long-task/*/resources.json", ".codex/long-task/*/resources.json"):
             ledgers |= set(Path(tree).glob(pattern))
+    if os.environ.get("LONG_TASK_HOME") or not temporary(state):  # 系統暫存目錄下的測試任務不讀這台機器真正的索引
+        ledgers |= set(indexed_ledgers())
     for path in ledgers:
         with contextlib.suppress(OSError, ValueError):
             for res in load(path)["resources"]:
@@ -419,6 +531,7 @@ def registered(state, worktrees=()):
                     keys["projects"].add(res["project"])
                 if res.get("container"):
                     keys["containers"].add(res["container"])
+                keys["ids"] |= {item["id"] for item in res.get("container_identities", []) if item.get("id")}
     return keys
 
 
@@ -456,6 +569,31 @@ def unregistered(roots, since, until, task, snap, keys):
     return found, True
 
 
+def container_notes(since, until, task, snap, keys, own_ids):
+    """只列出、不算需處理：無法確定歸屬的容器不能擋本任務派工，已停止的容器要等判定與引用核對後才可移除。"""
+    everything = snap.get("all_containers")
+    if everything is None:
+        return []
+
+    def names(found):
+        return "、".join(sorted(found)[:4]) + ("…" if len(found) > 4 else "")
+
+    notes = []
+    stopped = [c["name"] for c in everything
+               if c.get("state") != "running" and ((c["task"] and c["task"] == task) or c["id"] in own_ids)]
+    if stopped:
+        notes.append(f"  ・本任務已停止、尚未移除的容器 {len(stopped)} 個（{names(stopped)}）：所屬工作包判定 PASS 且已整合後 "
+                     "stop --wp <id> --remove。")
+    loose = [c["name"] for c in everything
+             if c.get("state") == "running" and not c["task"] and not c["project"]
+             and c["name"] not in keys["containers"] and c["id"] not in keys["ids"]
+             and c["created"] and since <= c["created"] <= until]
+    if loose:
+        notes.append(f"  ・任務期間啟動、沒有任務標籤也不在任何帳本的執行中容器 {len(loose)} 個（{names(loose)}）：是本任務啟動的就 "
+                     "register，不是就不必處理；之後單一容器一律用 run-container。")
+    return notes
+
+
 def audit(state, claimed=False, snapshot=None):
     """回傳 (要印的行, 需處理的問題)。狀態檔不在長任務目錄、沒有工作區也沒有帳本時不掃描、回空。"""
     state = Path(state)
@@ -473,7 +611,10 @@ def audit(state, claimed=False, snapshot=None):
         if state_now is False:
             shown.append(f"  {describe(res)}：{inactive_note(res, snap)}")
             continue
-        if res.get("close") in NEEDS_REASON and not res.get("reason"):
+        if res["kind"] == "worktree":
+            hint = "；工作包已判定，核對後可 stop --id … --remove --integrated-into <候選版>" if res.get("wp") in judged else ""
+            shown.append(f"  {describe(res)}：仍在{hint}")
+        elif res.get("close") in NEEDS_REASON and not res.get("reason"):
             problems.append(f"{describe(res)}：標為 {res.get('close')} 卻沒寫理由")
         elif res.get("close") == "wp" and res.get("wp") in judged:
             problems.append(f"{describe(res)}：工作包 {res.get('wp')} 已判定，資源還在跑")
@@ -482,13 +623,16 @@ def audit(state, claimed=False, snapshot=None):
         else:
             note = "無法確認（docker 不可用）" if state_now is None else "執行中"
             reason = f"；理由：{res['reason']}" if res.get("reason") else ""
-            shown.append(f"  {describe(res)}：{note}{reason}")
-    loose, scanned_containers = unregistered(roots, since, until, task, snap, registered(state, worktrees))
+            shown.append(f"  {describe(res)}：{note}{reason}{overdue(res)}")
+    keys = registered(state, worktrees)
+    loose, scanned_containers = unregistered(roots, since, until, task, snap, keys)
     problems += [f"未登記 {item}" for item in loose]
     head = f"執行期資源：帳本 {len(running)} 筆未停止，需處理 {len(problems)} 筆"
     if roots and not scanned_containers:
         head += "；docker 不可用，容器沒有掃描"
-    out = [head + "。"] + shown + [f"  ✗ {p}" for p in problems]
+    own_ids = {item["id"] for res in data["resources"] for item in res.get("container_identities", []) if item.get("id")}
+    out = ([head + "。"] + shown + [f"  ✗ {p}" for p in problems]
+           + container_notes(since, until, task, snap, keys, own_ids))
     if problems:
         out.append("先關閉（resource-ledger.py stop）、補登記（register），或改標 acceptance／external 並寫理由，"
                    "再重跑；守門只報告，不會自動關閉任何資源。")
@@ -608,7 +752,15 @@ def cmd_register(args):
         die(f"--close {args.close} 必須附 --reason（寫明為什麼保留或是誰的資源）")
     path = ledger_of(args)
     record = {"wp": args.wp, "close": args.close, "reason": args.reason, "created_at": now().isoformat()}
-    if args.pid:
+    if args.ttl:
+        record.update(ttl=args.ttl, expires_at=expiry(args.ttl))
+    if args.worktree:
+        tree = os.path.realpath(os.path.expanduser(args.worktree))
+        if git(tree, "rev-parse", "--is-inside-work-tree")[1].strip() != "true":
+            die(f"不是 git 工作樹：{tree}")
+        record.update(kind="worktree", path=tree, branch=git(tree, "rev-parse", "--abbrev-ref", "HEAD")[1].strip(),
+                      head=git(tree, "rev-parse", "HEAD")[1].strip())
+    elif args.pid:
         procs = ps_table()
         if args.pid not in procs:
             die(f"找不到 pid {args.pid}")
@@ -639,6 +791,238 @@ def cmd_register(args):
         data["resources"].append(record)
     print(f"已登記 {describe(record)}")
     return 0
+
+
+def cmd_run_container(args):
+    """單一容器的統一啟動：啟動、身分標籤、登記與到期一步完成，登記不再靠事後記得補。"""
+    if args.close == "external":
+        die("external 是別人的資源：用 register --container 登記，不由本任務啟動")
+    if args.close in NEEDS_REASON and not args.reason:
+        die(f"--close {args.close} 必須附 --reason（寫明為什麼保留）")
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        die("缺少映像：run-container … -- <docker run 的其餘參數與映像>")
+    ttl = args.ttl or (ACCEPTANCE_TTL if args.close == "acceptance" else 0)
+    if not ttl:
+        die("需要 --ttl：多久沒續期就自動停止，至少抓工作包時程基準的兩倍")
+    path = ledger_of(args)
+    protected = args.protect or any(a == "--tmpfs" or a.startswith("--tmpfs=") or "type=tmpfs" in a for a in command)
+    labels = {"lt.task": path.parent.name, "lt.wp": args.wp, "lt.close": args.close, "lt.ledger": os.path.realpath(path)}
+    argv = ["docker", "run", "-d", "--name", args.name]
+    for key, value in labels.items():
+        argv += ["--label", f"{key}={value}"]
+    if args.memory:
+        argv += ["--memory", args.memory]
+    try:
+        result = subprocess.run(argv + command, capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as error:
+        die(f"docker run 無法執行：{error}")
+    if result.returncode != 0 or not result.stdout.strip():
+        die("docker run 失敗：" + (result.stderr.strip()[-400:] or f"exit {result.returncode}"))
+    cid = result.stdout.strip().splitlines()[-1]
+    found = [c for c in (docker_all() or []) if c["id"] == cid]
+    identity = container_identity(found[0]) if found else {"id": cid, "name": args.name, "created": now().isoformat()}
+    with locked(path) as data:
+        rid = next_id(data)
+        data["resources"].append({
+            "id": rid, "wp": args.wp, "kind": "container", "container": identity["name"],
+            "container_identities": [identity], "managed": True, "protected": protected, "memory": args.memory,
+            "command": " ".join(command), "close": args.close, "reason": args.reason, "ttl": ttl,
+            "expires_at": expiry(ttl), "created_at": now().isoformat(),
+        })
+    if protected:
+        tail = f"到期 {human(ttl)}只提醒、不自動停（記憶體資料或受保護），由主線 stop"
+    else:
+        arm_expiry(path, rid, ttl)
+        tail = f"{human(ttl)}後沒續期就自動停止（不刪）"
+    print(f"已啟動並登記 {rid}：容器 {identity['name']}（{cid[:12]}），關閉時點 {args.close}；{tail}")
+    return 0
+
+
+def identity_problem(res, path, everything):
+    """到期代關與移除只認四項身分（任務、工作包、關閉時點、帳本位置）都和帳本一致的容器；相符回 None。"""
+    recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
+    expected = {"task": Path(path).parent.name, "wp": res.get("wp"), "close": res.get("close"),
+                "ledger": os.path.realpath(path)}
+    for c in everything:
+        if c["id"] in recorded:
+            for key, value in expected.items():
+                if (c.get(key) or "") != (value or ""):
+                    return f"容器 {c['name']} 的 lt.{key} 標籤與帳本不符，未動"
+    return None
+
+
+def cmd_renew(args):
+    path = ledger_of(args)
+    with locked(path) as data:
+        res = next((r for r in data["resources"] if r.get("id") == args.id and not r.get("stopped_at")), None)
+        if res:
+            res.update(ttl=args.ttl, expires_at=expiry(args.ttl))
+    if not res:
+        die(f"帳本裡沒有未停止的 {args.id}")
+    if res.get("managed") and not res.get("protected"):
+        arm_expiry(path, args.id, args.ttl)
+    print(f"已續期 {describe(res)}：到期 {res['expires_at']}")
+    return 0
+
+
+def cmd_expire(args):
+    """run-container 與 renew 掛的背景計時到點：只停自己這一筆，條件有任何不符就不動、把原因記在帳本。"""
+    path = Path(args.ledger)
+    res = next((r for r in load(path)["resources"] if r.get("id") == args.id), None)
+    if (not res or res.get("stopped_at") or not res.get("managed") or res.get("protected")
+            or res.get("close") == "external" or res.get("kind") != "container"):
+        return 0
+    try:
+        if dt.datetime.fromisoformat(res["expires_at"]) > now():
+            return 0  # 已續期：renew 另掛了新的計時
+    except (KeyError, TypeError, ValueError):
+        return 0
+    everything = docker_all()
+    if everything is None:
+        note_resource(path, args.id, expire_note="到期時 docker 不可用，未處理")
+        return 1
+    problem = identity_problem(res, path, everything)
+    if problem:
+        note_resource(path, args.id, expire_note=problem)
+        return 0
+    ok, note = terminate(res, {"containers": [c for c in everything if c.get("state") == "running"]})
+    if ok:
+        mark_stopped(path, args.id, f"到期自動停止（{human(res.get('ttl') or 0)}未續期，未刪除）：{note}")
+        return 0
+    note_resource(path, args.id, expire_note=f"到期自動停止失敗：{note}")
+    return 1
+
+
+def git(cwd, *argv):
+    try:
+        result = subprocess.run(["git", "-C", str(cwd), *argv], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return 1, ""
+    return result.returncode, result.stdout
+
+
+def package_passed(state_dir, wp):
+    """True＝判定 PASS；False＝FAIL、主線接手或還沒判定；None＝查不到這包。主線自己的資源（wp 寫「主線」）不經判定。"""
+    if wp == "主線":
+        return True
+    found = None
+    for name in ("archive.md", "state.md"):
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            head, rows = work_table((state_dir / name).read_text(encoding="utf-8").splitlines())
+            i_state = next((i for i, h in enumerate(head) if h.startswith("狀態")), None)
+            for row in rows:
+                if row and row[0] == wp:
+                    text = row[i_state] if i_state is not None and i_state < len(row) else " ".join(row[1:])
+                    found = bool(PASSED.search(text)) and not NOT_PASSED.search(text)
+    if found is None:
+        with contextlib.suppress(OSError, UnicodeDecodeError, ValueError, AttributeError):
+            line = re.search(r"^\[狀態\][ \t]*(\{.*\})", (state_dir / "wp" / f"{wp}.md").read_text(encoding="utf-8"), re.M)
+            found = json.loads(line.group(1)).get("list") == "completed"
+    return found
+
+
+def referenced(state_dir, needles, extra=()):
+    """識別值是否出現在驗收結果帳、evidence/ 與決策帳；回傳 (True／False／None 查不了, 說明)。"""
+    targets = [state_dir / "evidence"] if (state_dir / "evidence").is_dir() else []
+    targets += [p for p in sorted(state_dir.iterdir())
+                if p.is_file() and re.search(r"驗收|決策|acceptance|decision", p.name, re.I)]
+    targets += [Path(p).expanduser() for p in extra]
+    if not targets:
+        return False, "沒有驗收結果帳、evidence/ 或決策帳可搜尋"
+    argv = ["grep", "-rlF"] + [x for needle in needles for x in ("-e", needle)] + ["--"] + [str(t) for t in targets]
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return None, "引用搜尋沒有完成"
+    if result.returncode == 1:
+        return False, f"搜尋 {len(targets)} 處無引用"
+    if result.returncode != 0:
+        return None, "引用搜尋沒有完成"
+    files = result.stdout.decode("utf-8", "replace").splitlines()
+    return True, f"仍被 {len(files)} 個檔案引用（{'、'.join(os.path.basename(f) for f in files[:3])}）"
+
+
+def deletion_row(state_dir, item, producer, why, search):
+    """先記再刪：刪前寫一列，回傳完成後補上讀回結果的函式。"""
+    path = state_dir / "deletions.md"
+    if not path.is_file():
+        path.write_text(DELETIONS_HEAD, encoding="utf-8")
+    clean = [str(x).replace("|", "／").replace("\n", " ") for x in (now().isoformat(), item, producer, why, search)]
+    row = "| " + " | ".join(clean) + " | "
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(row + "待讀回 |\n")
+
+    def readback(result):
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace(row + "待讀回 |", row + result + " |"), encoding="utf-8")
+    return readback
+
+
+def remove(res, path, args):
+    """移除已停止的容器或工作樹；回傳 ("removed"｜"kept"｜"failed", 說明)。條件不符就保留，不算失敗。"""
+    state_dir = Path(path).parent
+    passed = package_passed(state_dir, res.get("wp"))
+    if not passed:
+        return "kept", ("查不到所屬工作包的判定" if passed is None else "所屬工作包不是 PASS") + "，只停不刪"
+    if res["kind"] == "container":
+        if not res.get("managed"):
+            return "kept", "不是 run-container 建立的，身分不齊，未移除"
+        everything = docker_all()
+        if everything is None:
+            return "failed", "docker 不可用，無法移除"
+        recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
+        present = [c for c in everything if c["id"] in recorded]
+        if not present:
+            note_resource(path, res["id"], removed_at=now().isoformat())
+            return "removed", "容器已不存在"
+        problem = identity_problem(res, path, everything)
+        if problem or any(c.get("state") == "running" for c in present):
+            return "kept", problem or "容器仍在執行"
+        needles, label = [c["name"] for c in present] + sorted(recorded), "容器 " + "、".join(c["name"] for c in present)
+    else:
+        tree = res["path"]
+        if not Path(tree).is_dir():
+            note_resource(path, res["id"], removed_at=now().isoformat(), stopped_at=now().isoformat())
+            return "removed", "工作樹已不存在"
+        if not args.integrated_into:
+            return "kept", "工作樹要加 --integrated-into <候選版 commit 或分支> 才核對得了是否已整合"
+        code, dirty = git(tree, "status", "--porcelain")
+        if code != 0 or dirty.strip():
+            return "kept", "工作樹有未提交的變更"
+        if git(tree, "merge-base", "--is-ancestor", "HEAD", args.integrated_into)[0] != 0:
+            return "kept", f"工作樹的 HEAD 不在 {args.integrated_into} 裡，尚未整合"
+        needles, label = [tree], f"工作樹 {tree}（分支 {res.get('branch')} 保留）"
+    used, search = referenced(state_dir, needles, args.search or ())
+    if used is not False:
+        return "kept", search + "，未移除"
+    if res["kind"] == "worktree":
+        evidence = state_dir / "evidence" / f"worktree-{res['id']}-移除前.txt"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        evidence.write_text("\n".join([f"HEAD {git(tree, 'rev-parse', 'HEAD')[1].strip()}",
+                                       f"已核對在 {args.integrated_into} 內", "git status --short:",
+                                       git(tree, "status", "--short")[1], "git diff:", git(tree, "diff")[1]]),
+                            encoding="utf-8")
+    readback = deletion_row(state_dir, label, f"工作包 {res.get('wp')}（帳本 {res['id']}）",
+                            "工作包已判定 PASS 的測試中間產物", search)
+    if res["kind"] == "container":
+        try:
+            code = subprocess.run(["docker", "rm", "-v", *sorted(recorded)], capture_output=True, timeout=120).returncode
+        except (OSError, subprocess.SubprocessError):
+            code = 1
+        left = [c for c in (docker_all() or []) if c["id"] in recorded] if code == 0 else present
+        gone = code == 0 and not left
+    else:
+        common = git(tree, "rev-parse", "--path-format=absolute", "--git-common-dir")[1].strip()
+        code = subprocess.run(["git", "--git-dir", common, "worktree", "remove", tree],
+                              capture_output=True, timeout=120).returncode if common else 1
+        gone = code == 0 and not Path(tree).exists()
+    readback("讀回已不存在" if gone else "移除失敗，仍存在")
+    if not gone:
+        return "failed", "移除指令失敗，仍存在"
+    note_resource(path, res["id"], removed_at=now().isoformat(),
+                  **({"stopped_at": now().isoformat()} if res["kind"] == "worktree" else {}))
+    return "removed", f"已移除並讀回（{search}），已記入 deletions.md"
 
 
 def terminate(res, snap):
@@ -692,8 +1076,14 @@ def cmd_stop(args):
     path = ledger_of(args)
     data = load(path)
     targets = []
+
+    def removable(res):
+        return args.remove and res["kind"] in ("container", "worktree") and not res.get("removed_at")
+
     for res in data["resources"]:
-        if res.get("stopped_at") or res.get("close") == "external":
+        if res.get("close") == "external" or (res.get("stopped_at") and not removable(res)):
+            continue
+        if res["kind"] == "worktree" and not args.remove:
             continue
         if args.id and res["id"] != args.id:
             continue
@@ -708,11 +1098,17 @@ def cmd_stop(args):
     snap = {"procs": ps_table(), "containers": docker_containers()}
     failed = 0
     for res in targets:
-        ok, note = terminate(res, snap)
-        print(f"{'✓' if ok else '✗'} {describe(res)}：{note}")
-        if ok:
-            mark_stopped(path, res["id"], note)
+        if res["kind"] == "worktree" or res.get("stopped_at"):
+            ok, note = True, "工作樹" if res["kind"] == "worktree" else "先前已停止"
         else:
+            ok, note = terminate(res, snap)
+            if ok:
+                mark_stopped(path, res["id"], note)
+        if ok and removable(res):
+            result, why = remove(res, path, args)
+            ok, note = result != "failed", f"{note}；{'✓' if result == 'removed' else '・'} {why}"
+        print(f"{'✓' if ok else '✗'} {describe(res)}：{note}")
+        if not ok:
             failed += 1
     return 4 if failed else 0
 
@@ -797,7 +1193,29 @@ def build_parser():
     group.add_argument("--pid", type=int)
     group.add_argument("--compose-project")
     group.add_argument("--container")
+    group.add_argument("--worktree", help="工作包專用的 git worktree 路徑")
+    p.add_argument("--ttl", type=duration, default=0.0, help="只記到期時間、不自動關")
     p.set_defaults(func=cmd_register)
+
+    p = sub.add_parser("run-container")
+    target(p)
+    p.add_argument("--name", required=True, help="容器名稱；取本任務唯一的名字")
+    p.add_argument("--ttl", type=duration, default=0.0)
+    p.add_argument("--memory", help="docker --memory 上限，例如 1g；測試用資料庫建議都設")
+    p.add_argument("--protect", action="store_true", help="到期不自動停，只由主線 stop（正式資料副本等）")
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_run_container)
+
+    p = sub.add_parser("renew")
+    target(p, wp=False)
+    p.add_argument("--id", required=True)
+    p.add_argument("--ttl", type=duration, required=True)
+    p.set_defaults(func=cmd_renew)
+
+    p = sub.add_parser("_expire")
+    p.add_argument("--ledger", required=True)
+    p.add_argument("--id", required=True)
+    p.set_defaults(func=cmd_expire)
 
     p = sub.add_parser("stop")
     target(p, wp=False)
@@ -806,6 +1224,9 @@ def build_parser():
     which.add_argument("--wp")
     which.add_argument("--all", action="store_true")
     p.add_argument("--include-acceptance", action="store_true")
+    p.add_argument("--remove", action="store_true", help="停止後移除（先核對判定與引用、記入 deletions.md）")
+    p.add_argument("--integrated-into", help="移除工作樹時，已整合進去的候選版 commit 或分支")
+    p.add_argument("--search", action="append", help="引用搜尋另外要看的檔案或目錄（例如監督 run 目錄）；可重複")
     p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("wait")

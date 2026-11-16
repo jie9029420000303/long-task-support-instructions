@@ -71,6 +71,9 @@ module.exports={register,entries,check,status,LABEL};
 if(require.main===module){
   const [command='check',arg]=process.argv.slice(2);
   (async()=>{
+    // The launchd job is the one model-free program that runs whether or not any chat is open, so it also records the
+    // machine sample (machine.cjs; nothing limits work on it) and keeps its own log from growing without end.
+    if(command==='check'){try{const machine=require('./machine.cjs');machine.rotate(path.join(notify.home(),'watch-guard.log'));machine.sample();}catch(error){console.error('machine sample: '+error.message);}}
     const result=command==='check'?await check():command==='install'?install():command==='status'?status()
       :command==='register'?{registered:register(path.resolve(arg||''),{manual:true})}
       :(()=>{throw Error('Commands: check, install, status, register RUN');})();

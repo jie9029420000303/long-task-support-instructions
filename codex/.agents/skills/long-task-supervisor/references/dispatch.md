@@ -24,7 +24,7 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 
 `schemaVersion` 為 `1`，`executorId` 必須等於 binding 的執行對話 ID；`planningRevision` 是執行者目前工作計畫的版本識別。`activity` 為 `planning`（拆包）、`dispatching`（正在派出）、`working`（工作進行中）、`integrating`（正在收回核對）、`waiting`（等待）。過渡狀態只用於當下的動作，不能用來藏住未派工作。
 
-`capacity.verified` 是**已核實的總子代理席位上限**，不是剩餘席位，也不是希望派出的數量；`capacity.evidence` 附平台能力或實際查核來源。剩餘席位由總數扣除 `inFlight` 中的子代理算出；`main` 與 `resource:` 不占子代理席位，但它們的排他資源仍計入占用。無可核對資料時交監督查能力，不臆造上限。CPU、記憶體、服務與帳號是否適合增派另查實際證據，不把席位上限當作主機承載量。已有暫時節流用 `capacity.throttle:{limit,reason,evidence,reviewWhen}` 另記：`limit` 不大於 verified，reason 與 evidence 說明真實限制，reviewWhen 寫何時重新核對。派工空位以兩者較小值扣除在途子代理計算，但 verified 不隨限流改小。這是保存已核實／已授權限制，不授權自行加新門檻或放寬設定；收包及限制條件改變時重新查證，不把一次 429 當永久容量。
+`capacity.verified` 是**已核實的總子代理席位上限**，不是剩餘席位，也不是希望派出的數量；`capacity.evidence` 附平台能力或實際查核來源。剩餘席位由總數扣除 `inFlight` 中的子代理算出；`main` 與 `resource:` 不占子代理席位，但它們的排他資源仍計入占用。無可核對資料時交監督查能力，不臆造上限。CPU、記憶體、服務與帳號是否適合增派另查實際證據，不把席位上限當作主機承載量。已有暫時節流用 `capacity.throttle:{limit,reason,evidence,reviewWhen}` 另記：`limit` 不大於 verified，reason 與 evidence 說明真實限制，reviewWhen 寫何時重新核對。派工空位以兩者較小值扣除在途子代理計算，但 verified 不隨限流改小。這是保存已核實／已授權限制，不授權自行加新門檻或放寬設定；收包及限制條件改變時重新查證，不把一次 429 當永久容量。本機 `~/.config/long-task-supervisor/capacity.json` 設了 `totalAgents`（這台機器所有受監督任務合計可在途的子代理數，使用者決定）時，派工空位再由程式扣除其他任務在途的子代理，每個任務至少留 1 席，`reconcile` 的 `capacity.machine:{total,others}` 是這筆計算；整台機器的名額不再人工拆成各任務的 throttle，某任務閒置時名額自動讓給其他任務（2026-11-14 人工分成 4／2／2，等待中的任務名額閒置）。同檔設了 `stagger:{batch,seconds}` 時，同一任務在 seconds 秒內標記超過 batch 個子代理在途，`dispatch.cjs mark` 在指令內等到間隔足夠才寫入並回 `staggeredSeconds`，一包交回補一包不等。缺檔或缺鍵就不合計、不錯開。
 
 `packages` 的六個陣列均必填，可為空；每筆有穩定且唯一的 `id`：
 

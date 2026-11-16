@@ -141,12 +141,20 @@ try{
   if(command==='summary'){const snapshot=checked(run,binding,JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')));
     console.log(JSON.stringify(acceptance.summarize(run,snapshot.acceptance)));}
   else if(command==='reconcile'){const snapshot=checked(run,binding,JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')));
-    console.log(JSON.stringify(planReview(snapshot,binding)));}
+    console.log(JSON.stringify(planReview(snapshot,binding,run)));}
   else if(command==='write'){const value=checked(run,binding,reviewed(JSON.parse(fs.readFileSync(positional[2],'utf8')),binding,flag('reviewed')));
-    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,reconciliation:planReview(value,binding)}));}
+    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,reconciliation:planReview(value,binding,run)}));}
   else{
     const stateDir=path.resolve(positional[2]),options={activity:flag('activity'),revision:flag('revision'),base:flag('base')};
     const packageDir=trustedPackageDir(binding,stateDir);
+    // Staggered starts: when this machine sets "stagger" (machine.cjs), marking a subagent in flight waits here, before
+    // the write lock, so the delay costs no model turn and blocks no other dispatch command.
+    const machine=require('./machine.cjs');let staggeredMs=0;
+    // A package already in flight under the same handle (a new baseline for its next stage) is not a start.
+    const starting=command==='mark'&&(()=>{const state=status(positional[4],'STATUS_JSON');
+      if(state.list!=='inFlight'||state.handle==='main'||String(state.handle||'').startsWith('resource:'))return false;
+      try{return !JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')).packages.inFlight.some(item=>item.id===positional[3]&&item.handle===state.handle);}catch{return true;}})();
+    if(starting){staggeredMs=machine.staggerWait(run);if(staggeredMs>0)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,staggeredMs);}
     acquire(run);
     const overrides=[],updates=[];
     if(command==='mark'||command==='collect'){
@@ -169,7 +177,9 @@ try{
     const value=checked(run,binding,draft);
     for(const item of overrides){const temporary=item.file+'.tmp-'+process.pid;fs.writeFileSync(temporary,item.text,{flag:'wx'});fs.renameSync(temporary,item.file);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
-    console.log(JSON.stringify({written:true,path:save(run,binding,value),planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding),
+    const written=save(run,binding,value);if(starting)machine.recordStart(run);
+    console.log(JSON.stringify({written:true,path:written,planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding,run),
+      ...(staggeredMs>0?{staggeredSeconds:Math.round(staggeredMs/1000)}:{}),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}

@@ -15,7 +15,7 @@
 - 改狀態：`node <skill>/dispatch.cjs mark RUN <狀態目錄> WP-X '<狀態 JSON>'`；派出時加 `--estimate <模型>[:<預估輸出 token>[:<工具分鐘>]]`，同一步填好 `baseline`，不另跑 `pace.cjs estimate`。同時交回多包用一次 `collect RUN <狀態目錄> WP-A <結果A> WP-B <結果B>`。
 - 收包（一步完成標記、證據、驗收表與快照，先驗格式，有錯什麼都不寫）：`node <skill>/dispatch.cjs collect RUN <狀態目錄> WP-X <結果檔絕對路徑>`，結果檔 `{"status":{"list":"completed","handle":"agent:<id>","evidence":["/絕對路徑"]},"acceptance":[{"id":"A1","status":"PASS","evidence":["/絕對路徑"]}]}`。
 - 新定案登記、壓縮續接及收包後，用 `node <skill>/dispatch.cjs reconcile RUN` 對照有效決策、可派包、已完成的前置與未分派條件；核對後在原 mark／collect／from-wp 命令加 `--reviewed "核對依據與結果"`，不另寫一份帳。未定案討論不改目標、授權、驗收或積極派工原則；只停確實受阻的動作。
-- 容量：`capacity.verified` 只記核實的總子代理席位；已有暫時節流另記 `capacity.throttle:{limit,reason,evidence,reviewWhen}`，不改平台或本機設定，不自行新增／放寬數值限制。收包與條件變更時重新核對節流依據。
+- 容量：`capacity.verified` 只記核實的總子代理席位；已有暫時節流另記 `capacity.throttle:{limit,reason,evidence,reviewWhen}`，不改平台或本機設定，不自行新增／放寬數值限制。收包與條件變更時重新核對節流依據。本機合計上限由程式另行扣除（見[派工快照協定](dispatch.md)），不寫進快照。
 - 子代理一交回就收包、補派下一包；長測試或等待前也查全部未完成項與最新指示，能隔離且依賴已滿足的先派，不能並行記理由。受監督的 shell 長測試，在支援註解的 shell 中須於原指令前加獨立一行 `# LONG_TASK_LONG_TEST` 再接原指令；不支援註解的 shell 照原方式執行，缺標記不阻止測試，也不代表沒有長測試。平台拒絕的命令不可藉刪標記、換工具或路徑繞過。現役舊 run 的格式摘要不會自動更新，應於安全時點核對後合併該任務相關的新指引，不整份覆蓋既有摘要。
 - 開發與真實環境測試期間只出中途候選：以 commit 部署到已授權環境、只跑受影響範圍的測試，不合併發版分支、不打版號、不發 Release；不擋後續情境的缺陷先收清單、同一場走完一次修；定版由監督判定，定版後才正式發版、部署定版並重驗受影響項目（產品要靠版本字串辨識新舊時用預發行版本字串）。
 - 開發中只記事實紀錄（改了什麼、commit 或版號、部署讀回值），不寫文件；帶版本內容的文件（手冊、發版說明、證據索引、授權依據清單、執行單與數值卡）定版前列 blocked（kind `dependency`，等定版），定版後依最終結果一次寫；空席依序給測試、查核與下一批實作。

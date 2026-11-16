@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
 """Run a test command, keep its full output in a log, print only the result, totals and failures.
 
-Usage: test-run.py --log LOG [--timeout MINUTES] [--max-lines N] -- COMMAND [ARG...]
+Usage: test-run.py --log LOG [--timeout MINUTES] [--max-lines N] [--slot short|long|none] -- COMMAND [ARG...]
 
 Jay 2026-11-09 asked where long tasks spend their time; checking took more of it than building, partly because
 agents pasted whole test outputs into their context and polled long runs every few seconds. Here the full output
 goes to LOG and LOG.summary.json keeps the one-line evidence (command, exit, duration, totals, failures, log hash);
 the screen gets only that summary. The run is one wait bounded by --timeout: on expiry the whole process group is
 stopped and the exit code is 124. Otherwise the exit code is the command's own.
+
+Heavy-work slots (2026-11-14: a 16GB machine crashed with six 1.3-2.0GB node processes running at once, and a full
+suite took 43-44 minutes under that load, twice its normal time). When this machine's
+<LONG_TASK_HOME or ~/.config/long-task-supervisor>/capacity.json sets "heavySlots", every run takes a slot first and
+queues inside this one command until one is free. --slot long (full suites, builds, anything expected over 5 minutes)
+may hold at most heavyLongMax slots (default: all but one), so a short run never queues behind long ones. Queue time
+is not part of --timeout and is recorded in the summary. A slot whose holder is gone, or whose lease has run out, is
+taken back. After heavyWaitMinutes (default 30) in the queue the run starts anyway and says so: a stuck queue must
+not stop the work. Without that file nothing queues. Each run also adds one line (duration, queue time, largest
+child's peak memory) to samples/heavy-<month>.jsonl in the same local folder.
 """
 import argparse
 import datetime
+import fcntl
 import hashlib
 import json
 import os
 import re
+import resource
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 TAP = re.compile(r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*$")
@@ -92,11 +105,99 @@ def stop(process):
             continue
 
 
+def local_home():
+    return os.environ.get("LONG_TASK_HOME") or os.path.join(os.path.expanduser("~"), ".config", "long-task-supervisor")
+
+
+def machine_config():
+    try:
+        with open(os.path.join(local_home(), "capacity.json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def holder_alive(lease, at):
+    try:
+        os.kill(int(lease["pid"]), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, KeyError, TypeError, ValueError):
+        pass
+    return at < float(lease.get("until") or 0)
+
+
+def take_slot(kind, hold_seconds, label):
+    """Return (lease file or None, seconds queued, whether the queue limit passed without a slot)."""
+    config = machine_config()
+    total = config.get("heavySlots")
+    if kind == "none" or not isinstance(total, int) or total < 1:
+        return None, 0.0, False
+    long_max = config.get("heavyLongMax")
+    long_max = long_max if isinstance(long_max, int) and long_max >= 1 else max(1, total - 1)
+    wait_limit = float(config.get("heavyWaitMinutes", 30)) * 60
+    folder = os.path.join(local_home(), "heavy-slots")
+    os.makedirs(folder, exist_ok=True)
+    began = time.time()
+    while True:
+        with open(os.path.join(folder, ".lock"), "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            held = []
+            for name in os.listdir(folder):
+                if not name.endswith(".json"):
+                    continue
+                path = os.path.join(folder, name)
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        lease = json.load(handle)
+                except (OSError, ValueError):
+                    lease = {}
+                if holder_alive(lease, time.time()):
+                    held.append(lease)
+                else:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+            if len(held) < total and (kind != "long" or sum(item.get("kind") == "long" for item in held) < long_max):
+                path = os.path.join(folder, str(os.getpid()) + ".json")
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump({"pid": os.getpid(), "kind": kind, "label": label, "since": time.time(),
+                               "until": time.time() + hold_seconds}, handle)
+                return path, time.time() - began, False
+        if time.time() - began >= wait_limit:
+            return None, time.time() - began, True
+        time.sleep(float(os.environ.get("LONG_TASK_SLOT_POLL_SECONDS") or 5))
+
+
+def peak_child_mb():
+    """Peak resident memory of the largest finished child process (not the sum of the tree)."""
+    peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
+
+
+def record_sample(log, entry):
+    """One line per run in the local samples folder; test logs under the system temp folder are not recorded."""
+    tmp = os.path.realpath(tempfile.gettempdir())
+    if os.path.realpath(log).startswith(tmp.rstrip(os.sep) + os.sep) and not os.environ.get("LONG_TASK_HOME"):
+        return
+    try:
+        folder = os.path.join(local_home(), "samples")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "heavy-" + time.strftime("%Y-%m") + ".jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run tests with the full output in a log and a short summary on screen.")
     parser.add_argument("--log", required=True, help="full output file (its folder is created)")
     parser.add_argument("--timeout", type=float, default=60.0, help="minutes before the run is stopped (exit 124)")
     parser.add_argument("--max-lines", type=int, default=40, help="failure lines shown on screen")
+    parser.add_argument("--slot", choices=("short", "long", "none"), default="short",
+                        help="heavy-work slot to take first when this machine sets heavySlots; long = full suites and builds")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -104,6 +205,18 @@ def main(argv=None):
         parser.error("give the test command after --")
     log = os.path.abspath(args.log)
     os.makedirs(os.path.dirname(log), exist_ok=True)
+    lease, queued, queue_expired = take_slot(args.slot, args.timeout * 60 + 120, os.path.basename(log))
+    try:
+        return run(args, command, log, queued, queue_expired)
+    finally:
+        if lease:
+            try:
+                os.unlink(lease)
+            except OSError:
+                pass
+
+
+def run(args, command, log, queued, queue_expired):
     started = time.time()
     timed_out = False
     with open(log, "wb") as output:
@@ -128,12 +241,17 @@ def main(argv=None):
     digest = hashlib.sha256(data).hexdigest()
     summary = {"command": command, "cwd": os.getcwd(), "exit": code, "timedOut": timed_out, "seconds": seconds,
                "log": log, "sha256": digest, "lines": len(lines), "totals": totals, "failures": failures,
+               "queuedSeconds": round(queued, 1), "queueExpired": queue_expired, "peakChildMb": peak_child_mb(),
                "at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     with open(log + ".summary.json", "w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    record_sample(log, dict({key: summary[key] for key in ("at", "cwd", "log", "exit", "seconds", "queuedSeconds",
+                                                            "queueExpired", "peakChildMb")}, slot=args.slot))
     state = ("逾時（超過 " + format(args.timeout, "g") + " 分鐘，已終止）") if timed_out else ("通過" if code == 0 else "失敗")
     print("結果：" + state + "（exit " + str(code) + "）｜耗時 " + str(seconds) + " 秒｜完整紀錄 " + log + "（" + str(len(lines)) + " 行，sha256 " + digest[:16] + "…）")
+    if queued >= 1 or queue_expired:
+        print("名額：排隊 " + str(round(queued)) + " 秒（不計入逾時）" + ("；等到上限仍沒有名額，已直接開跑" if queue_expired else ""))
     if totals:
         print("總數：" + "、".join(key + " " + str(value) for key, value in totals.items()))
     if failures and code != 0:

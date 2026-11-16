@@ -3,6 +3,7 @@ const contractState=require('./contract-state.cjs');
 const path=require('node:path');
 const crypto=require('node:crypto');
 const acceptance=require('./acceptance-audit.cjs');
+const machine=require('./machine.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 
 const kinds=['ready_capacity','returned_unintegrated','resource_conflict','recurring_rework','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn',
@@ -73,14 +74,15 @@ function docBudgetStage(budget,awakeMs){
 function issue(kind,items,detail){need(kinds.includes(kind),'unknown issue kind');const affected=[...new Set(items)].sort();const key=digest({kind,affected,detail});return {kind,affected,detail,key};}
 // Main-line work and resource processes consume resources, but not a subagent seat.
 // Unknown handles remain counted until the platform handle can be verified.
-function freeCapacity(snapshot){
-  const seats=Number(snapshot?.capacity?.throttle?.limit??snapshot?.capacity?.verified)||0;
+function freeCapacity(snapshot,binding,run){
+  const seats=machine.dispatchLimit(binding,run,Number(snapshot?.capacity?.throttle?.limit??snapshot?.capacity?.verified)||0).limit;
   const occupied=(snapshot?.packages?.inFlight||[]).filter(item=>item?.handle!=='main'&&!/^resource:.+/.test(item?.handle||'')).length;
   return Math.max(0,seats-occupied);
 }
 function agentSeatCount(inFlight){return (inFlight||[]).filter(item=>item.handle!=='main'&&!String(item.handle||'').startsWith('resource:')).length;}
 function planningBasis(binding){return digest({contractSha256:binding.contractSha256,contractStateSha256:binding.contractStateSha256||null});}
-function planReview(snapshot,binding){
+// run: the run directory; with it the limit also respects this machine's shared total (machine.cjs).
+function planReview(snapshot,binding,run){
   const p=snapshot.packages,completed=new Set(p.completed.map(item=>item.id));
   const occupied=new Set(p.inFlight.flatMap(item=>(item.exclusiveResources||[]).map(claim=>claim.key)));
   const eligible=p.ready.filter(item=>item.independent&&item.safe&&item.dependencies.every(id=>completed.has(id))&&
@@ -91,26 +93,26 @@ function planReview(snapshot,binding){
     .map(item=>({id:item.id,dependencies:item.dependencies}));
   const covered=new Set(['ready','inFlight','blocked','returned'].flatMap(list=>(p[list]||[]).flatMap(item=>item.acceptanceIds||[])));
   const uncovered=(snapshot.acceptance?.items||[]).filter(item=>!['PASS','EXCLUDED'].includes(item.status)&&!covered.has(item.id)).map(item=>item.id);
-  const basis=planningBasis(binding),verified=snapshot.capacity.verified,limit=snapshot.capacity.throttle?.limit??verified;
+  const basis=planningBasis(binding),verified=snapshot.capacity.verified,shared=machine.dispatchLimit(binding,run,snapshot.capacity.throttle?.limit??verified),limit=shared.limit;
   return {basis,reviewRequired:Boolean(binding.contractStateSha256||snapshot.planningReview)&&snapshot.planningReview?.basis!==basis,
     source:{contractSha256:binding.contractSha256,contractStateSha256:binding.contractStateSha256||null},eligible,dependenciesReady,uncovered,
     capacity:{verified,dispatchLimit:limit,activeAgents:agentSeatCount(p.inFlight),free:Math.max(0,limit-agentSeatCount(p.inFlight)),
-      ...(snapshot.capacity.throttle?{throttle:snapshot.capacity.throttle}:{})}};
+      ...(snapshot.capacity.throttle?{throttle:snapshot.capacity.throttle}:{}),...(shared.machine?{machine:shared.machine}:{})}};
 }
-function derive(snapshot,binding){
+function derive(snapshot,binding,run){
   const p=snapshot.packages,issues=[];
   const completed=new Set(p.completed.map(item=>item.id));
   const occupied=new Set(p.inFlight.flatMap(item=>(item.exclusiveResources||[]).map(claim=>claim.key)));
   const eligible=p.ready.filter(item=>item.independent&&item.safe&&item.dependencies.every(id=>completed.has(id))&&
     (item.exclusiveResources||[]).every(claim=>!occupied.has(claim.key))).map(item=>item.id).sort();
-  const free=freeCapacity(snapshot);
+  const free=freeCapacity(snapshot,binding,run);
   const readyById=new Map(p.ready.map(item=>[item.id,item])),readyClaims=new Map();
   for(const id of eligible)for(const claim of readyById.get(id).exclusiveResources){const ids=readyClaims.get(claim.key)||[];ids.push(id);readyClaims.set(claim.key,ids);}
   const exclusiveConflictGroups=[...readyClaims].filter(([,ids])=>ids.length>1).map(([resource,packages])=>({resource,packages:packages.sort()})).sort((a,b)=>a.resource.localeCompare(b.resource));
   if(['working','waiting','integrating'].includes(snapshot.activity)&&free>0&&eligible.length)issues.push(issue('ready_capacity',eligible,{freeCapacity:free,exclusiveConflictGroups}));
   const returned=p.returned.filter(item=>!item.integrated).map(item=>item.id).sort();
   if(['working','waiting'].includes(snapshot.activity)&&returned.length)issues.push(issue('returned_unintegrated',returned,{}));
-  if(binding?.contractSha256){const review=planReview(snapshot,binding);
+  if(binding?.contractSha256){const review=planReview(snapshot,binding,run);
     if(review.reviewRequired)issues.push(issue('planning_review',[],{expectedBasis:review.basis,recordedBasis:snapshot.planningReview?.basis||null,
       source:review.source,eligible:review.eligible,uncovered:review.uncovered}));
     for(const item of review.dependenciesReady)issues.push(issue('dependency_ready_review',[item.id],{dependencies:item.dependencies}));}
@@ -171,7 +173,7 @@ function inspect(run,binding,state){
     if(snapshot.acceptance)acceptance.validate(snapshot.acceptance,contractState.effective(run,binding));
     else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
     snapshotAvailable=true;
-    issues=derive(snapshot,binding);
+    issues=derive(snapshot,binding,run);
     wpSource=workPackageCheck(run,binding,snapshot,file);
     if(wpSource.available)for(const lead of wpSource.leads){const value=issue('wp_mismatch',[lead.id],lead);issues.push(value);wpIssues.push(value);}
     else{

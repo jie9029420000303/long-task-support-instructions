@@ -333,7 +333,7 @@ function supervisorClock(){
   const longUncovered=uncovered.filter(id=>awake(plan[id])>=UNPLANNED_MS);
   let unplanned=null;
   if(longUncovered.length&&idle&&once('unplanned:'+longUncovered.join(','))){
-    unplanned={criteria:longUncovered,freeCapacity:freeCapacity(snapshot),minutes:Math.round(Math.min(...longUncovered.map(id=>awake(plan[id])))/60000)};
+    unplanned={criteria:longUncovered,freeCapacity:freeCapacity(snapshot,binding,run),minutes:Math.round(Math.min(...longUncovered.map(id=>awake(plan[id])))/60000)};
   }
   // Every remaining package blocked, none ready or in flight, while the executor is idle (Jay 2026-11-10: 「不要因為等待
   // 我就停下來動作」; WEB 11/09 22:52 idled 12 minutes with 14 packages blocked, most only later in the plan). Every event

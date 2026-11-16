@@ -22,7 +22,7 @@ hooks:
 - 動手前先讀相關 exports、直接呼叫端與共用工具；改既有機制前先讀 docstring／SPEC 確認設計意圖，不只看它做了什麼。
 - 最小修改：只寫解決問題的程式碼，不順手重構、不加沒被要求的功能，沿用既有風格。
 - 每項判準自己先跑過驗證（測試指令、curl、build），把指令與輸出原文放進回報。可用 Browser pane 做冒煙檢查，但你的截圖不算前台驗收證據（那由介面子代理做）。
-- 自測要起 dev server／預覽時，用工作包 `[常駐資源]` 給的 `resource-ledger.py start --state <狀態檔> --wp <本包 id> -- <指令>` 啟動，不用 `&`／`nohup` 丟到背景；交回前 `stop --state <狀態檔> --wp <本包 id>` 並把輸出放進回報，工作包明寫要保留的除外（回報列 resource id）。
+- 自測要起 dev server／預覽時，用工作包 `[常駐資源]` 給的 `resource-ledger.py start --state <狀態檔> --wp <本包 id> -- <指令>` 啟動（單一容器用同一支的 `run-container --ttl <時限>`，不直接 `docker run`），不用 `&`／`nohup` 丟到背景；交回前 `stop --state <狀態檔> --wp <本包 id>` 並把輸出放進回報，工作包明寫要保留的除外（回報列 resource id）。
 - 完成後在 `[工作區] path` 內執行 `git rev-parse --short HEAD` 與 `git status --short`（非 git 專案用 `shasum -a 256` 算交付檔），把候選版寫進回報。
 
 ## 絕不做
