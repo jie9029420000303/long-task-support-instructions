@@ -16,19 +16,27 @@ const MIN_SAMPLES=3;
 const median=values=>{const sorted=[...values].sort((a,b)=>a-b),mid=sorted.length>>1;return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;};
 const round=value=>Math.round(value*10)/10;
 function sessionsRoot(){return path.join(process.env.CODEX_HOME||path.join(os.homedir(),'.codex'),'sessions');}
+// Archiving a conversation moves its rollout to archived_sessions/, one flat folder, and a follow-up sent to an
+// archived subagent keeps writing there (2026-11-17: /root/adv_efficiency was archived, answered at 23:15, and its
+// only rollout stayed in archived_sessions). Since v1.7.0 archives finished subagents, every lookup reads both
+// places. Compressed .jsonl.zst files there are old archives and are not read.
+function archivedRoot(){return path.join(path.dirname(sessionsRoot()),'archived_sessions');}
+function archivedFiles(keep){
+  const root=archivedRoot();let names=[];try{names=fs.readdirSync(root);}catch{}
+  return names.filter(name=>name.endsWith('.jsonl')&&keep(name)).map(name=>path.join(root,name));
+}
 // A thread's rollout is sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl. After compaction the same thread
 // continues in rollout-<time>-<thread id>_<segment id>.jsonl (2026-10-11: the equity re-review supervisor moved
 // to such a file and receipt reconciliation stopped finding it). session_meta.payload.id names the thread.
 function sessionFiles(threadId){
   const root=sessionsRoot(),list=dir=>{try{return fs.readdirSync(dir).filter(name=>/^\d+$/.test(name));}catch{return [];}};
   const files=[];
+  const add=file=>{try{const meta=JSON.parse(firstLine(file));if(meta.type==='session_meta'&&meta.payload?.id===threadId)files.push(file);}catch{}};
   for(const year of list(root))for(const month of list(path.join(root,year)))for(const day of list(path.join(root,year,month))){
     const dir=path.join(root,year,month,day);let names=[];try{names=fs.readdirSync(dir);}catch{}
-    for(const name of names)if(name.endsWith('.jsonl')&&name.includes(threadId)){
-      const file=path.join(dir,name);
-      try{const meta=JSON.parse(firstLine(file));if(meta.type==='session_meta'&&meta.payload?.id===threadId)files.push(file);}catch{}
-    }
+    for(const name of names)if(name.endsWith('.jsonl')&&name.includes(threadId))add(path.join(dir,name));
   }
+  for(const file of archivedFiles(name=>name.includes(threadId)))add(file);
   // Oldest segment first: the file with the latest start holds the thread's current turns.
   return files.sort((a,b)=>path.basename(a).localeCompare(path.basename(b)));
 }
@@ -78,21 +86,24 @@ function agentRun(file,meta){
 const metas=new Map();
 function rollouts(binding,now=Date.now()){
   const files=[],from=new Date((Date.parse(binding.createdAt)||now)-24*3600*1000);from.setHours(0,0,0,0);
+  const first='rollout-'+[from.getFullYear(),String(from.getMonth()+1).padStart(2,'0'),String(from.getDate()).padStart(2,'0')].join('-');
   for(const day=new Date(from);day.getTime()<=now;day.setDate(day.getDate()+1)){
     const dir=path.join(sessionsRoot(),String(day.getFullYear()),String(day.getMonth()+1).padStart(2,'0'),String(day.getDate()).padStart(2,'0'));
     try{for(const name of fs.readdirSync(dir))if(name.endsWith('.jsonl'))files.push(path.join(dir,name));}catch{}
   }
-  return files;
+  // Archived rollouts keep their local start time in the name, so the same window applies.
+  return files.concat(archivedFiles(name=>name.slice(0,first.length)>=first));
 }
 function agentRuns(binding){
-  const runs=[];
+  const runs=new Map();
   for(const file of rollouts(binding)){
     let meta=metas.get(file);
     if(meta===undefined){try{const row=JSON.parse(firstLine(file));meta=row.type==='session_meta'?row.payload:null;}catch{meta=null;}metas.set(file,meta);}
     if(meta?.thread_source!=='subagent'||![meta.session_id,meta.parent_thread_id].includes(binding.executorId))continue;
-    try{runs.push(agentRun(file,meta));}catch{}
+    // A rollout read just before archiving can still be cached under its old path; the file written last wins.
+    try{const run=agentRun(file,meta),seen=runs.get(run.id);if(!seen||(run.lastAt||0)>=(seen.lastAt||0))runs.set(run.id,run);}catch{}
   }
-  return runs;
+  return [...runs.values()];
 }
 // A finished run shorter than a minute is a launch failure or a one-line answer, not a speed sample.
 function speed(runs){
