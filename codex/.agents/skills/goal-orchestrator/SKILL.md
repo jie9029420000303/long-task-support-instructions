@@ -54,7 +54,7 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 
 ## 執行期資源收尾
 
-並行派工閘只管「誰在用」；本節管「誰開、誰關」。主線或子代理啟動、會活過當下回合的資源（dev server、預覽 server、容器／compose 專案、其他常駐程序）一律經 `scripts/resource-ledger.py` 登記在 sidecar 同目錄的 `resources.json`：常駐程序用 `start --state <sidecar 目錄>/state.md --wp <id> -- <指令>` 啟動（獨立 process group，日誌在 `resources/`）；單一容器一律用 `run-container --state … --wp <id> --name <名> --ttl <時限> [--memory 1g] -- <docker run 的其餘參數與映像>`，一步完成啟動、任務標籤、登記與到期時間，不直接 `docker run`；`docker compose up -d` 等自行脫離的資源，啟動後立即 `register --compose-project <名>`；工作包專用的 worktree 建好後 `register --worktree <路徑>`。不以 `&`、`nohup`、`disown` 直接把程序丟到背景。
+並行派工閘只管「誰在用」；本節管「誰開、誰關」。主線或子代理啟動、會活過當下回合的資源（dev server、預覽 server、容器／compose 專案、其他常駐程序）一律經 `scripts/resource-ledger.py` 登記在 sidecar 同目錄的 `resources.json`：常駐程序用 `start --state <sidecar 目錄>/state.md --wp <id> -- <指令>` 啟動（獨立 process group，日誌在 `resources/`）；單一容器一律用 `run-container --state … --wp <id> --name <名> --ttl <時限> [--memory 1g] -- <docker run 的其餘參數與映像>`，一步完成啟動、任務標籤、登記與到期時間，不直接 `docker run`；`docker compose up -d` 等自行脫離的資源，啟動後立即 `register --compose-project <名>`；工作包專用與整合候選版的 worktree 建好當下就 `register --worktree <路徑>`（任務期間建立、紀錄裡寫到卻沒登記的 worktree，守門算需處理）；`run-container` 參數裡還不存在的具名資料卷會先帶同一組任務標籤建立，已存在的不動。不以 `&`、`nohup`、`disown` 直接把程序丟到背景。
 
 `run-container` 的容器到期（從建立或最後一次續期起算）只停止這一個、不刪除；還要用就 `renew --id <r> --ttl <時限>`。記憶體資料庫與正式資料副本（參數含 tmpfs，或加 `--protect`）到期不自動停，只由主線 `stop`。到期計時不跨重開機：重開機後要續用的先 `renew`，否則只由守門提示已過期（使用者 2026-11-16 定案；2026-11-14 實測 316 個已停止容器與 4 個沒標籤的容器沒人收）。
 
@@ -63,6 +63,8 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 **子代理用完即封存**（Codex App；使用者 2026-11-17 定案）：App 替每個子代理對話常駐兩個 node_repl（合計約 19MB），子代理結束後不會釋放，只有封存對話或重開 App 才收回（2026-11-17 實測：306 個合計約 2.9GB；封存後 20 秒內結束）。工作包判定後、確定不再追問某個子代理時（PASS，或 FAIL／主線接手後改派別人），派出它的一方（主線，或派出它的子代理）當下執行 `node <監督技能目錄>/scripts/subagent-archive.cjs plan --agent <子代理名稱>`，對回傳 `archive` 清單內每個 threadId 呼叫 App 工具 `set_thread_archived`（`archived:true`），再執行 `subagent-archive.cjs verify <threadId…> --log <sidecar 目錄>/archived-agents.jsonl` 讀回並留紀錄；`verify` 回 1 就重新封存未生效的那幾個。還要追問、等返工或仍在執行的子代理不封存；`plan` 只列已結束回合的子代理，連同它自己派出、也已結束的子代理，仍在執行或底下還有子代理在跑的會列在 `skip` 並寫明原因。封存過的子代理仍可直接用 followup 派工，不必先解除（2026-11-17 實測照常回覆，且維持封存）；它的紀錄改寫在 `~/.codex/archived_sessions/`，監看與完成喚醒連同這裡一起讀，續派後的進度與完成照常追蹤；要讓它回到側邊欄，才用紀錄裡的 threadId 呼叫 `set_thread_archived`（`archived:false`）。宣稱完成前執行 `plan --all`，把剩下已結束的子代理一次封存並 `verify`。封存只收回 App 替子代理開的程序，不動工作區、資源帳本與證據。
 
 `sidecar-guard.py` 每次派工前與判定後同時核對帳本與實況（另外列出本任務已停止還沒移除的容器，以及任務期間啟動卻沒有任務標籤的執行中容器；這兩種只提醒、不算需處理），並掃描從 Goal 建立到 sidecar 最後寫入之間（所以先更新 sidecar 再跑守門）出現在任務範圍內（專案根；sidecar、`archive.md`、`wp/*.md` 裡的 `path:` 工作區；紀錄裡提到的同 repo worktree，含整合候選版）、已脫離對話（父程序是 1）卻未登記的程序，以及 working_dir 在同範圍內或帶 `lt.task` 標籤的容器。已判定工作包的資源仍在執行、宣稱完成時 `wp`／`final` 資源仍在執行、`acceptance`／`external` 缺理由，或有未登記資源時回 4，主線關閉、補登記或改標並寫理由後重跑，不等待使用者。守門只報告、不自動關閉；`stop` 只作用於帳本內且啟動時間核對相符的資源，launchd 常駐服務、Goal 建立前已在執行的服務與其他任務帳本內的資源不列入、不關閉。
+
+**測試瀏覽器與 worktree 結案**：測試自行開的瀏覽器在逾時或中斷時可能留下來（2026-11-18 一支前一天啟動的 Chrome for Testing 父程序已結束仍在跑）。守門把四項條件都符合的標成「reap 可收」：父程序已結束、工作目錄在本任務範圍、`--user-data-dir` 在系統暫存目錄、啟動時間在任務建立之後。主線看到就跑 `resource-ledger.py reap --state <sidecar 目錄>/state.md`，宣稱完成前必跑一次；它只關符合四項的瀏覽器（連同同組輔助程序），關前關後記進 `reaped.jsonl`，其他脫離程序照舊只報。宣稱完成前 `check --final` 也核對登記的 worktree：已 PASS、乾淨、已整合（或已在遠端）且沒被證據引用的要先 `stop --remove`；有未提交內容或未整合的列為保留並寫明原因，不擋完成（使用者 2026-11-18 定案；當天 ~/worktrees 287 個目錄、多數從沒登記）。
 
 ## 路徑枚舉閘（找 X／確認沒有 X 型任務）
 

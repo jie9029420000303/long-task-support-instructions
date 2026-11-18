@@ -694,7 +694,9 @@ class ResourceAuditTests(unittest.TestCase):
         live = snapshot([proc(301, f"{self.root}/wt-candidate/app"), proc(302, f"{self.root}/wt-archived"),
                          proc(303, f"{self.root}/wt-other")])
         _, problems = resource_ledger.audit(state, snapshot=live)
-        self.assertEqual(["pid 301", "pid 302"], sorted(p.split("程序 ")[1].split("（")[0] for p in problems), problems)
+        # v1.8.0 起任務期間建立、紀錄寫到的 wt-candidate 另列「未登記 工作樹」；這裡只看程序的範圍。
+        processes = [p for p in problems if "程序 " in p]
+        self.assertEqual(["pid 301", "pid 302"], sorted(p.split("程序 ")[1].split("（")[0] for p in processes), problems)
 
     def test_resources_started_after_the_last_state_write_belong_to_no_finished_task(self):
         # 202 份真實狀態檔實測：被 git 帶進整合候選版 worktree 的 6 份舊任務（09-15～22 已結案）會把今天才啟動的

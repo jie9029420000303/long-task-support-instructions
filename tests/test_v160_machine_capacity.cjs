@@ -151,16 +151,16 @@ test('one sample a minute however many callers; it records the signals and limit
   }finally{delete process.env.LONG_TASK_USAGE_LOG;m.close();}
 });
 test('the supervisor hears about a slow or restart-due machine only from a recent sample; old sample files are dropped',()=>{
-  const m=machine({slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:0.000001});try{
+  const m=machine({slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:0.000001,lowDiskGiB:0,criticalDiskGiB:0});try{
     const mine=m.run('mine'),now=Date.now();usage(m,[20],now);
     fs.mkdirSync(path.join(m.home,'samples'));
     fs.writeFileSync(path.join(m.home,'samples','machine-2020-01-01.jsonl'),'{}\n');fs.writeFileSync(path.join(m.home,'samples','heavy-2020-01.jsonl'),'{}\n');
     assert.equal(tool.hint(mine.dir,now),null,'no sample yet');
     const entry=tool.sample(now);assert.equal(entry.restartHint,true);
-    assert.deepEqual(Object.keys(tool.hint(mine.dir,now)).sort(),['at','commandMs','restartHint','routeMedianMs','slow','swapFiles','uptimeDays']);
+    assert.deepEqual(Object.keys(tool.hint(mine.dir,now)).sort(),['at','commandMs','diskCritical','diskFreeGiB','diskLow','restartHint','routeMedianMs','slow','swapFiles','uptimeDays']);
     assert.equal(tool.hint(mine.dir,now+16*60000),null,'a sample older than 15 minutes says nothing about now');
     assert.deepEqual(fs.readdirSync(path.join(m.home,'samples')).filter(name=>name.includes('2020')),['heavy-2020-01.jsonl'],'machine samples keep 30 days; other records are not this function\'s to delete');
-    save(path.join(m.home,'capacity.json'),{slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:1e9});
+    save(path.join(m.home,'capacity.json'),{slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:1e9,lowDiskGiB:0,criticalDiskGiB:0});
     tool.sample(now+61000);assert.equal(tool.hint(mine.dir,now+61000),null,'a healthy machine adds nothing to the brief');
   }finally{delete process.env.LONG_TASK_USAGE_LOG;m.close();}
 });

@@ -73,7 +73,9 @@ if(require.main===module){
   (async()=>{
     // The launchd job is the one model-free program that runs whether or not any chat is open, so it also records the
     // machine sample (machine.cjs; nothing limits work on it) and keeps its own log from growing without end.
-    if(command==='check'){try{const machine=require('./machine.cjs');machine.rotate(path.join(notify.home(),'watch-guard.log'));machine.sample();}catch(error){console.error('machine sample: '+error.message);}}
+    // Critically low disk also reaches Jay's phone from here, at most once per 6 hours (Jay 2026-11-18: record and remind).
+    if(command==='check'){try{const machine=require('./machine.cjs');machine.rotate(path.join(notify.home(),'watch-guard.log'));
+      const notice=machine.diskNotice(machine.sample());if(notice)await notify.sendOnce(notify.home(),notice.key,notice.text);}catch(error){console.error('machine sample: '+error.message);}}
     const result=command==='check'?await check():command==='install'?install():command==='status'?status()
       :command==='register'?{registered:register(path.resolve(arg||''),{manual:true})}
       :(()=>{throw Error('Commands: check, install, status, register RUN');})();

@@ -19,6 +19,7 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
            單一容器一律用這個：一步完成 docker run -d、貼上任務／工作包／關閉時點／帳本位置四個標籤、登記與到期時間。
            到期（從建立或最後一次 renew 起算）由背景計時自動「停止」這一個容器，不刪除；記憶體資料庫與正式資料副本
            （參數含 tmpfs，或加 --protect）不自動停，只由主線 stop。
+           參數裡還不存在的具名資料卷（-v 名:/路徑、--mount source=名）先帶同一組標籤建立；已存在的不動。
   renew    --state S --id R --ttl 4h
            還要用就續期，到期時間從現在起算；重開機後要繼續用的容器也用它重新掛上計時。
   stop     --state S (--id R | --wp ID | --all) [--include-acceptance] [--remove [--integrated-into REF]]
@@ -31,8 +32,13 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
   check    --state S [--final]
            印出帳本實況與未登記資源；需收尾時 exit 4。--final＝以「即將宣稱完成」的標準核對。
            sidecar-guard.py 每次派工前與判定後也跑同一段核對。
-exit：0 通過；2 參數或檔案錯誤；4 有資源需要收尾或登記；124 wait 逾時。
-check 與守門只報告，不自動關閉任何資源。未登記資源＝在「任務建立」到「狀態檔最後寫入」之間啟動、已脫離 session（父程序是 1）、
+           任務期間建立、紀錄裡寫到卻沒登記的 worktree 也算需處理；--final 時已 PASS、乾淨、已整合（或已在遠端）
+           且沒被證據引用的登記 worktree 要先 stop --remove，有未提交內容或未整合的列為保留、不擋。
+  reap     --state S [--dry-run]
+           關掉殘留的測試瀏覽器：四項全符合才關——父程序已結束、工作目錄在本任務範圍、--user-data-dir 在系統暫存目錄、
+           啟動時間在任務建立之後。自成一組的連同輔助程序整組關，關前關後記進 reaped.jsonl。宣稱完成前必跑。
+exit：0 通過；2 參數或檔案錯誤；4 有資源需要收尾或登記（reap：有沒關掉的）；124 wait 逾時。
+check 與守門只報告，不自動關閉任何資源；只有主線明確執行 stop、reap 才會關。未登記資源＝在「任務建立」到「狀態檔最後寫入」之間啟動、已脫離 session（父程序是 1）、
 同一使用者、非 launchd 常駐、工作目錄在任務範圍內的程序，以及 compose working_dir 在同範圍內或帶
 `lt.task=<任務目錄名>` 標籤的容器；已登記在任何任務帳本（含 external）的資源不列。另外只列出、不算需處理的兩種：
 本任務已停止卻還沒移除的容器，以及任務期間啟動、沒有任務標籤、不屬 compose、也不在任何帳本裡的執行中容器
@@ -83,6 +89,11 @@ DOCKER_FORMAT = "\t".join([
 ALL_FORMAT = "\t".join([DOCKER_FORMAT, "{{.State}}", '{{.Label "lt.wp"}}', '{{.Label "lt.close"}}',
                         '{{.Label "lt.ledger"}}'])
 LABELS = ("task", "wp", "close", "ledger")
+# 測試自己開的瀏覽器主程序（Playwright、Stagehand 等的 Chrome for Testing／Chromium）。輔助程序（… Helper）不在內，
+# 它們跟著主程序的 process group 一起收。使用者自己的瀏覽器不帶暫存 profile，不會被認成測試瀏覽器。
+BROWSER_NAMES = {"Google Chrome for Testing", "Chromium", "Google Chrome", "Google Chrome Canary", "Microsoft Edge",
+                 "chrome", "chromium", "chromium-browser", "chrome-headless-shell", "headless_shell"}
+PROFILE = re.compile(r"--user-data-dir=(\S+)")
 DELETIONS_HEAD = ("# 刪除清冊\n\n| 時間 | 項目與識別 | 產生者 | 為何屬中間產物 | 引用搜尋結果 | 刪後讀回 |\n"
                   "|---|---|---|---|---|---|\n")
 
@@ -321,15 +332,22 @@ def docker_all():
     return _docker_ps(["-a"], ALL_FORMAT)
 
 
-def take_snapshot():
+def process_snapshot():
+    """程序實況（不碰 docker）：脫離 session 的程序另補工作目錄。"""
     procs = ps_table()
     uid = os.getuid()
     detached = [p["pid"] for p in procs.values() if p["ppid"] == 1 and p["uid"] == uid]
     for pid, cwd in cwds(detached).items():
         procs[pid]["cwd"] = cwd
+    return {"procs": procs, "uid": uid, "launchd": launchd_pids()}
+
+
+def take_snapshot():
+    snap = process_snapshot()
     everything = docker_all()
     running = None if everything is None else [c for c in everything if c.get("state") == "running"]
-    return {"procs": procs, "uid": uid, "launchd": launchd_pids(), "containers": running, "all_containers": everything}
+    snap.update(containers=running, all_containers=everything)
+    return snap
 
 
 def start_of(pid, procs=None):
@@ -511,7 +529,7 @@ def task_scope(state, lines):
 def registered(state, worktrees=()):
     """所有任務帳本（本任務、同專案與同 repo 其他 worktree 的任務、全機索引記到的其他專案任務）裡還沒停止的資源；
     這些都有主人，不算未登記。"""
-    keys = {"pids": set(), "pgids": set(), "projects": set(), "containers": set(), "ids": set()}
+    keys = {"pids": set(), "pgids": set(), "projects": set(), "containers": set(), "ids": set(), "worktrees": set()}
     ledgers = {state.parent / "resources.json"} | set(state.parent.parent.glob("*/resources.json"))
     for tree in worktrees:
         for pattern in (".claude/long-task/*/resources.json", ".codex/long-task/*/resources.json"):
@@ -531,6 +549,8 @@ def registered(state, worktrees=()):
                     keys["projects"].add(res["project"])
                 if res.get("container"):
                     keys["containers"].add(res["container"])
+                if res.get("kind") == "worktree" and res.get("path"):
+                    keys["worktrees"].add(os.path.realpath(res["path"]))
                 keys["ids"] |= {item["id"] for item in res.get("container_identities", []) if item.get("id")}
     return keys
 
@@ -540,8 +560,24 @@ def inside(path, roots):
     return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
 
 
-def unregistered(roots, since, until, task, snap, keys):
-    found = []
+def temp_roots():
+    return sorted({os.path.realpath(p) for p in (tempfile.gettempdir(), "/tmp", "/var/folders")})
+
+
+def temp_browser(p):
+    """暫存 profile 的測試瀏覽器主程序：回傳 profile 路徑；不是就回 None。"""
+    command = p.get("command") or ""
+    if os.path.basename(command.split(" --", 1)[0].rstrip()) not in BROWSER_NAMES:
+        return None
+    match = PROFILE.search(command)
+    if not match:
+        return None
+    profile = match.group(1).strip("'\"")
+    return profile if inside(profile, temp_roots()) else None
+
+
+def detached_in_scope(roots, since, until, snap, keys):
+    """任務期間啟動、已脫離對話（父程序是 1）、工作目錄在任務範圍內、不在任何帳本的程序。"""
     launchd = snap.get("launchd") or set()
     for p in snap["procs"].values():
         if p["ppid"] != 1 or p["uid"] != snap.get("uid", os.getuid()) or p["pid"] in launchd:
@@ -549,7 +585,61 @@ def unregistered(roots, since, until, task, snap, keys):
         if not since <= p["start"] <= until or p["pid"] in keys["pids"] or p["pgid"] in keys["pgids"]:
             continue
         if p.get("cwd") and roots and inside(p["cwd"], roots):
-            found.append(f"程序 pid {p['pid']}（{p['cwd']}）：{p['command'][:100]}")
+            yield p
+
+
+def orphan_browsers(roots, since, until, snap, keys):
+    """結案時可代關的殘留測試瀏覽器：四個條件全符合（使用者 2026-11-18 定案）——父程序已結束、工作目錄在本任務範圍、
+    暫存 profile、啟動時間在任務期間。2026-11-17 一支測試逾時後，它自行開的 Chrome for Testing 活了 22 小時。"""
+    return [dict(p, profile=temp_browser(p)) for p in detached_in_scope(roots, since, until, snap, keys) if temp_browser(p)]
+
+
+def worktree_born(tree):
+    with contextlib.suppress(OSError):
+        info = os.stat(Path(tree) / ".git")
+        return dt.datetime.fromtimestamp(getattr(info, "st_birthtime", info.st_mtime))
+    return None
+
+
+def new_worktrees(state, roots, since, until, worktrees, keys):
+    """任務期間建立、紀錄裡寫到、卻沒登記的同 repo worktree（使用者 2026-11-18 定案：建立就登記、結案就移除；
+    當天 ~/worktrees 287 個目錄、152GB，多數從沒登記，結案時沒人知道該收哪些）。"""
+    main = os.path.realpath(worktrees[0]) if worktrees else None
+    found = []
+    for tree in worktrees[1:]:
+        real = os.path.realpath(tree)
+        mentioned = any(r == real or r.startswith(real + os.sep) for r in roots)
+        if real == main or not mentioned or real in keys["worktrees"] or not Path(real).is_dir():
+            continue
+        born = worktree_born(real)
+        if born and since <= born <= until:
+            found.append(real)
+    return found
+
+
+def leftover_worktree(res, state_dir, project):
+    """宣稱完成時還在的登記 worktree：可以移除就回 None，要保留就回原因（未提交、未整合、不是 PASS、證據引用）。"""
+    tree = res.get("path") or ""
+    if package_passed(state_dir, res.get("wp")) is not True:
+        return "所屬工作包不是 PASS，留作診斷"
+    code, dirty = git(tree, "status", "--porcelain")
+    if code != 0 or dirty.strip():
+        return "有未提交或未追蹤的檔案"
+    head = git(project, "rev-parse", "HEAD")[1].strip() if project else ""
+    integrated = bool(head) and git(tree, "merge-base", "--is-ancestor", "HEAD", head)[0] == 0
+    if not integrated and not git(tree, "branch", "-r", "--contains", "HEAD")[1].strip():
+        return "提交還沒整合進專案，也不在任何遠端分支"
+    used, search = referenced(state_dir, [tree])
+    if used is not False:
+        return search
+    return None
+
+
+def unregistered(roots, since, until, task, snap, keys):
+    found = []
+    for p in detached_in_scope(roots, since, until, snap, keys):
+        tag = "（暫存 profile 的測試瀏覽器，reap 可收）" if temp_browser(p) else ""
+        found.append(f"程序 pid {p['pid']}{tag}（{p['cwd']}）：{p['command'][:100]}")
     containers = snap.get("containers")
     if containers is None:
         return found, False
@@ -605,13 +695,23 @@ def audit(state, claimed=False, snapshot=None):
         return [], []
     snap = snapshot or take_snapshot()
     judged = judged_packages(lines)
+    task_dir = state.parent
+    project = (str(task_dir.parent.parent.parent)
+               if task_dir.parent.name == "long-task" and task_dir.parent.parent.name in (".claude", ".codex") else None)
     shown, problems = [], []
     for res in running:
         state_now = alive(res, snap)
         if state_now is False:
             shown.append(f"  {describe(res)}：{inactive_note(res, snap)}")
             continue
-        if res["kind"] == "worktree":
+        if res["kind"] == "worktree" and claimed and res.get("close") in ("wp", "final"):
+            keep = leftover_worktree(res, task_dir, project)
+            if keep:
+                shown.append(f"  {describe(res)}：保留（{keep}）")
+            else:
+                problems.append(f"{describe(res)}：已 PASS、乾淨、已整合，宣稱完成前 stop --id {res['id']} --remove "
+                                "--integrated-into <候選版 commit 或分支>（分支保留）")
+        elif res["kind"] == "worktree":
             hint = "；工作包已判定，核對後可 stop --id … --remove --integrated-into <候選版>" if res.get("wp") in judged else ""
             shown.append(f"  {describe(res)}：仍在{hint}")
         elif res.get("close") in NEEDS_REASON and not res.get("reason"):
@@ -627,6 +727,8 @@ def audit(state, claimed=False, snapshot=None):
     keys = registered(state, worktrees)
     loose, scanned_containers = unregistered(roots, since, until, task, snap, keys)
     problems += [f"未登記 {item}" for item in loose]
+    problems += [f"未登記 工作樹 {tree}：建好就 register --worktree；整合候選版等要留下的也登記（--wp 主線 --close final）"
+                 for tree in new_worktrees(state, roots, since, until, worktrees, keys)]
     head = f"執行期資源：帳本 {len(running)} 筆未停止，需處理 {len(problems)} 筆"
     if roots and not scanned_containers:
         head += "；docker 不可用，容器沒有掃描"
@@ -636,6 +738,9 @@ def audit(state, claimed=False, snapshot=None):
     if problems:
         out.append("先關閉（resource-ledger.py stop）、補登記（register），或改標 acceptance／external 並寫理由，"
                    "再重跑；守門只報告，不會自動關閉任何資源。")
+    if any("reap 可收" in item for item in loose):
+        out.append("暫存 profile 的測試瀏覽器：用 resource-ledger.py reap --state <狀態檔> 收掉（只關父程序已結束、"
+                   "工作目錄在本任務範圍、任務期間啟動的那幾支）；宣稱完成前一定要跑一次。")
     return out, problems
 
 
@@ -808,6 +913,7 @@ def cmd_run_container(args):
     path = ledger_of(args)
     protected = args.protect or any(a == "--tmpfs" or a.startswith("--tmpfs=") or "type=tmpfs" in a for a in command)
     labels = {"lt.task": path.parent.name, "lt.wp": args.wp, "lt.close": args.close, "lt.ledger": os.path.realpath(path)}
+    volumes = label_new_volumes(command, labels)
     argv = ["docker", "run", "-d", "--name", args.name]
     for key, value in labels.items():
         argv += ["--label", f"{key}={value}"]
@@ -828,15 +934,52 @@ def cmd_run_container(args):
             "id": rid, "wp": args.wp, "kind": "container", "container": identity["name"],
             "container_identities": [identity], "managed": True, "protected": protected, "memory": args.memory,
             "command": " ".join(command), "close": args.close, "reason": args.reason, "ttl": ttl,
-            "expires_at": expiry(ttl), "created_at": now().isoformat(),
+            "expires_at": expiry(ttl), "created_at": now().isoformat(), **({"volumes": volumes} if volumes else {}),
         })
     if protected:
         tail = f"到期 {human(ttl)}只提醒、不自動停（記憶體資料或受保護），由主線 stop"
     else:
         arm_expiry(path, rid, ttl)
         tail = f"{human(ttl)}後沒續期就自動停止（不刪）"
-    print(f"已啟動並登記 {rid}：容器 {identity['name']}（{cid[:12]}），關閉時點 {args.close}；{tail}")
+    made = f"；具名資料卷 {'、'.join(volumes)} 已帶同一組任務標籤建立" if volumes else ""
+    print(f"已啟動並登記 {rid}：容器 {identity['name']}（{cid[:12]}），關閉時點 {args.close}；{tail}{made}")
     return 0
+
+
+def named_volumes(command):
+    """docker run 參數裡的具名資料卷（-v 名:/路徑、--volume、--mount source=名）；主機路徑掛載不算。"""
+    names = []
+    for i, arg in enumerate(command):
+        nxt = command[i + 1] if i + 1 < len(command) else ""
+        spec = (nxt if arg in ("-v", "--volume") else arg.split("=", 1)[1] if arg.startswith("--volume=")
+                else arg[2:] if arg.startswith("-v") and not arg.startswith("--") and len(arg) > 2 else None)
+        mount = nxt if arg == "--mount" else arg.split("=", 1)[1] if arg.startswith("--mount=") else None
+        name = None
+        if spec and ":" in spec:
+            name = spec.split(":", 1)[0]
+        elif mount:
+            fields = dict(item.split("=", 1) for item in mount.split(",") if "=" in item)
+            if fields.get("type", "volume") == "volume":
+                name = fields.get("source") or fields.get("src")
+        if name and not name.startswith((".", "~")) and "/" not in name and name not in names:
+            names.append(name)
+    return names
+
+
+def label_new_volumes(command, labels):
+    """還不存在的具名資料卷先帶任務標籤建立，之後才查得到是哪個任務留下的（使用者 2026-11-18 定案；當天 1005 個資料卷
+    只有 1 個帶任務標籤）。已存在的資料卷不動、不改標籤；匿名資料卷隨容器 rm -v 一起刪，不必標。"""
+    made = []
+    for name in named_volumes(command):
+        try:
+            if subprocess.run(["docker", "volume", "inspect", name], capture_output=True, timeout=60).returncode == 0:
+                continue
+            argv = ["docker", "volume", "create"] + [x for k, v in labels.items() for x in ("--label", f"{k}={v}")] + [name]
+            if subprocess.run(argv, capture_output=True, timeout=60).returncode == 0:
+                made.append(name)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return made
 
 
 def identity_problem(res, path, everything):
@@ -1142,6 +1285,76 @@ def cmd_wait(args):
         time.sleep(min(args.interval, max(0.0, deadline - time.monotonic())))
 
 
+def browser_members(p, procs):
+    """殘留瀏覽器目前還活著的程序。主程序 PID 已被別的程序重用（啟動時間不符）就視為已結束、不動。"""
+    leader = procs.get(p["pid"])
+    if leader and leader["start"] != p["start"]:
+        return []
+    if p["pgid"] == p["pid"]:
+        return [q["pid"] for q in procs.values() if q["pgid"] == p["pid"]]
+    if not leader:
+        return []
+    tree, frontier = [p["pid"]], [p["pid"]]
+    while frontier:
+        children = [q["pid"] for q in procs.values() if q["ppid"] in frontier and q["pid"] not in tree]
+        tree += children
+        frontier = children
+    return tree
+
+
+def kill_browser(p):
+    """先 SIGTERM 等 10 秒，再 SIGKILL 等 3 秒；自成一組的連同整組輔助程序，不是的只收它和它的子程序。"""
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 3)):
+        pids = browser_members(p, ps_table())
+        if not pids:
+            return True
+        if p["pgid"] == p["pid"]:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(p["pid"], sig)
+        else:
+            for pid in reversed(pids):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, sig)
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if not browser_members(p, ps_table()):
+                return True
+            time.sleep(0.2)
+    return not browser_members(p, ps_table())
+
+
+def reap(state, dry_run=False, snapshot=None):
+    """回傳 (要印的行, exit code)。只關 orphan_browsers 的四條件全符合者，每支關前關後記進 reaped.jsonl。"""
+    lines = state.read_text(encoding="utf-8").splitlines()
+    roots, since, _until, _task, worktrees = task_scope(state, lines)
+    targets = orphan_browsers(roots, since, now(), snapshot or process_snapshot(), registered(state, worktrees))
+    if not targets:
+        return ["沒有殘留的測試瀏覽器（父程序已結束、工作目錄在本任務範圍、暫存 profile、任務期間啟動，四項全符合的）。"], 0
+    out, failed = [], 0
+    for p in targets:
+        label = f"pid {p['pid']}（{p['start'].isoformat()} 啟動，profile {p['profile']}，工作目錄 {p['cwd']}）"
+        if dry_run:
+            out.append(f"・會關閉 {label}")
+            continue
+        gone = kill_browser(p)
+        failed += not gone
+        with open(state.parent / "reaped.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"at": now().isoformat(), "pid": p["pid"], "start": p["start"].isoformat(),
+                                     "profile": p["profile"], "cwd": p["cwd"], "command": p["command"][:300],
+                                     "closed": gone}, ensure_ascii=False) + "\n")
+        out.append(f"{'✓ 已關閉並讀回' if gone else '✗ 送出 SIGKILL 後仍在'} {label}")
+    return out, 4 if failed else 0
+
+
+def cmd_reap(args):
+    state = Path(args.state).expanduser()
+    if not state.is_file():
+        die(f"讀不到狀態檔：{state}")
+    out, code = reap(state, dry_run=args.dry_run)
+    print("\n".join(out))
+    return code
+
+
 def cmd_check(args):
     if args.state:
         state = Path(args.state).expanduser()
@@ -1239,6 +1452,11 @@ def build_parser():
     target(p, wp=False)
     p.add_argument("--final", action="store_true", help="以「即將宣稱完成」的標準核對")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("reap")
+    p.add_argument("--state", required=True, help="<狀態目錄>/state.md")
+    p.add_argument("--dry-run", action="store_true", help="只列出會關哪幾支，不關")
+    p.set_defaults(func=cmd_reap)
     return parser
 
 
