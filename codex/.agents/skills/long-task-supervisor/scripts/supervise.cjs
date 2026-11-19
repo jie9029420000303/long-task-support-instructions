@@ -172,8 +172,6 @@ function brief() {
     // Every remaining package blocked with none ready or in flight (2026-11-10): check each reason before accepting a wait.
     allBlocked:snapshot ? require('./dispatch-audit.cjs').allBlocked(snapshot) : null,
     dispatchReconciliation:snapshot?require('./dispatch-audit.cjs').planReview(snapshot,binding,run):null,
-    // This machine is slow or due a restart (machine.cjs samples): tell Jay once at a safe point; it limits nothing.
-    machine:require('./machine.cjs').hint(run),
     // Executor events waiting behind the pending one, oldest first; native-watch hands them over one by one.
     eventQueue:(state.eventQueue || []).map(({id, kind, at}) => ({id, kind, at})),
     dispatchCrossChecks:crossChecks,

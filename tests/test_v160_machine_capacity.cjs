@@ -128,48 +128,14 @@ test('without a stagger setting marking adds no wait and leaves no file',()=>{
 });
 
 const tool=require(path.join(codex,'machine.cjs'));
-function usage(m,delays,at=Date.now()){
-  const file=path.join(m.root,'usage.jsonl');
-  fs.writeFileSync(file,delays.map((ms,i)=>JSON.stringify({timestamp:at-i*1000,routeDecision:{createdAt:at-i*1000+ms}})).join('\n')+'\n');
-  process.env.LONG_TASK_USAGE_LOG=file;
-}
-test('one sample a minute however many callers; it records the signals and limits nothing',()=>{
-  const m=machine({totalAgents:8,slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:1e9});try{
-    const mine=m.run('mine',agents(3));m.run('other',agents(2));
-    const now=Date.now();usage(m,[20,30,40],now);
-    const first=tool.sample(now);
-    assert.deepEqual([first.route,first.agentsInFlight,first.slow,first.restartHint],[{requests:3,medianMs:30},5,false,false]);
-    assert.ok(first.commandMs>0&&first.uptimeDays>0);
-    assert.equal(tool.sample(now+20000),null,'a second caller within the minute writes nothing');
-    usage(m,[400,500,600],now+61000);
-    const second=tool.sample(now+61000);
-    assert.equal(second.slow,true,'routing at 500 ms is the stuck range measured on 2026-11-14 (225-2,161 ms)');
-    const file=fs.readdirSync(path.join(m.home,'samples')).filter(name=>name.startsWith('machine-'));
-    assert.equal(fs.readFileSync(path.join(m.home,'samples',file[0]),'utf8').trim().split('\n').length,2);
-    const audit=require(path.join(codex,'dispatch-audit.cjs'));
-    assert.equal(audit.planReview(mine.snapshot(),mine.binding,mine.dir).capacity.free,3,'a slow sample changes no limit: 8 - 2 others - 3 own');
-  }finally{delete process.env.LONG_TASK_USAGE_LOG;m.close();}
-});
-test('the supervisor hears about a slow or restart-due machine only from a recent sample; old sample files are dropped',()=>{
-  const m=machine({slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:0.000001,lowDiskGiB:0,criticalDiskGiB:0});try{
-    const mine=m.run('mine'),now=Date.now();usage(m,[20],now);
-    fs.mkdirSync(path.join(m.home,'samples'));
-    fs.writeFileSync(path.join(m.home,'samples','machine-2020-01-01.jsonl'),'{}\n');fs.writeFileSync(path.join(m.home,'samples','heavy-2020-01.jsonl'),'{}\n');
-    assert.equal(tool.hint(mine.dir,now),null,'no sample yet');
-    const entry=tool.sample(now);assert.equal(entry.restartHint,true);
-    assert.deepEqual(Object.keys(tool.hint(mine.dir,now)).sort(),['at','commandMs','diskCritical','diskFreeGiB','diskLow','restartHint','routeMedianMs','slow','swapFiles','uptimeDays']);
-    assert.equal(tool.hint(mine.dir,now+16*60000),null,'a sample older than 15 minutes says nothing about now');
-    assert.deepEqual(fs.readdirSync(path.join(m.home,'samples')).filter(name=>name.includes('2020')),['heavy-2020-01.jsonl'],'machine samples keep 30 days; other records are not this function\'s to delete');
-    save(path.join(m.home,'capacity.json'),{slowCommandMs:1e9,restartSwapFiles:1e9,restartUptimeDays:1e9,lowDiskGiB:0,criticalDiskGiB:0});
-    tool.sample(now+61000);assert.equal(tool.hint(mine.dir,now+61000),null,'a healthy machine adds nothing to the brief');
-  }finally{delete process.env.LONG_TASK_USAGE_LOG;m.close();}
-});
-test('the launchd guard records the sample and keeps its own log from growing without end',()=>{
+// Jay 2026-11-18: nothing in the skill watches the machine. The guard only keeps its own log bounded.
+test('the launchd guard keeps its own log from growing without end and samples nothing',()=>{
   const m=machine({totalAgents:8});try{
     const log=path.join(m.home,'watch-guard.log');fs.writeFileSync(log,Buffer.alloc(5*1024*1024+1,'x'));fs.writeFileSync(log+'.1','older');
     execFileSync(process.execPath,[path.join(codex,'watch-guard.cjs'),'check'],{env:{...process.env,LONG_TASK_HOME:m.home},stdio:'pipe'});
     assert.equal(fs.statSync(log+'.1').size,5*1024*1024+1,'the full log becomes the one earlier copy');assert.equal(fs.existsSync(log),false);
-    const samples=fs.readdirSync(path.join(m.home,'samples'));assert.equal(samples.length,1);
+    assert.equal(fs.existsSync(path.join(m.home,'samples')),false,'no machine sample is written');
+    for(const gone of ['sample','hint','latest','diskNotice'])assert.equal(tool[gone],undefined,gone);
     const small=path.join(m.home,'small.log');fs.writeFileSync(small,'x');assert.equal(tool.rotate(small),false);assert.equal(fs.existsSync(small),true);
   }finally{m.close();}
 });

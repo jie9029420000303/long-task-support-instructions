@@ -466,7 +466,7 @@ class HeavySlotTests(unittest.TestCase):
         mine = [row for row in rows if row["log"].endswith("queued.log")]
         self.assertEqual(1, len(mine))
         self.assertEqual(summary["queuedSeconds"], mine[0]["queuedSeconds"])
-        self.assertGreater(mine[0]["peakChildMb"], 0)
+        self.assertNotIn("peakChildMb", mine[0], "重型測試只記排隊與時間，不量記憶體")
 
     def test_long_runs_always_leave_a_slot_for_a_short_one(self):
         # 長工作佔滿名額時，一道幾秒的定向測試會排在 40 分鐘的整套測試後面。

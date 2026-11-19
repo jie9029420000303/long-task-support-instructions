@@ -166,7 +166,9 @@ test('checked approval wait survives idle time and restart, but a new human mess
   assert.equal(stderr,'');
 });
 
-test('external result, existing deadline and executor messages release a checked wait immediately',()=>{
+// 2026-11-17: zone E reviews 112 and 114 woke the supervisor the moment the executor began the instruction it had
+// just been given. The executor moving ends the wait and is written down, but is work, not something to review.
+test('an external result or a deadline ends a checked wait with a review; the executor going back to work ends it without one',()=>{
   const {remember}=require(path.join(scripts,'checked-wait.cjs'));
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'checked-wait-result-'));
   try{
@@ -178,7 +180,12 @@ test('external result, existing deadline and executor messages release a checked
     remember(state,{eventId:'y',wait:{kind:'external_result',conditions:[],resumeAt:new Date(Date.now()+1000).toISOString()}},{});
     assert.equal(due(state,Date.now()+2000),true);
     remember(state,{eventId:'z',wait:{kind:'user_approval',conditions:[]}},{});
-    state.lastExecutorActivityMarker='new';assert.equal(due(state),true);
+    const reviewed=state.lastProgressReviewAt=Date.now();
+    state.lastExecutorActivityMarker='new';assert.equal(due(state),false);
+    assert.equal(state.checkedWait,undefined);assert.deepEqual([state.waitReleased.reasons,state.waitReleased.review],[['executor_activity'],false]);
+    assert.equal(state.lastProgressReviewAt,reviewed,'the quiet clock is not reset by the executor starting work');
+    remember(state,{eventId:'w',wait:{kind:'user_approval',conditions:[]}},{});assert.equal(state.waitReleased,undefined);
+    state.lastSupervisorInputMarker='jay answered';assert.equal(due(state),true);assert.equal(state.waitReleased.review,true);
     assert.throws(()=>validateDecision({allowedRoots:[root]}, {}, {id:'x',kind:'blocked'},{eventId:'x',disposition:'observe',reason:'Wait',wait:{kind:'external_result',conditions:[]}}),/observable result or deadline/);
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

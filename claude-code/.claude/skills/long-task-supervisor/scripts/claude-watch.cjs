@@ -4,7 +4,7 @@
 const fs=require('node:fs');
 const checkedWait=require('./checked-wait.cjs');
 const path=require('node:path');
-const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,IDLE_WORK_MS,
+const {hash,read,need,validateContract,PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,REPEAT_FAILURES,BLOCKED_MS,IDLE_WORK_MS,
   NO_EVENT_REVIEW_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,OVERDUE_TIERS,OVERDUE_NEAR,overdueTier,awakeSince,inputSource,deliveredText,subagentActivityAt,executorBusy}=require('./guard.cjs');
 const {holdAlive}=require('./claude-hold.cjs');
 const signals=require('./signals.cjs');
@@ -297,7 +297,6 @@ function supervisorClock(){
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
   const blocked=blockedTools().filter(item=>once('blocked:'+item.id));
-  const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
   // Once per resource and set of packages that could start on it now: a package starting or ending elsewhere no longer
   // re-wakes (2026-10-14/15 IA: the old key held the used count, 19 wakes and 15 observed).
   const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+':'+[...item.waiting].sort().join(',')));
@@ -385,7 +384,7 @@ function supervisorClock(){
   const budgetStage=budget&&!limited&&!waitingUser?docBudgetStage(budget,usedMs):null;
   const docBudget=budgetStage&&once('doc_budget:'+budget.startedAt+'/'+budget.minutes+':'+budgetStage)?{stage:budgetStage,startedAt:budget.startedAt,
     devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(usedMs/60000),basis:budget.basis,estimate:budget.estimate||null}:null;
-  const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
+  const reasons=[...(blocked.length?['executor_blocked']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(idleWork?['idle_with_work']:[]),
     ...(noEventHour?['no_event_hour']:[]),...(unplanned?['unplanned_criteria']:[]),...(allBlocked?['all_blocked']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automations.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(rateReset?['rate_limit_reset']:[]),
@@ -402,7 +401,7 @@ function supervisorClock(){
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
-    failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:binding.executorLog}})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,idleWithWork:idleWork,
+    failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:binding.executorLog}})),executorBlocked:blocked,resourceUnderused:resources,idleWithWork:idleWork,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awake(lastEvent)/60000)}}:{}),
     ...(unplanned?{unplannedCriteria:unplanned}:{}),...(allBlocked?{allBlocked}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),...(permissionChanged?{permissionChanged}:{}),
     ...(automations.length?{automations}:{}),...(loggedOut.length?{loggedOut}:{}),...(rateReset?{rateLimit:rateReset}:{}),...(platformError?{platformError}:{}),...(executorModel?{executorModel}:{}),
@@ -602,6 +601,10 @@ async function watch(){
     // An executor's declared wait no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
     // unbaselined package, a stalled test process and repeated failures each start a check while work goes on.
     const held=checkedWait.unchanged(state);
+    // A wait that ended on its condition, its deadline or Jay's input is reviewed now; one that ended only because the
+    // executor went back to work leaves a line in the run and is not (checked-wait.cjs).
+    if(hadCheckedWait&&!state.checkedWait)checkedWait.logRelease(run,state);
+    const waitChanged=hadCheckedWait&&!state.checkedWait&&state.waitReleased?.review!==false;
     const clock=isPaused?null:supervisorClock();
     // A real, recognizable full-test call is one lead, even while the executor is busy. Do not reinterpret the
     // existing idle suppression: if the source or agent state is unavailable the supervisor must treat it as unknown.
@@ -614,18 +617,18 @@ async function watch(){
     // Quiet means nothing moves at all: the executor, its subagents and the test processes it runs. A pause or a
     // running rate limit is a known stop, not silence, and neither is waiting for the supervisor's ruling on an executor
     // event (lastDecisionAt, set by supervise.cjs decision; absent in older state, it counts as 0).
-    const silent=!held&&!isPaused&&!rateLimited()&&(hadCheckedWait||!executorBusy(state)&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);
+    const silent=!held&&!isPaused&&!rateLimited()&&(waitChanged||!executorBusy(state)&&Date.now()-Math.max(state.lastExecutorActivityAt,state.lastSubagentActivityAt,state.lastProcessActivityAt||0,state.lastProgressReviewAt||0,state.lastDecisionAt||0)>=PROGRESS_REVIEW_MS);
     if(silent||clock||parallelTest){
       state.progressReviewSequence=(state.progressReviewSequence||0)+1;
-      const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(clock?.reasons||[]),...(parallelTest?['parallel_test_review']:[])];
+      const reasons=[...(silent?[waitChanged?'wait_changed':'silence']:[]),...(clock?.reasons||[]),...(parallelTest?['parallel_test_review']:[])];
       const event={id:'progress-review-'+digest({executorId:binding.executorId,sequence:state.progressReviewSequence}).slice(0,24),
-        kind:'progress_review',reasons,lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
+        kind:'progress_review',reasons,...(waitChanged&&silent?{executorWorking:executorBusy(state)||Date.now()-Math.max(state.lastExecutorActivityAt||0,state.lastSubagentActivityAt||0,state.lastProcessActivityAt||0)<PROGRESS_REVIEW_MS}:{}),lastExecutorActivityAt:new Date(state.lastExecutorActivityAt).toISOString(),
         lastSubagentActivityAt:state.lastSubagentActivityAt?new Date(state.lastSubagentActivityAt).toISOString():null,
         lastProcessActivityAt:state.lastProcessActivityAt?new Date(state.lastProcessActivityAt).toISOString():null,
         lastDecisionAt:state.lastDecisionAt?new Date(state.lastDecisionAt).toISOString():null,
         unconfirmedDeliveries:state.unconfirmedDeliveries||{},pace:clock?.pace||paceNow(),overdue:clock?.overdue||[],nearOverdue:clock?.nearOverdue||[],
         baselineMissing:clock?.baselineMissing||[],processStalled:clock?.processStalled||[],executorBlocked:clock?.executorBlocked||[],
-        machineSlept:clock?.machineSlept||[],resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
+        resourceUnderused:clock?.resourceUnderused||[],idleWithWork:clock?.idleWithWork||null,
         failedCommands:clock?.failedCommands||[],declaredWaitMinutes:state.progressWait?.event?.waitMinutes??null,
         ...(parallelTest?{parallelTestReview:parallelTest}:{}),
         ...Object.fromEntries(['noEventHour','unplannedCriteria','allBlocked','instructionOverdue','permission','permissionChanged','automations','loggedOut','rateLimit','platformError','executorModel','docBudget']

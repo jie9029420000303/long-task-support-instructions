@@ -484,7 +484,7 @@ async function pendingDecision() {
   const event = state.pending;
   if (!(state.supervisorWake ||= {})[event.id]) {
     const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
-    state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),wakeSentAt:null};checkpoint();
+    state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),activityMarker:require('./supervisor-response.cjs').activityMarker(detail),wakeSentAt:null};checkpoint();
   }
   await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
   const file = require('./decision-commit.cjs').file(run,event.id);
@@ -509,12 +509,15 @@ async function pendingDecision() {
         wake.completionWakeSentAt=Date.now();checkpoint();return;
       }
       if(!wake.wakeSentAt&&Date.now()-wake.deliveredAt>=SUPERVISOR_WAKE_MS){
-      if(assistantMarker(detail)===wake.assistantMarker){
+      // The reminder is for a delivery that started nothing. A chat that is running a turn, or whose newest turn has
+      // gained commands or reasoning since the review was armed, is working and gets none.
+      const busy=require('./supervisor-response.cjs').working(detail,wake.activityMarker);
+      if(assistantMarker(detail)===wake.assistantMarker&&!busy){
         await sendAndRead(binding.supervisorId,
-          `監督喚醒補訊 ${event.id}：既有事件已送達，但尚未偵測到本對話的模型輸出。請處理既有 ${deliveryMarker('review-'+event.id)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
+          `監督喚醒補訊 ${event.id}：既有事件已送達，但本對話之後沒有進行中的回合，也沒有新的指令或模型活動。請處理既有 ${deliveryMarker('review-'+event.id)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
           'wake-review-' + event.id);
         wake.wakeSentAt=Date.now();checkpoint();
-      }else{wake.modelStartedAt=Date.now();checkpoint();}
+      }else{wake.modelStartedAt=Date.now();if(busy)wake.workingBecause=busy;checkpoint();}
       }
     }
     return;
@@ -944,14 +947,16 @@ async function watch() {
       // An executor's own pace no longer silences the supervisor (Jay 2026-10-07): silence, an overdue or
       // unbaselined package, a stalled test process, a blocked command and repeated failures each start a check.
       const hadCheckedWait=Boolean(state.checkedWait),found=paused?null:clock.check(run,binding,state,turnEndReads>0),silent=paused?false:progressDue(state);
+      // A wait that just ended leaves one line in the run whether or not it is reviewed (checked-wait.cjs).
+      if(hadCheckedWait&&!state.checkedWait)checkedWait.logRelease(run,state);
       const allLimited=state.rateLimitedAll&&!state.rateLimitedAll.announced?state.rateLimitedAll:null;
       if(allLimited)allLimited.announced=now();
       if(silent||found||allLimited){
-        const reasons=[...(silent?[hadCheckedWait?'wait_changed':'silence']:[]),...(found?.reasons||[]),...(allLimited?['rate_limited_all']:[])];
+        const reasons=[...(silent?[hadCheckedWait&&state.waitReleased?.review!==false?'wait_changed':'silence']:[]),...(found?.reasons||[]),...(allLimited?['rate_limited_all']:[])];
         const {reasons:_r,pace:_p,...extra}=found||{};
         const event=progressEvent(state,Date.now(),{reasons,pace:found?.pace||clock.paceNow(run,binding,state),overdue:found?.overdue||[],
           baselineMissing:found?.baselineMissing||[],processStalled:found?.processStalled||[],executorBlocked:found?.executorBlocked||[],
-          machineSlept:found?.machineSlept||[],resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[],
+          resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[],
           ...extra,...(allLimited?{rateLimitedAll:allLimited}:{})});
         state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);

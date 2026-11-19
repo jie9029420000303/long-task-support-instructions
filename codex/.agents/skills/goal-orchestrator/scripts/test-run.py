@@ -16,8 +16,8 @@ queues inside this one command until one is free. --slot long (full suites, buil
 may hold at most heavyLongMax slots (default: all but one), so a short run never queues behind long ones. Queue time
 is not part of --timeout and is recorded in the summary. A slot whose holder is gone, or whose lease has run out, is
 taken back. After heavyWaitMinutes (default 30) in the queue the run starts anyway and says so: a stuck queue must
-not stop the work. Without that file nothing queues. Each run also adds one line (duration, queue time, largest
-child's peak memory) to samples/heavy-<month>.jsonl in the same local folder.
+not stop the work. Without that file nothing queues. Each run also adds one line (duration, queue time) to
+samples/heavy-<month>.jsonl in the same local folder.
 """
 import argparse
 import datetime
@@ -26,7 +26,6 @@ import hashlib
 import json
 import os
 import re
-import resource
 import signal
 import subprocess
 import sys
@@ -171,12 +170,6 @@ def take_slot(kind, hold_seconds, label):
         time.sleep(float(os.environ.get("LONG_TASK_SLOT_POLL_SECONDS") or 5))
 
 
-def peak_child_mb():
-    """Peak resident memory of the largest finished child process (not the sum of the tree)."""
-    peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
-
-
 def record_sample(log, entry):
     """One line per run in the local samples folder; test logs under the system temp folder are not recorded."""
     tmp = os.path.realpath(tempfile.gettempdir())
@@ -241,13 +234,13 @@ def run(args, command, log, queued, queue_expired):
     digest = hashlib.sha256(data).hexdigest()
     summary = {"command": command, "cwd": os.getcwd(), "exit": code, "timedOut": timed_out, "seconds": seconds,
                "log": log, "sha256": digest, "lines": len(lines), "totals": totals, "failures": failures,
-               "queuedSeconds": round(queued, 1), "queueExpired": queue_expired, "peakChildMb": peak_child_mb(),
+               "queuedSeconds": round(queued, 1), "queueExpired": queue_expired,
                "at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     with open(log + ".summary.json", "w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
     record_sample(log, dict({key: summary[key] for key in ("at", "cwd", "log", "exit", "seconds", "queuedSeconds",
-                                                            "queueExpired", "peakChildMb")}, slot=args.slot))
+                                                            "queueExpired")}, slot=args.slot))
     state = ("逾時（超過 " + format(args.timeout, "g") + " 分鐘，已終止）") if timed_out else ("通過" if code == 0 else "失敗")
     print("結果：" + state + "（exit " + str(code) + "）｜耗時 " + str(seconds) + " 秒｜完整紀錄 " + log + "（" + str(len(lines)) + " 行，sha256 " + digest[:16] + "…）")
     if queued >= 1 or queue_expired:

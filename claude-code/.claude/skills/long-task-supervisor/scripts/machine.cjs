@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-// This machine's shared limits and health samples (Jay 2026-11-16: fix the skills in one pass, then measure). On
-// 2026-11-14 a 16GB machine crashed with 42 swap files while three long tasks dispatched on their own; each run knew
-// only its own subagents, and the total of 8 that Jay then set was split 4/2/2 by hand, so a waiting run's seats stayed
-// idle. Nothing recorded how the machine was doing in the hours before the crash.
+// This machine's shared limits (Jay 2026-11-16: fix the skills in one pass, then measure). On 2026-11-14 a 16GB
+// machine crashed with 42 swap files while three long tasks dispatched on their own; each run knew only its own
+// subagents, and the total of 8 that Jay then set was split 4/2/2 by hand, so a waiting run's seats stayed idle.
 // Everything here is model-free and reads one local file, <LONG_TASK_HOME or ~/.config/long-task-supervisor>/capacity.json:
 //   {"totalAgents":8,"stagger":{"batch":3,"seconds":30},"heavySlots":3,"heavyLongMax":2}
 // totalAgents: subagents all supervised runs on this machine may have in flight together. A run's dispatch limit is
@@ -10,14 +9,12 @@
 //   agents are not counted. stagger: marking more than `batch` subagents in flight within `seconds` waits inside
 //   dispatch.cjs mark. heavySlots/heavyLongMax: read by the orchestrator's test-run.py.
 // A machine without the file, or a key left out, keeps the earlier behaviour: nothing is limited, staggered or queued.
-// Samples only record. Whether the machine is slow (2026-11-14 measured: a trivial command took 2 ms healthy and
-// 1.7-6.0 s stuck; local routing 11-150 ms healthy and 225-2,161 ms stuck) is written to each sample and limits nothing.
-// Free disk space is sampled too (Jay 2026-11-18 chose "record and remind", nothing is held back): that morning the
-// data volume fell to 0.14GiB, Docker stopped itself on "no space left on device" and nothing had warned anyone.
-// Below lowDiskGiB (default 20) the supervisor tells Jay at a safe point; below criticalDiskGiB (default 8) it tells
-// him at once and the launchd guard pushes one notice to his phone. Both numbers can be changed in capacity.json.
+// Nothing here watches the machine (Jay 2026-11-18: "技能裡面要監看資源這件事情完全拔掉，監督任務就是專注目標任務達成，
+// 系統的事情不要管"). v1.6.0-v1.8.0 sampled speed, swap, uptime and free disk every minute and put a hint in the
+// supervisor's brief; on 2026-11-18 each supervisor then reported the disk on its own, and one of them made up its
+// own free-space thresholds, held a step back and sent four clean-up forms. The samples, the hint and the phone
+// notice are gone. The fixed limits Jay set, and cleaning up what a task itself started, stay.
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const {spawnSync}=require('node:child_process');
 const notify=require('./notify.cjs');
 const readJson=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
 const real=file=>{try{return fs.realpathSync(file);}catch{return path.resolve(file);}};
@@ -62,91 +59,6 @@ function recordStart(run,nowMs=Date.now()){
   const starts=[...(readJson(startsFile(run))||[]).filter(Number.isFinite),nowMs].slice(-20);
   fs.writeFileSync(startsFile(run)+'.tmp',JSON.stringify(starts));fs.renameSync(startsFile(run)+'.tmp',startsFile(run));
 }
-const median=values=>{const sorted=values.filter(Number.isFinite).sort((a,b)=>a-b);return sorted.length?sorted[Math.floor(sorted.length/2)]:null;};
-function trivialCommandMs(){
-  const times=[];
-  for(let i=0;i<5;i++){const began=process.hrtime.bigint();spawnSync('/bin/cat',['/dev/null'],{stdio:'ignore',timeout:30000});times.push(Number(process.hrtime.bigint()-began)/1e6);}
-  return Math.round(median(times)*10)/10;
-}
-// Local routing delay of the last 10 minutes, from the tail of opencodex's usage log (request received to route decided).
-function routeDelay(nowMs){
-  const file=process.env.LONG_TASK_USAGE_LOG||path.join(os.homedir(),'.opencodex','usage.jsonl');
-  let fd;
-  try{
-    fd=fs.openSync(file,'r');const size=fs.fstatSync(fd).size,length=Math.min(size,2*1024*1024),buffer=Buffer.alloc(length);
-    fs.readSync(fd,buffer,0,length,size-length);
-    const delays=[];
-    for(const line of buffer.toString('utf8').split('\n')){
-      let entry;try{entry=JSON.parse(line);}catch{continue;}
-      const at=entry.timestamp,decided=entry.routeDecision?.createdAt;
-      if(Number.isFinite(at)&&Number.isFinite(decided)&&nowMs-at<=10*60000)delays.push(decided-at);
-    }
-    return {requests:delays.length,medianMs:median(delays)};
-  }catch{return {requests:0,medianMs:null};}
-  finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}}
-}
-function googleDrive(){
-  const out=spawnSync('/bin/ps',['-axo','pcpu=,rss=,comm='],{encoding:'utf8',timeout:30000}).stdout||'';
-  let cpu=0,rss=0,found=false;
-  for(const line of out.split('\n')){const match=/^\s*([\d.]+)\s+(\d+)\s+(.*)$/.exec(line);if(match&&match[3].includes('Google Drive')){found=true;cpu+=Number(match[1]);rss+=Number(match[2]);}}
-  return found?{cpuPercent:Math.round(cpu*10)/10,rssMb:Math.round(rss/1024)}:null;
-}
-// Free space where the tasks write (the home volume holds worktrees, Docker's disk image, Codex data and /tmp's
-// neighbour /private/var/folders). LONG_TASK_DISK_FREE_BYTES only stands in for the real number in tests.
-function diskFreeGiB(){
-  const forced=Number(process.env.LONG_TASK_DISK_FREE_BYTES);
-  if(process.env.LONG_TASK_DISK_FREE_BYTES&&Number.isFinite(forced))return Math.round(forced/2**30*10)/10;
-  try{const stat=fs.statfsSync(os.homedir());return Math.round(stat.bavail*stat.bsize/2**30*10)/10;}catch{return null;}
-}
-function diskLevels(settings,free){
-  const low=Number.isFinite(settings.lowDiskGiB)?settings.lowDiskGiB:20,critical=Number.isFinite(settings.criticalDiskGiB)?settings.criticalDiskGiB:8;
-  return {diskLow:free!==null&&free<low,diskCritical:free!==null&&free<critical,lowDiskGiB:low,criticalDiskGiB:critical};
-}
-const SAMPLE_GAP_MS=50000,KEEP_DAYS=30;
-const sampleFile=(at=new Date())=>path.join(notify.home(),'samples','machine-'+new Date(at.getTime()-at.getTimezoneOffset()*60000).toISOString().slice(0,10)+'.jsonl');
-function latest(){
-  try{const lines=fs.readFileSync(sampleFile(),'utf8').trim().split('\n');return JSON.parse(lines[lines.length-1]);}catch{return null;}
-}
-// For the supervisor's brief: the latest sample, only when it is recent and says the machine is slow, due a restart or
-// short of disk. The supervisor tells Jay once at a safe point (nothing in flight), or at once when the disk is
-// critically low; it never restarts, stops, deletes or delays anything itself.
-function hint(run,nowMs=Date.now()){
-  if(!run||temporary(run))return null;
-  const last=latest();
-  if(!last||!(last.slow||last.restartHint||last.diskLow)||nowMs-Date.parse(last.at)>15*60000)return null;
-  return {at:last.at,slow:last.slow,restartHint:last.restartHint,commandMs:last.commandMs,routeMedianMs:last.route?.medianMs??null,swapFiles:last.swapFiles,uptimeDays:last.uptimeDays,
-    diskFreeGiB:last.diskFreeGiB??null,diskLow:Boolean(last.diskLow),diskCritical:Boolean(last.diskCritical)};
-}
-// One line per call, at most one a minute however many callers there are. Records only; nothing reads it to limit work.
-function sample(nowMs=Date.now()){
-  const file=sampleFile(new Date(nowMs));
-  try{if(nowMs-fs.statSync(file).mtimeMs<SAMPLE_GAP_MS)return null;}catch{}
-  const settings=config(),darwin=process.platform==='darwin';
-  let swapFiles=null;try{if(darwin)swapFiles=fs.readdirSync('/System/Volumes/VM').filter(name=>name.startsWith('swapfile')).length;}catch{}
-  const level=darwin?Number.parseInt(spawnSync('/usr/sbin/sysctl',['-n','kern.memorystatus_vm_pressure_level'],{encoding:'utf8',timeout:10000}).stdout,10):NaN;
-  let heavy=null;try{heavy=fs.readdirSync(path.join(notify.home(),'heavy-slots')).filter(name=>name.endsWith('.json')).length;}catch{}
-  const commandMs=trivialCommandMs(),route=routeDelay(nowMs),uptimeDays=Math.round(os.uptime()/864)/100;
-  const free=diskFreeGiB(),disk=diskLevels(settings,free);
-  const entry={at:new Date(nowMs).toISOString(),commandMs,route,swapFiles,pressureLevel:Number.isFinite(level)?level:null,uptimeDays,
-    agentsInFlight:otherRuns(null,nowMs).reduce((sum,item)=>sum+item.agents,0),heavySlotsHeld:heavy,googleDrive:darwin?googleDrive():null,
-    slow:commandMs>=(settings.slowCommandMs||500)||(route.medianMs??0)>=(settings.slowRouteMs||200),
-    restartHint:(swapFiles??0)>=(settings.restartSwapFiles||32)||uptimeDays>=(settings.restartUptimeDays||3),
-    diskFreeGiB:free,diskLow:disk.diskLow,diskCritical:disk.diskCritical};
-  fs.mkdirSync(path.dirname(file),{recursive:true});
-  fs.appendFileSync(file,JSON.stringify(entry)+'\n');
-  const cutoff=path.basename(sampleFile(new Date(nowMs-KEEP_DAYS*86400000)));
-  for(const name of fs.readdirSync(path.dirname(file)))if(/^machine-\d{4}-\d\d-\d\d\.jsonl$/.test(name)&&name<cutoff)fs.rmSync(path.join(path.dirname(file),name),{force:true});
-  return entry;
-}
-// The launchd guard's phone notice when free space is critically low: at most one per 6 hours, so a disk that stays
-// low does not ring every 3 minutes. Returns the notice text, or null when there is nothing to say.
-function diskNotice(entry){
-  if(!entry||!entry.diskCritical)return null;
-  const levels=diskLevels(config(),entry.diskFreeGiB),at=new Date(entry.at);
-  const local=new Date(at.getTime()-at.getTimezoneOffset()*60000).toISOString();
-  return {key:'disk-critical-'+local.slice(0,10)+'-'+Math.floor(Number(local.slice(11,13))/6),
-    text:'本機磁碟只剩 '+entry.diskFreeGiB+' GiB（低於 '+levels.criticalDiskGiB+' GiB）。寫滿時 Docker、測試和資料庫會一起卡住；長任務不會自動停工或刪檔，請盡快騰出空間。'};
-}
 // The skill's own logs only grow; keep the current file and one earlier one.
 function rotate(file,maxBytes=5*1024*1024){
   try{if(fs.statSync(file).size>maxBytes){fs.renameSync(file,file+'.1');return true;}}catch{}
@@ -154,14 +66,13 @@ function rotate(file,maxBytes=5*1024*1024){
 }
 function status(){
   const runs=otherRuns(null);
-  return {configFile:configFile(),config:config(),runs,agentsInFlight:runs.reduce((sum,item)=>sum+item.agents,0),latestSample:latest()};
+  return {configFile:configFile(),config:config(),runs,agentsInFlight:runs.reduce((sum,item)=>sum+item.agents,0)};
 }
-module.exports={config,configFile,otherRuns,dispatchLimit,staggerWait,recordStart,sample,latest,hint,diskNotice,diskFreeGiB,rotate,status,temporary};
+module.exports={config,configFile,otherRuns,dispatchLimit,staggerWait,recordStart,rotate,status,temporary};
 if(require.main===module){
   const [command='status']=process.argv.slice(2);
   try{
     if(command==='status')console.log(JSON.stringify(status(),null,2));
-    else if(command==='sample')console.log(JSON.stringify(sample()||latest()));
-    else throw Error('Commands: status (limits, runs and the latest sample), sample (record one now)');
+    else throw Error('Commands: status (limits and the subagents each registered run has in flight)');
   }catch(error){console.error(error.message);process.exitCode=1;}
 }

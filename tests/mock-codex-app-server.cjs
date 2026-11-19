@@ -57,6 +57,9 @@ function call(name,args) {
     // supervisorIdle: the supervisor finished a turn just now and sits idle, as after a dropped queued message.
     const latest={id:activity?'supervisor-new-turn':'supervisor-old-turn',status:'completed',completedAt:data.supervisorIdle?Math.floor(Date.now()/1000):0,
       items:[...(activity?[{type:'userMessage',id:'human-user-new',text:'Approval granted'}]:[]),{type:'agentMessage',id:activity?'supervisor-new-message':'supervisor-old-message',phase:'final_answer',text:'Supervisor status'}]};
+    // supervisorCommandsGate: the supervisor's newest turn gains three finished commands and no new message, with the
+    // chat not reported active (2026-11-17 zone E: work the message-only check could not see).
+    if(data.supervisorCommandsGate&&fs.existsSync(data.supervisorCommandsGate))for(const n of [1,2,3])latest.items.push({type:'commandExecution',id:'supervisor-command-'+n,status:'completed'});
     const closed=data.supervisorCompletedGate&&fs.existsSync(data.supervisorCompletedGate);
     if(data.supervisorCompletedGate){latest.status=closed?'completed':'inProgress';latest.completedAt=closed?Date.now():null;}
     return reply({thread:{id:data.supervisorId,...(data.supervisorCompletedGate?{status:{type:closed?'idle':'active'}}:data.supervisorIdle?{status:{type:'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});

@@ -303,7 +303,9 @@ test('the same command failing three times wakes the supervisor once, and a revi
   }finally{await f.stop();}
 });
 
-test('a sleep after binding is reported once and its minutes do not count against a package; one before binding is not',async()=>{
+// Jay 2026-11-18: the supervisor attends to the task, not the machine. A sleep is still taken out of a package's
+// minutes, so nothing is called overdue for time the lid was closed, but it no longer wakes the supervisor.
+test('a sleep after binding does not count against a package and wakes nobody; one before binding is not recorded',async()=>{
   const before=fixture({createdMinutesAgo:1});before.kernelSleep(90,80);before.start();
   try{
     await until(()=>fs.existsSync(path.join(before.run,'clock.jsonl')));
@@ -315,11 +317,19 @@ test('a sleep after binding is reported once and its minutes do not count agains
   save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-NAP',handle:'/root/napped',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(19),basis:'measured'}}]}});
   f.start();
   try{
-    await until(()=>pending(f)?.kind==='progress_review');
-    const event=pending(f);
-    assert.deepEqual(event.reasons,['machine_slept'],'19 minutes minus 8 asleep is 11, inside the 12-minute baseline');
-    assert.equal(event.machineSlept.length,1);assert.equal(event.pace.packages[0].sleptMinutes,8);
+    await until(()=>(read(f.statePath).sleeps||[]).length===1&&fs.existsSync(path.join(f.run,'clock.jsonl')));
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(f),null,'19 minutes minus 8 asleep is 11, inside the 12-minute baseline, and the sleep itself is no event');
   }finally{await f.stop();}
+  const awake=fixture({createdMinutesAgo:30});
+  subagent(awake.home,'executor-qa','/root/napped',{turns:[{start:minutesAgo(19),tokens:9000}]});
+  save(path.join(awake.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-NAP',handle:'/root/napped',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(19),basis:'measured'}}]}});
+  awake.start();
+  try{
+    await until(()=>pending(awake)?.kind==='progress_review');
+    assert.deepEqual(pending(awake).reasons,['overdue'],'the same package without the sleep is 19 minutes against 12');
+    assert.equal(pending(awake).machineSlept,undefined);
+  }finally{await awake.stop();}
 });
 
 test('the same next step reported twice becomes a stalled event after one continuation',async()=>{

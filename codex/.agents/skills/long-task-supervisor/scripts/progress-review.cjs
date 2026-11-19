@@ -28,12 +28,19 @@ function observeActivity(state, poll, binding, nowMs = Date.now(), role = 'execu
 function due(state, nowMs = Date.now()) {
   const hadWait=Boolean(state.checkedWait);
   if(require('./checked-wait.cjs').unchanged(state,nowMs))return false;
-  if(hadWait)return true;
+  // A wait that ended on its condition, its deadline or Jay's input is reviewed now. One that ended only because the
+  // executor went back to work is not: it falls through to the ordinary quiet check below, counted from that activity.
+  if(hadWait&&state.waitReleased?.review!==false)return true;
   if(executorBusy(state))return false;
   // Quiet means nothing moves at all: both chats, the executor's subagents and the test processes it runs. Time the
   // executor spent waiting for the supervisor's ruling on its event is not quiet (lastDecisionAt, native-watch).
   return nowMs - Math.max(state.lastExecutorActivityAt || 0, state.lastSupervisorActivityAt || 0,
     state.lastSubagentActivityAt || 0, state.lastProcessActivityAt || 0, state.lastProgressReviewAt || 0, state.lastDecisionAt || 0) >= PROGRESS_REVIEW_MS;
+}
+// Whether anything on the executor's side moved inside the quiet window: a running command, a message, a subagent or a
+// test process. A changed wait reviewed in that state may be observed without a new wait (guard.cjs).
+function working(state, nowMs = Date.now()) {
+  return executorBusy(state) || nowMs - Math.max(state.lastExecutorActivityAt || 0, state.lastSubagentActivityAt || 0, state.lastProcessActivityAt || 0) < PROGRESS_REVIEW_MS;
 }
 function eventFor(state, nowMs = Date.now(), details = {}) {
   state.progressReviewSequence = (state.progressReviewSequence || 0) + 1;
@@ -43,6 +50,7 @@ function eventFor(state, nowMs = Date.now(), details = {}) {
     supervisorActivityMarker: state.lastSupervisorActivityMarker,
     lastSupervisorActivityAt: iso(state.lastSupervisorActivityAt),
     lastSubagentActivityAt: iso(state.lastSubagentActivityAt), lastProcessActivityAt: iso(state.lastProcessActivityAt),
-    lastDecisionAt: iso(state.lastDecisionAt), ...details, at: new Date(nowMs).toISOString() };
+    lastDecisionAt: iso(state.lastDecisionAt), ...((details.reasons || []).includes('wait_changed') ? { executorWorking: working(state, nowMs) } : {}),
+    ...details, at: new Date(nowMs).toISOString() };
 }
-module.exports = { activityMarker, supervisorPollFromThread, observeActivity, due, eventFor };
+module.exports = { activityMarker, supervisorPollFromThread, observeActivity, due, working, eventFor };

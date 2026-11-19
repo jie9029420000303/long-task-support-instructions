@@ -7,7 +7,7 @@ const crypto=require('node:crypto');
 const {execFileSync}=require('node:child_process');
 const pace=require('./pace.cjs');
 const {docBudgetStage,trackDocTime}=require('./dispatch-audit.cjs');
-const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,SLEEP_NOTICE_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,executorBusy}=require('./guard.cjs');
+const {PROGRESS_REVIEW_MS,REVIEW_INTERVAL_MS,OVERDUE_TIERS,OVERDUE_NEAR,REPEAT_FAILURES,BLOCKED_MS,NO_EVENT_REVIEW_MS,IDLE_WORK_MS,AUTOMATION_CHECK_MS,UNPLANNED_MS,PLATFORM_ERROR_MS,executorBusy}=require('./guard.cjs');
 const automations=require('./automations.cjs');
 const login=require('./login-check.cjs');
 const parallelTest=require('./parallel-test.cjs');
@@ -251,7 +251,6 @@ function check(run,binding,state,force=false){
   const quietProcess=item=>item.process&&item.alive!==true&&item.lastActivityAt&&Date.now()-Date.parse(item.lastActivityAt)>=PROGRESS_REVIEW_MS;
   const processStalled=paced.packages.filter(item=>quietProcess(item)&&once('process:'+item.id+'@'+item.lastActivityAt));
   const stuck=blockedTools(state),blocked=stuck.filter(item=>once('blocked:'+item.id));
-  const slept=(state.sleeps||[]).filter(item=>Date.parse(item.to)-Date.parse(item.from)>=SLEEP_NOTICE_MS&&once('sleep:'+item.from));
   // Once per resource and set of packages that could start on it now: a package starting or ending elsewhere no longer
   // re-wakes (2026-10-14/15 IA: the old key held the used count, 19 wakes and 15 observed).
   const resources=pace.resourceUse(snapshot).filter(item=>item.free>0&&item.waiting.length&&once('resource:'+item.key+':'+[...item.waiting].sort().join(',')));
@@ -348,7 +347,7 @@ function check(run,binding,state,force=false){
   const budgetStage=budget&&!waitingUser?docBudgetStage(budget,usedMs):null;
   const docBudget=budgetStage&&once('doc_budget:'+budget.startedAt+'/'+budget.minutes+':'+budgetStage)?{stage:budgetStage,startedAt:budget.startedAt,
     devMinutes:budget.devMinutes,budgetMinutes:budget.minutes,usedMinutes:Math.round(usedMs/60000),basis:budget.basis,estimate:budget.estimate||null}:null;
-  const reasons=[...(blocked.length?['executor_blocked']:[]),...(slept.length?['machine_slept']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
+  const reasons=[...(blocked.length?['executor_blocked']:[]),...(overdue.length?['overdue']:[]),...(baselineMissing.length?['baseline_missing']:[]),
     ...(processStalled.length?['process_stalled']:[]),...(repeated.length?['repeat']:[]),...(resources.length?['resource_underused']:[]),...(noEventHour?['no_event_hour']:[]),
     ...(idleWork?['idle_with_work']:[]),...(unplanned?['unplanned_criteria']:[]),...(allBlocked?['all_blocked']:[]),...(instructionOverdue?['instruction_overdue']:[]),...(permission?['permission_review']:[]),
     ...(permissionChanged?['permission_changed']:[]),...(automationFound.length?['automation_found']:[]),...(loggedOut.length?['login_expired']:[]),...(platformError?['platform_error']:[]),
@@ -364,7 +363,7 @@ function check(run,binding,state,force=false){
   }
   if(!reasons.length)return null;
   return {reasons,pace:paced,overdue:overdue.map(item=>item.id),nearOverdue:nearOverdue.map(item=>item.id),baselineMissing:baselineMissing.map(item=>item.id),processStalled:processStalled.map(item=>item.id),
-    failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:state.executorLog||null,at:item.lastAt}})),executorBlocked:blocked,machineSlept:slept,resourceUnderused:resources,
+    failedCommands:repeated.map(([commandHash,item])=>({commandHash,count:item.count,lastAt:item.lastAt,source:item.source||{path:state.executorLog||null,at:item.lastAt}})),executorBlocked:blocked,resourceUnderused:resources,
     ...(noEventHour?{noEventHour:{lastRealEventAt:new Date(lastEvent).toISOString(),awakeMinutes:Math.round(awakeSince(state,lastEvent)/60000)}}:{}),
     ...(idleWork?{idleWithWork:idleWork}:{}),...(unplanned?{unplannedCriteria:unplanned}:{}),...(allBlocked?{allBlocked}:{}),...(instructionOverdue?{instructionOverdue}:{}),...(permission?{permission}:{}),
     ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{}),

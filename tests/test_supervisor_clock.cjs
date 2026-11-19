@@ -292,19 +292,26 @@ test('a long command that is really running is not reported as blocked',async()=
   }finally{child.kill('SIGTERM');runner.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
-test('a machine sleep is reported once and its minutes do not count against a package',async()=>{
+// Jay 2026-11-18: the supervisor attends to the task, not the machine. A sleep is still taken out of a package's
+// minutes, so nothing is called overdue for time the lid was closed, but it no longer wakes the supervisor.
+test('a machine sleep does not count against a package and wakes nobody',async()=>{
+  const nap=(f)=>{agent(f.subagents,'napped',{minutes:19,tokens:30000,done:false});
+    save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-NAP',handle:'agent:napped',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(19),basis:'measured'}}]}});};
   const f=fixture(),state=JSON.parse(fs.readFileSync(f.statePath));
-  state.sleeps=[{from:minutesAgo(17),to:minutesAgo(9)}];save(f.statePath,state);
-  agent(f.subagents,'napped',{minutes:19,tokens:30000,done:false});
-  save(path.join(f.run,'dispatch.json'),{packages:{inFlight:[{id:'WP-NAP',handle:'agent:napped',evidence:['wp'],baseline:{minutes:12,startedAt:minutesAgo(19),basis:'measured'}}]}});
+  state.sleeps=[{from:minutesAgo(17),to:minutesAgo(9)}];save(f.statePath,state);nap(f);
   let child=start(f);
   try{
-    await until(()=>pending(f)?.kind==='progress_review');
-    const event=pending(f);
-    assert.deepEqual(event.reasons,['machine_slept'],'19 minutes minus 8 asleep is 11, inside the 12-minute baseline');
-    assert.equal(event.machineSlept.length,1);
-    assert.equal(event.pace.packages[0].sleptMinutes,8);
+    await until(()=>fs.existsSync(path.join(f.run,'clock.jsonl')));
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(f),null,'19 minutes minus 8 asleep is 11, inside the 12-minute baseline, and the sleep itself is no event');
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
+  const awake=fixture();nap(awake);
+  child=start(awake);
+  try{
+    await until(()=>pending(awake)?.kind==='progress_review');
+    assert.deepEqual(pending(awake).reasons,['overdue'],'the same package without the sleep is 19 minutes against 12');
+    assert.equal(pending(awake).machineSlept,undefined);
+  }finally{child.kill('SIGTERM');fs.rmSync(awake.root,{recursive:true,force:true});}
 });
 
 // The kernel's last sleep covers a sleep while no watcher ran, but a fresh run must not inherit last night's
@@ -315,7 +322,7 @@ function fakeKernelSleep(f,fromMinutesAgo,toMinutesAgo){
   fs.writeFileSync(path.join(bin,'sysctl'),'#!/bin/sh\necho "{ sec = '+sec(fromMinutesAgo)+', usec = 0 } slept"\necho "{ sec = '+sec(toMinutesAgo)+', usec = 0 } woke"\n',{mode:0o755});
   f.env.PATH=bin+':'+process.env.PATH;
 }
-test('a sleep before the run was bound is not reported; one after it is',async()=>{
+test('a sleep before the run was bound is not recorded; one after it is, and neither wakes the supervisor',async()=>{
   const before=fixture();fakeKernelSleep(before,90,80);
   let child=start(before);
   try{
@@ -328,9 +335,9 @@ test('a sleep before the run was bound is not reported; one after it is',async()
   binding.createdAt=minutesAgo(60);save(path.join(after.run,'binding.json'),binding);fakeKernelSleep(after,30,20);
   child=start(after);
   try{
-    await until(()=>pending(after)?.kind==='progress_review');
-    assert.deepEqual(pending(after).reasons,['machine_slept']);
-    assert.equal(pending(after).machineSlept.length,1);
+    await until(()=>(JSON.parse(fs.readFileSync(after.statePath)).sleeps||[]).length===1);
+    await new Promise(resolve=>setTimeout(resolve,500));
+    assert.equal(pending(after),null);
   }finally{child.kill('SIGTERM');fs.rmSync(after.root,{recursive:true,force:true});}
 });
 

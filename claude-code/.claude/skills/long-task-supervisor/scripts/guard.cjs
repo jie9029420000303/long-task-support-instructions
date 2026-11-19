@@ -13,7 +13,7 @@ const PROGRESS_REVIEW_MS = 15 * 60 * 1000;
 const REVIEW_INTERVAL_MS = 30 * 60 * 1000, OVERDUE_TIERS = [1.5, 3], OVERDUE_NEAR = 1.2, REPEAT_FAILURES = 3;
 // A command with no result after 5 minutes and no process running it waits on a person (a permission prompt);
 // a machine asleep for 5 minutes or more stopped the whole run (2026-10-07 GDB run: 93 and 38+40 minutes).
-const BLOCKED_MS = 5 * 60 * 1000, SLEEP_NOTICE_MS = 5 * 60 * 1000;
+const BLOCKED_MS = 5 * 60 * 1000;
 // The executor and every subagent quiet for 5 minutes while acceptance work remains: dispatch what can run in parallel
 // instead of waiting on one background job (2026-10-07 GDB: 10.2 of 23.7 hours had the executor idle, no subagent).
 const IDLE_WORK_MS = 5 * 60 * 1000;
@@ -102,7 +102,9 @@ function validateDecision(config, contract, event, decision) {
     need(typeof check.guidance === 'string' && check.guidance.trim() &&
       typeof decision.reply === 'string' && decision.reply.includes(check.guidance),
       'Progress review requires guidance in the visible executor reply');
-    } else if (quietReview(event)) need(decision.wait, 'Progress observe requires a checked wait');
+    // A changed wait reviewed while the executor is working has nothing left to wait for (event.executorWorking, set
+    // by the watcher): observing it needs no new wait.
+    } else if (quietReview(event) && !(event.executorWorking === true && (event.reasons || []).includes('wait_changed'))) need(decision.wait, 'Progress observe requires a checked wait');
   }
   if(decision.wait){need(decision.disposition==='observe','Only observe can establish a checked wait');validateWait(config,decision.wait);}
   if (decision.disposition === 'accept') {
@@ -207,6 +209,6 @@ function subagentActivityAt(binding) {
   return Math.min(latest, Date.now());
 }
 module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
-  REVIEW_INTERVAL_MS, OVERDUE_TIERS, OVERDUE_NEAR, REPEAT_FAILURES, BLOCKED_MS, SLEEP_NOTICE_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
+  REVIEW_INTERVAL_MS, OVERDUE_TIERS, OVERDUE_NEAR, REPEAT_FAILURES, BLOCKED_MS, IDLE_WORK_MS, NO_EVENT_REVIEW_MS,
   INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, PLATFORM_ERROR_MS, quietReview, replayed, inputSource,
   overdueTier, awakeSince, deliveredText, deliveryRecorded, subagentActivityAt, executorBusy };

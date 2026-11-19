@@ -215,8 +215,6 @@ function brief() {
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     // Every remaining package blocked with none ready or in flight (2026-11-10): check each reason before accepting a wait.
     allBlocked:snapshot ? require('./dispatch-audit.cjs').allBlocked(snapshot) : null,
-    // This machine is slow or due a restart (machine.cjs samples): tell Jay once at a safe point; it limits nothing.
-    machine:require('./machine.cjs').hint(run),
     eventQueue:executorQueue().map(({id, kind, at}) => ({id, kind, at})),
     // The whole pending-decision ledger on every wake, so compaction never loses what waits on Jay.
     pendingDecisions:pending.view(run, state), questionPush:pending.pushProblem(run), recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};

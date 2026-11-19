@@ -1,0 +1,47 @@
+{
+  "source": "App read_thread snapshot of a supervisor chat, 2026-11-17; item types and ids only, message text removed",
+  "status": {
+    "type": "active",
+    "activeFlags": []
+  },
+  "before": {
+    "turns": [
+      {
+        "id": "01a1e73f-ac69-75b0-9e90-732bb1211f18",
+        "items": [
+          {
+            "type": "agentMessage",
+            "id": "msg_69c4182386274e24a0c569b0b8ad2294",
+            "phase": "commentary"
+          }
+        ]
+      }
+    ]
+  },
+  "after": {
+    "turns": [
+      {
+        "id": "01a1e73f-ac69-75b0-9e90-732bb1211f18",
+        "items": [
+          {
+            "type": "agentMessage",
+            "id": "msg_69c4182386274e24a0c569b0b8ad2294",
+            "phase": "commentary"
+          },
+          {
+            "type": "commandExecution",
+            "id": "exec-ac9f7a91-cca9-4b92-bee9-473770a6b365"
+          },
+          {
+            "type": "commandExecution",
+            "id": "exec-8cf0fdea-bbc3-4d59-b149-e962201cfadf"
+          },
+          {
+            "type": "commandExecution",
+            "id": "exec-ddf7555e-9da4-4eff-a72e-87172aa8b6ff"
+          }
+        ]
+      }
+    ]
+  }
+}

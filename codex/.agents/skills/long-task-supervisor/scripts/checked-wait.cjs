@@ -31,22 +31,45 @@ function silencesIdle(wait,snapshot,openKeys){
 }
 function remember(state,decision,binding){
   if(!decision.wait)return;
+  delete state.waitReleased;
   state.checkedWait={...decision.wait,eventId:decision.eventId,executorMarker:state.lastExecutorActivityMarker,
     supervisorMarker:state.pendingSupervisorInputMarker===undefined?state.lastSupervisorInputMarker:state.pendingSupervisorInputMarker,executorAt:state.lastExecutorActivityAt};
   if(binding.supervisorLog)state.checkedWait.supervisorOffset=state.pendingSupervisorOffset??fs.statSync(binding.supervisorLog).size;
 }
+// A wait ends when its condition file changes, its deadline comes, Jay writes in the supervisor chat or the executor
+// moves. The first three are what the supervisor was waiting for and it reviews them at once (wait_changed). The
+// executor moving on its own is work: 2026-11-17 zone E reviews 112 and 114 and A WebRPA 16-18 each woke the supervisor
+// the moment the executor started on the instruction it had just been given, and the only decision the format accepted
+// was a made-up external wait. Such an end is recorded (state.waitReleased, wait-releases.jsonl) and not reviewed; the
+// silence, overdue and idle clocks run on as they do without a wait, and results, questions and blocks still arrive
+// as the executor's own events.
+function release(state,wait,reasons,now){
+  const review=!reasons.every(reason=>reason==='executor_activity');
+  delete state.checkedWait;
+  state.waitReleased={eventId:wait.eventId||null,kind:wait.kind,reasons,at:now,review};
+  if(review)state.lastProgressReviewAt=0;
+}
 function unchanged(state,now=Date.now()){
   const wait=state.checkedWait;if(!wait)return false;
-  let changed=wait.executorMarker!==state.lastExecutorActivityMarker||(wait.supervisorMarker||null)!==(state.lastSupervisorInputMarker||null)||wait.executorAt!==state.lastExecutorActivityAt;
-  if(wait.resumeAt&&now>=Date.parse(wait.resumeAt))changed=true;
-  try{if(wait.conditions.some(item=>sha(item.path)!==item.sha256))changed=true;}catch{changed=true;}
-  if(changed){delete state.checkedWait;state.lastProgressReviewAt=0;return false;}
-  return true;
+  const reasons=[];
+  if(wait.executorMarker!==state.lastExecutorActivityMarker||wait.executorAt!==state.lastExecutorActivityAt)reasons.push('executor_activity');
+  if((wait.supervisorMarker||null)!==(state.lastSupervisorInputMarker||null))reasons.push('user_input');
+  if(wait.resumeAt&&now>=Date.parse(wait.resumeAt))reasons.push('resume_at');
+  try{if(wait.conditions.some(item=>sha(item.path)!==item.sha256))reasons.push('condition_changed');}catch{reasons.push('condition_changed');}
+  if(!reasons.length)return true;
+  release(state,wait,reasons,now);
+  return false;
+}
+// One line per ended wait, kept in the run so an end that woke nobody can still be audited.
+function logRelease(run,state){
+  const found=state.waitReleased;if(!found||found.logged)return;
+  try{fs.appendFileSync(path.join(run,'wait-releases.jsonl'),JSON.stringify({...found,at:new Date(found.at).toISOString()})+'\n');}catch{}
+  found.logged=true;
 }
 function supervisorInput(state,binding){
   const wait=state.checkedWait;if(!wait||!binding.supervisorLog)return;
   const end=fs.statSync(binding.supervisorLog).size,start=wait.supervisorOffset;
-  if(end<start){delete state.checkedWait;state.lastProgressReviewAt=0;return;}
+  if(end<start){release(state,wait,['supervisor_log_reset'],Date.now());return;}
   if(end===start)return;
   const fd=fs.openSync(binding.supervisorLog,'r'),buffer=Buffer.alloc(end-start);
   try{fs.readSync(fd,buffer,0,buffer.length,start);}finally{fs.closeSync(fd);}
@@ -56,7 +79,7 @@ function supervisorInput(state,binding){
     try{const row=JSON.parse(line),content=row.message?.content;return row.type==='user'&&!row.isSidechain&&!row.origin&&
       (typeof content==='string'||Array.isArray(content)&&content.some(block=>block.type==='text'));}catch{return false;}
   });
-  if(human){delete state.checkedWait;state.lastProgressReviewAt=0;}
+  if(human)release(state,wait,['user_input'],Date.now());
 }
 function observeSupervisorInput(state,detail){
   const turn=detail.turns?.[0];
@@ -67,4 +90,4 @@ function observeSupervisorInput(state,detail){
   if(marker!==state.lastSupervisorInputMarker)state.lastUserInputAt=Number(turn.startedAt)>0?Number(turn.startedAt)*1000:Date.now();
   state.lastSupervisorInputMarker=marker;
 }
-module.exports={validateWait,silencesIdle,remember,unchanged,supervisorInput,observeSupervisorInput};
+module.exports={validateWait,silencesIdle,remember,unchanged,logRelease,supervisorInput,observeSupervisorInput};

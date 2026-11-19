@@ -14,6 +14,12 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
   register --state S --wp ID (--pid N | --compose-project 名 | --container 名) [--close …] [--reason …]
            [--ttl 72h] 登記自己脫離的資源（docker compose up -d、已在跑的程序）；--ttl 只記到期時間、不自動關。
            --worktree 路徑：登記工作包專用的 git worktree，供判定後移除。
+           --workdir 路徑 [--keep 樣式]…：登記非 git 的工作包資料夾，供判定 PASS 後 prune 清過程檔；--keep 是相對於
+           資料夾的檔名樣式（例如 DONE、result*.json、scripts/*），符合的 prune 一律不刪。
+  tmpdir   --state S --wp ID
+           建立並登記這個工作包自己的暫存資料夾，只印出路徑：TMPDIR="$(… tmpdir --state S --wp ID)" 再跑測試。
+           位置在 /tmp/lt-<任務代碼>/<工作包>（路徑短，unix socket 放得下；LONG_TASK_TMP_BASE 可換掉 /tmp）。
+           工作包判定後 stop --wp ID 會把它整個刪掉並記入 deletions.md；還有程序在用就不刪、回 4。
   run-container --state S --wp ID --name 名 --ttl 4h [--close …] [--reason …] [--memory 1g] [--protect]
            -- <docker run 的其餘參數與映像>
            單一容器一律用這個：一步完成 docker run -d、貼上任務／工作包／關閉時點／帳本位置四個標籤、登記與到期時間。
@@ -27,6 +33,11 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
            --remove：停止後移除（容器連同匿名資料卷；worktree 另須 --integrated-into 候選版的 commit 或分支，分支不刪）。
            只移除所屬工作包已判定 PASS、且識別值不在驗收結果帳、evidence/ 與決策帳裡的資源；每筆先記進 deletions.md、
            刪後讀回。FAIL 或主線接手的只停不刪。
+  prune    --state S --wp ID [--search 路徑]… (-- 過程檔… | --none --reason 文字)
+           工作包判定 PASS 後，真的刪掉（不進垃圾桶）它登記的工作資料夾裡可重建的過程檔：輸入複本、演練工作區、
+           被新版取代的整套輸出、建置產物。路徑可寫絕對路徑或相對於該資料夾。逐項核對：在登記的資料夾裡面（不含資料夾
+           本身）、不符合 --keep、沒被驗收結果帳、evidence/ 與決策帳引用、沒有程序在用；每筆先記進 deletions.md、
+           刪後讀回，不符的保留並說明。FAIL、主線接手或還沒判定的一律不刪。沒有可刪的用 --none --reason 記一筆。
   wait     --timeout 30m [--interval 20s] -- 查核指令…
            每隔 interval 跑一次查核指令，exit 0 就結束；逾時 exit 124。逾時必填。
   check    --state S [--final]
@@ -34,6 +45,8 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
            sidecar-guard.py 每次派工前與判定後也跑同一段核對。
            任務期間建立、紀錄裡寫到卻沒登記的 worktree 也算需處理；--final 時已 PASS、乾淨、已整合（或已在遠端）
            且沒被證據引用的登記 worktree 要先 stop --remove，有未提交內容或未整合的列為保留、不擋。
+           已判定工作包的任務暫存還在也算需處理；--final 時已 PASS 的登記工作資料夾要先 prune（或 --none）。
+           任務期間建立、紀錄裡寫到卻沒登記的非 git 工作資料夾只列出、不算需處理。
   reap     --state S [--dry-run]
            關掉殘留的測試瀏覽器：四項全符合才關——父程序已結束、工作目錄在本任務範圍、--user-data-dir 在系統暫存目錄、
            啟動時間在任務建立之後。自成一組的連同輔助程序整組關，關前關後記進 reaped.jsonl。宣稱完成前必跑。
@@ -55,10 +68,13 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -94,6 +110,8 @@ LABELS = ("task", "wp", "close", "ledger")
 BROWSER_NAMES = {"Google Chrome for Testing", "Chromium", "Google Chrome", "Google Chrome Canary", "Microsoft Edge",
                  "chrome", "chromium", "chromium-browser", "chrome-headless-shell", "headless_shell"}
 PROFILE = re.compile(r"--user-data-dir=(\S+)")
+# 以資料夾存在與否判斷還在不在的資源：git 工作樹、非 git 的工作包資料夾、工作包自己的暫存資料夾。
+FOLDER_KINDS = ("worktree", "workdir", "tmp")
 DELETIONS_HEAD = ("# 刪除清冊\n\n| 時間 | 項目與識別 | 產生者 | 為何屬中間產物 | 引用搜尋結果 | 刪後讀回 |\n"
                   "|---|---|---|---|---|---|\n")
 
@@ -403,6 +421,8 @@ def container_identity(c):
 def inactive_note(res, snap):
     if res["kind"] == "worktree":
         return "工作樹已不存在（帳本尚未標記）"
+    if res["kind"] in ("workdir", "tmp"):
+        return "資料夾已不存在（帳本尚未標記）"
     if res["kind"] == "process":
         return "已不在執行（帳本尚未標記停止）"
     candidates = container_candidates(res, snap) or []
@@ -416,7 +436,7 @@ def inactive_note(res, snap):
 
 def alive(res, snap):
     """True／False；容器在 docker 不可用時回 None（無法確認）。"""
-    if res["kind"] == "worktree":
+    if res["kind"] in FOLDER_KINDS:
         return Path(res.get("path") or "").is_dir()
     if res["kind"] == "process":
         return bool(members(res, snap))
@@ -430,6 +450,8 @@ def describe(res):
         "compose": f"compose 專案 {res.get('project')}",
         "container": f"容器 {res.get('container')}",
         "worktree": f"工作樹 {res.get('path')}",
+        "workdir": f"工作資料夾 {res.get('path')}",
+        "tmp": f"任務暫存 {res.get('path')}",
     }[res["kind"]]
     cmd = (res.get("command") or "")[:80]
     return f"{res['id']}［{res.get('wp')}／{res.get('close')}］{target}" + (f"：{cmd}" if cmd else "")
@@ -529,7 +551,8 @@ def task_scope(state, lines):
 def registered(state, worktrees=()):
     """所有任務帳本（本任務、同專案與同 repo 其他 worktree 的任務、全機索引記到的其他專案任務）裡還沒停止的資源；
     這些都有主人，不算未登記。"""
-    keys = {"pids": set(), "pgids": set(), "projects": set(), "containers": set(), "ids": set(), "worktrees": set()}
+    keys = {"pids": set(), "pgids": set(), "projects": set(), "containers": set(), "ids": set(), "worktrees": set(),
+            "workdirs": set()}
     ledgers = {state.parent / "resources.json"} | set(state.parent.parent.glob("*/resources.json"))
     for tree in worktrees:
         for pattern in (".claude/long-task/*/resources.json", ".codex/long-task/*/resources.json"):
@@ -539,6 +562,8 @@ def registered(state, worktrees=()):
     for path in ledgers:
         with contextlib.suppress(OSError, ValueError):
             for res in load(path)["resources"]:
+                if res.get("kind") == "workdir" and res.get("path"):  # 清過過程檔的也算登記過
+                    keys["workdirs"].add(os.path.realpath(res["path"]))
                 if res.get("stopped_at"):
                     continue
                 if res.get("pgid"):
@@ -614,6 +639,23 @@ def new_worktrees(state, roots, since, until, worktrees, keys):
         born = worktree_born(real)
         if born and since <= born <= until:
             found.append(real)
+    return found
+
+
+def loose_workdirs(state, lines, since, until, worktrees, keys, project):
+    """任務期間建立、紀錄的 path: 寫到、不是 git 工作樹、也沒登記的工作資料夾（使用者 2026-11-19 定案：工作包資料夾
+    也要回收；當天工區 E 的實跑區 1,297 個已交件工作包、78.5GiB 沒有任何規則收）。只列出，不算需處理。"""
+    trees = [os.path.realpath(w) for w in worktrees]
+    skip = set(trees) | keys["workdirs"] | ({os.path.realpath(project)} if project else set())
+    found = []
+    for raw in sorted({os.path.realpath(p) for p in workspace_paths(lines) + PATH_FIELD.findall(task_records(state))}):
+        if raw in skip or not os.path.isdir(raw) or os.path.exists(os.path.join(raw, ".git")) or inside(raw, trees):
+            continue
+        with contextlib.suppress(OSError):
+            info = os.stat(raw)
+            born = dt.datetime.fromtimestamp(getattr(info, "st_birthtime", info.st_mtime))
+            if since <= born <= until:
+                found.append(raw)
     return found
 
 
@@ -714,6 +756,19 @@ def audit(state, claimed=False, snapshot=None):
         elif res["kind"] == "worktree":
             hint = "；工作包已判定，核對後可 stop --id … --remove --integrated-into <候選版>" if res.get("wp") in judged else ""
             shown.append(f"  {describe(res)}：仍在{hint}")
+        elif res["kind"] == "tmp" and (res.get("wp") in judged or claimed):
+            why = f"工作包 {res.get('wp')} 已判定" if res.get("wp") in judged else "最終判定宣稱完成"
+            problems.append(f"{describe(res)}：{why}，任務暫存還在；stop --id {res['id']} 整個刪掉（還有程序在用的不會刪）")
+        elif res["kind"] == "tmp":
+            shown.append(f"  {describe(res)}：使用中，工作包判定後 stop --wp {res.get('wp')} 刪掉")
+        elif res["kind"] == "workdir":
+            passed = package_passed(task_dir, res.get("wp")) is True
+            todo = (f"prune --wp {res.get('wp')} -- <可重建的過程檔…>；沒有可刪的用 prune --wp {res.get('wp')} "
+                    "--none --reason <原因>")
+            if passed and claimed:
+                problems.append(f"{describe(res)}：已 PASS，過程檔還沒清，宣稱完成前 {todo}")
+            else:
+                shown.append(f"  {describe(res)}：仍在" + (f"；工作包已 PASS，{todo}" if passed else ""))
         elif res.get("close") in NEEDS_REASON and not res.get("reason"):
             problems.append(f"{describe(res)}：標為 {res.get('close')} 卻沒寫理由")
         elif res.get("close") == "wp" and res.get("wp") in judged:
@@ -735,6 +790,11 @@ def audit(state, claimed=False, snapshot=None):
     own_ids = {item["id"] for res in data["resources"] for item in res.get("container_identities", []) if item.get("id")}
     out = ([head + "。"] + shown + [f"  ✗ {p}" for p in problems]
            + container_notes(since, until, task, snap, keys, own_ids))
+    folders = loose_workdirs(state, lines, since, until, worktrees, keys, project)
+    if folders:
+        names = "、".join(os.path.basename(f) for f in folders[:4]) + ("…" if len(folders) > 4 else "")
+        out.append(f"  ・任務期間建立、沒登記的非 git 工作資料夾 {len(folders)} 個（{names}）：建立時 register --workdir <路徑> "
+                   "--wp <id>，判定 PASS 後 prune 清掉可重建的過程檔。")
     if problems:
         out.append("先關閉（resource-ledger.py stop）、補登記（register），或改標 acceptance／external 並寫理由，"
                    "再重跑；守門只報告，不會自動關閉任何資源。")
@@ -859,7 +919,16 @@ def cmd_register(args):
     record = {"wp": args.wp, "close": args.close, "reason": args.reason, "created_at": now().isoformat()}
     if args.ttl:
         record.update(ttl=args.ttl, expires_at=expiry(args.ttl))
-    if args.worktree:
+    if args.keep and not args.workdir:
+        die("--keep 只用在 --workdir")
+    if args.workdir:
+        folder = os.path.realpath(os.path.expanduser(args.workdir))
+        if not os.path.isdir(folder):
+            die(f"找不到資料夾：{folder}")
+        if os.path.exists(os.path.join(folder, ".git")):
+            die(f"這是 git 工作樹，改用 --worktree：{folder}")
+        record.update(kind="workdir", path=folder, keep=list(args.keep or []))
+    elif args.worktree:
         tree = os.path.realpath(os.path.expanduser(args.worktree))
         if git(tree, "rev-parse", "--is-inside-work-tree")[1].strip() != "true":
             die(f"不是 git 工作樹：{tree}")
@@ -1215,6 +1284,206 @@ def terminate(res, snap):
     return (not left), ("已停止並核對" + mismatch if not left else f"原登記身分仍有 {len(left)} 個容器在跑")
 
 
+def tmp_base():
+    """任務暫存的上層。/tmp 夠短，unix socket（路徑上限約 104 字元）放得下；LONG_TASK_TMP_BASE 讓測試或別的磁碟換位置。"""
+    return os.environ.get("LONG_TASK_TMP_BASE") or "/tmp"
+
+
+def cmd_tmpdir(args):
+    """工作包自己的暫存資料夾（使用者 2026-11-19 定案）：測試把瀏覽器設定檔、驅動暫存丟進系統暫存區，跑完不刪，只有
+    重開機才清（2026-11-19 重開機後 12 小時 12,291 項、2.24GiB；前一天清理前 12GiB）。放在任務自己的資料夾，判定後整個刪。"""
+    path = ledger_of(args)
+    with locked(path) as data:
+        for res in data["resources"]:
+            if (res.get("kind") == "tmp" and res.get("wp") == args.wp and not res.get("stopped_at")
+                    and os.path.isdir(res.get("path") or "")):
+                print(res["path"])
+                return 0
+        task = hashlib.sha256(os.path.realpath(path).encode("utf-8")).hexdigest()[:8]
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", args.wp).strip("_.")[:24]
+        if slug != args.wp:
+            slug = (slug + "-" if slug else "") + hashlib.sha256(args.wp.encode("utf-8")).hexdigest()[:4]
+        folder = Path(tmp_base()) / f"lt-{task}" / slug
+        folder.mkdir(parents=True, exist_ok=True)
+        for own in (folder.parent, folder):
+            os.chmod(own, 0o700)
+        data["resources"].append({"id": next_id(data), "kind": "tmp", "wp": args.wp, "close": "wp", "reason": "",
+                                  "created_at": now().isoformat(), "path": str(folder)})
+    print(folder)
+    return 0
+
+
+def users_of(folder):
+    """還在用這個資料夾的程序 pid：指令列寫到它、工作目錄在裡面，或開著裡面的檔案。查不了回 None（當成有人在用）。
+    本指令自己與呼叫它的上層 shell 不算：它們的指令列本來就寫著要刪的路徑。"""
+    real, procs = os.path.realpath(folder), ps_table()
+    mine, pid = set(), os.getpid()
+    while pid in procs and pid not in mine:
+        mine.add(pid)
+        pid = procs[pid]["ppid"]
+    found = {p["pid"] for p in procs.values() if real in p["command"] or str(folder) in p["command"]}
+    if Path("/proc/self/cwd").exists():
+        for name in os.listdir("/proc"):
+            with contextlib.suppress(OSError):
+                if name.isdigit() and inside(os.readlink(f"/proc/{name}/cwd"), [real]):
+                    found.add(int(name))
+    else:
+        try:
+            out = subprocess.run(["lsof", "-Fp", "+D", real], capture_output=True, env=C_ENV,
+                                 timeout=120).stdout.decode("utf-8", "replace")
+        except (OSError, subprocess.SubprocessError):
+            return None
+        found |= {int(line[1:]) for line in out.splitlines() if line.startswith("p") and line[1:].isdigit()}
+    return sorted(found - mine - {os.getpid()})
+
+
+def tree_size(path):
+    """檔案大小合計（位元組）；共用儲存空間的複本照檔案大小算，實際釋出以 df 為準。"""
+    if os.path.islink(path) or not os.path.isdir(path):
+        with contextlib.suppress(OSError):
+            return os.lstat(path).st_size
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(root, name)).st_size
+    return total
+
+
+def megabytes(size):
+    return f"{size / 1048576:.1f} MB"
+
+
+def delete_path(target):
+    """真的刪掉（不進垃圾桶），回傳是否已不存在。符號連結只刪連結本身。"""
+    with contextlib.suppress(OSError):
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            os.remove(target)
+    return not os.path.lexists(target)
+
+
+def remove_tmp(res, path):
+    """刪掉工作包自己的暫存資料夾；回傳 (是否處理完, 說明)。只刪 tmpdir 建立的位置，還有程序在用就不刪。"""
+    folder = res.get("path") or ""
+    if not os.path.isdir(folder):
+        mark_stopped(path, res["id"], "暫存資料夾已不存在")
+        return True, "暫存資料夾已不存在"
+    real, base = os.path.realpath(folder), os.path.realpath(tmp_base())
+    parts = os.path.relpath(real, base).split(os.sep)
+    if len(parts) != 2 or not parts[0].startswith("lt-") or parts[1] in ("", ".", ".."):
+        return False, f"不在 {base}/lt-<任務代碼>/<工作包> 底下，不是 tmpdir 建立的位置，未刪"
+    users = users_of(folder)
+    if users is None:
+        return False, "查不了有沒有程序在用，未刪"
+    if users:
+        return False, f"還有程序在用（pid {'、'.join(map(str, users[:6]))}），未刪；程序結束後再 stop"
+    size = tree_size(real)
+    readback = deletion_row(Path(path).parent, f"任務暫存 {folder}（{megabytes(size)}）",
+                            f"工作包 {res.get('wp')}（帳本 {res['id']}）", "測試暫存，證據與測試結果不放這裡", "暫存不作證據，未搜尋")
+    gone = delete_path(real)
+    readback("讀回已不存在" if gone else "移除失敗，仍存在")
+    if not gone:
+        return False, "移除失敗，仍存在"
+    with contextlib.suppress(OSError):
+        os.rmdir(os.path.dirname(real))  # 任務的暫存上層空了就一起收
+    mark_stopped(path, res["id"], "已刪除")
+    note_resource(path, res["id"], removed_at=now().isoformat())
+    return True, f"已刪除並讀回（{megabytes(size)}），已記入 deletions.md"
+
+
+def kept_by(rel, target, patterns):
+    """符合登記時 --keep 樣式的不刪：比對相對路徑、各層上層與檔名；資料夾連裡面每個檔案一起看。回傳符合的那一項。"""
+    def hit(item):
+        pieces = item.split(os.sep)
+        names = [os.sep.join(pieces[:i]) for i in range(1, len(pieces) + 1)] + [pieces[-1]]
+        return any(fnmatch.fnmatch(name, pattern) for name in names for pattern in patterns)
+    if not patterns:
+        return None
+    if hit(rel):
+        return rel
+    if os.path.isdir(target) and not os.path.islink(target):
+        for root, dirs, files in os.walk(target):
+            for name in dirs + files:
+                item = os.path.join(rel, os.path.relpath(os.path.join(root, name), target))
+                if hit(item):
+                    return item
+    return None
+
+
+def cmd_prune(args):
+    """工作包資料夾的過程檔回收（使用者 2026-11-19 定案）：2026-11-19 工區 E 實跑區一天多 19GiB，1,297 個已交件工作包
+    78.5GiB 都留著，39,727 個 PDF 只有約 67 種內容，同一包的整套測試輸出常存五六份；當時沒有任何規則要收。"""
+    path = ledger_of(args)
+    state_dir = Path(path).parent
+    folders = [r for r in load(path)["resources"] if r.get("kind") == "workdir" and r.get("wp") == args.wp]
+    if not folders:
+        die(f"工作包 {args.wp} 沒有登記的工作資料夾：先 register --workdir <路徑> --wp {args.wp}")
+    paths = args.paths[1:] if args.paths[:1] == ["--"] else args.paths
+    if args.none and (paths or not args.reason):
+        die("--none 不能同時列路徑，且必須附 --reason（寫明為什麼沒有可刪的過程檔）")
+    if not args.none and not paths:
+        die("列出要刪的過程檔：prune … -- <路徑…>；沒有可刪的用 --none --reason <原因>")
+    passed = package_passed(state_dir, args.wp)
+    if not passed:
+        print(("查不到工作包的判定" if passed is None else "工作包不是 PASS") + "：過程檔留作診斷，沒有刪任何東西。")
+        return 4
+    stamp = now().isoformat()
+    if args.none:
+        for res in folders:
+            note_resource(path, res["id"], pruned_at=stamp, prune_note=args.reason,
+                          stopped_at=res.get("stopped_at") or stamp)
+        print(f"✓ 工作包 {args.wp}：已記錄沒有可刪的過程檔（{args.reason}）")
+        return 0
+    roots = {os.path.realpath(r["path"]): r for r in folders}
+    failed, freed, cleaned = 0, 0, {}
+    for raw in paths:
+        given = os.path.expanduser(raw)
+        candidates = [given] if os.path.isabs(given) else [os.path.join(root, given) for root in roots]
+        candidates = [os.path.join(os.path.realpath(os.path.dirname(c)), os.path.basename(os.path.normpath(c)))
+                      for c in candidates]
+        found = [(c, root) for c in candidates for root in roots
+                 if os.path.lexists(c) and c != root and c.startswith(root.rstrip(os.sep) + os.sep)]
+        if len(found) != 1:
+            print(f"・ {raw}：" + ("不存在，或不在這個工作包登記的資料夾裡面" if not found else "在多個登記的資料夾裡都有，改寫絕對路徑")
+                  + "，未刪")
+            continue
+        target, root = found[0]
+        res, rel = roots[root], os.path.relpath(target, root)
+        keep = kept_by(rel, target, res.get("keep") or [])
+        if keep:
+            print(f"・ {raw}：{keep} 符合登記的保留樣式，未刪")
+            continue
+        used, search = referenced(state_dir, [target, os.path.join(os.path.basename(root), rel)], args.search or ())
+        if used is not False:
+            print(f"・ {raw}：{search}，未刪")
+            continue
+        users = users_of(target) if os.path.isdir(target) and not os.path.islink(target) else []
+        if users is None or users:
+            print(f"・ {raw}：" + ("查不了有沒有程序在用" if users is None else f"還有程序在用（pid {users[0]}）") + "，未刪")
+            continue
+        size = tree_size(target)
+        readback = deletion_row(state_dir, f"過程檔 {target}（{megabytes(size)}）", f"工作包 {args.wp}（帳本 {res['id']}）",
+                                "工作包已判定 PASS、可重建的過程檔", search)
+        gone = delete_path(target)
+        readback("讀回已不存在" if gone else "移除失敗，仍存在")
+        if not gone:
+            failed += 1
+            print(f"✗ {raw}：移除失敗，仍存在")
+            continue
+        freed += size
+        cleaned[res["id"]] = cleaned.get(res["id"], 0) + size
+        print(f"✓ {raw}：已刪除並讀回（{megabytes(size)}；{search}）")
+    for res in folders:
+        if res["id"] in cleaned:
+            note_resource(path, res["id"], pruned_at=stamp, pruned_bytes=(res.get("pruned_bytes") or 0) + cleaned[res["id"]],
+                          stopped_at=res.get("stopped_at") or stamp)
+    print(f"工作包 {args.wp}：刪除 {megabytes(freed)}（檔案大小合計，實際釋出以 df 為準），明細在 deletions.md。")
+    return 4 if failed else 0
+
+
 def cmd_stop(args):
     path = ledger_of(args)
     data = load(path)
@@ -1226,8 +1495,8 @@ def cmd_stop(args):
     for res in data["resources"]:
         if res.get("close") == "external" or (res.get("stopped_at") and not removable(res)):
             continue
-        if res["kind"] == "worktree" and not args.remove:
-            continue
+        if res["kind"] == "workdir" or (res["kind"] == "worktree" and not args.remove):
+            continue  # 工作資料夾裝著交件成果，不整個移除；過程檔用 prune
         if args.id and res["id"] != args.id:
             continue
         if args.wp and res.get("wp") != args.wp:
@@ -1241,7 +1510,9 @@ def cmd_stop(args):
     snap = {"procs": ps_table(), "containers": docker_containers()}
     failed = 0
     for res in targets:
-        if res["kind"] == "worktree" or res.get("stopped_at"):
+        if res["kind"] == "tmp":
+            ok, note = remove_tmp(res, path)
+        elif res["kind"] == "worktree" or res.get("stopped_at"):
             ok, note = True, "工作樹" if res["kind"] == "worktree" else "先前已停止"
         else:
             ok, note = terminate(res, snap)
@@ -1407,6 +1678,8 @@ def build_parser():
     group.add_argument("--compose-project")
     group.add_argument("--container")
     group.add_argument("--worktree", help="工作包專用的 git worktree 路徑")
+    group.add_argument("--workdir", help="非 git 的工作包資料夾；判定 PASS 後用 prune 清過程檔")
+    p.add_argument("--keep", action="append", help="--workdir 用：prune 不可刪的檔名樣式（相對於資料夾）；可重複")
     p.add_argument("--ttl", type=duration, default=0.0, help="只記到期時間、不自動關")
     p.set_defaults(func=cmd_register)
 
@@ -1441,6 +1714,20 @@ def build_parser():
     p.add_argument("--integrated-into", help="移除工作樹時，已整合進去的候選版 commit 或分支")
     p.add_argument("--search", action="append", help="引用搜尋另外要看的檔案或目錄（例如監督 run 目錄）；可重複")
     p.set_defaults(func=cmd_stop)
+
+    p = sub.add_parser("tmpdir")
+    target(p, wp=False)
+    p.add_argument("--wp", required=True, help="所屬工作包 id；主線自己的寫「主線」")
+    p.set_defaults(func=cmd_tmpdir)
+
+    p = sub.add_parser("prune")
+    target(p, wp=False)
+    p.add_argument("--wp", required=True)
+    p.add_argument("--none", action="store_true", help="沒有可刪的過程檔，只記一筆（須 --reason）")
+    p.add_argument("--reason", default="")
+    p.add_argument("--search", action="append", help="引用搜尋另外要看的檔案或目錄（例如監督 run 目錄）；可重複")
+    p.add_argument("paths", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_prune)
 
     p = sub.add_parser("wait")
     p.add_argument("--timeout", type=duration, required=True)
