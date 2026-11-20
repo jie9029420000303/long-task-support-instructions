@@ -4,6 +4,18 @@
 
 受監督的背景等待或回合續接，先讀監督技能的[執行層完成通知與定期補漏](../../long-task-supervisor/references/execution-wake.md)：一般結果及可自行處理的失敗回執行主線；完成通知與定期查核並存，只有裁決、授權、獨立驗收或無法恢復才升級監督。回合結束時寫明下一步就用 `progress`，一律立即續接、不等待；剩下的工作全部都要等背景結果時才用 `waiting`，它會立刻交監督審查（使用者 2026-11-08）。
 
+## 部署目標與收件
+
+規劃時逐元件讀規格、部署清單或目標機回執，確認實際在哪裡、以哪個身分執行、依賴版本、設定從哪裡注入、在哪裡取得驗收證據。雲端服務和辦公室 Windows 的瀏覽器各自登記。macOS 本機的路徑、工具、環境變數僅在資料來源指明該元件部署於此時採用。缺部署資料時先查已有檔案或做已授權的唯讀核對，只有涉及本人決策的項目集中提問，其他元件繼續。
+
+部署相關開發包派出前，在 sidecar 的 `deployment-targets.json` 登記 `targets` 陣列。每項填 `component`、`runtime`、`identity`、`dependencies`、`configuration`、`verify` 及 `source`（可讀規格或目標機回執的絕對路徑）。在工作包加入一行 `[部署元件] ["元件名"]` 連回該表，資料庫憑證等只記設定來源與授權。主線讀原文判斷是否適用；跨主機的本機測試另記其涵蓋範圍。
+
+查證包在派出時列一行 `[待回答問題] ["原問題一","原問題二"]`。收回時逐題填 `status.answers`，每項有 `question`、`finding`、`evidence`（既有檔案絕對路徑清單）。來源只回答部分時，加 `gap:true` 並列 returned、integrated=false，由主線核對版本、環境、時間和授權，補件後才整合。工具清單可以證明已安裝的版本，資料庫操作權限須另有對應依據。
+
+送審前將 `status.submission:{revision,manifest}` 寫入對應工作包，revision 用 manifest 內容的 sha256。收到階段裁決，當輪將 `ruling:{eventId,revision}` 放進 collect 的結果檔，依裁決更新該次送審、已採認及尚待驗的條文，讀回快照。壓縮或中斷後，以原事件及包內的 appliedRulings 續接。多包同次送審用同一個 collect 收回，附帶的 collectionNotes 在這次收件處理。
+
+同一驗收案例連續兩次失敗，主線收回結果當下即啟動原有外部研究。另遇到監督派出的解卡研究，依同一阻塞條件、部署版本和已試動作查重。主線接到建議即登記負責人、下一個小實驗及可驗證結果，回報是否解卡，成功後才回到原案例。
+
 ## Goal 與 sidecar 狀態
 
 原生 Goal 保存目標、運行狀態與 Token 預算；不假定它能保存任意工作包欄位。執行 sidecar 放在 `<專案根>/.codex/long-task/<YYYY-MM-DD>-<slug>/state.md`，證據放同目錄 `evidence/`，工作包 prompt 放 `wp/`；由 `templates/state.md` 複製後填寫。是否納入 git 或 `.gitignore` 由使用者決定。

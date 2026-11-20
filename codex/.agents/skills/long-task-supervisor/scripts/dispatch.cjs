@@ -5,6 +5,8 @@ const path=require('node:path');
 const {parse,planningBasis,planReview}=require('./dispatch-audit.cjs');
 const acceptance=require('./acceptance-audit.cjs');
 const formal=require('./formal-case.cjs');
+// Dispatch is shared by both adapters. Only Codex commits version-bound package rulings.
+const review=require('./guard.cjs').packageReview?.();
 const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
 const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]]] [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [PACKAGE_ID ABSOLUTE_RESULT_JSON ...] [same options]';
 
@@ -35,7 +37,7 @@ function collected(file){
   const paths=[...(state.evidence||[]),...updates.flatMap(item=>item?.evidence||[])].filter(item=>typeof item==='string'&&item.startsWith('/'));
   const missing=paths.filter(item=>!fs.existsSync(item));
   if(missing.length)throw Error('RESULT_JSON evidence does not exist: '+missing.join(', '));
-  return {state,updates};
+  return {state,updates,ruling:input.ruling};
 }
 // Fewer bookkeeping calls (Jay 2026-11-12; A WebRPA's main line made 516 collect and 150 estimate calls in five days,
 // 160 collects within 3 minutes of another and 81 estimates next to a mark, each call carrying its whole context):
@@ -64,6 +66,7 @@ function packagesFrom(stateDir,overrides){
   const realDir=fs.realpathSync(dir);
   const files=fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>{const file=path.join(dir,name);
     if(path.dirname(fs.realpathSync(file))!==realDir)throw Error('Work-package file leaves its trusted directory');return file;});
+  let deploymentTargets;
   const out=Object.fromEntries(LISTS.map(name=>[name,[]])),missing=[];
   for(const file of files){
     const text=fs.readFileSync(file,'utf8'),over=(overrides||[]).find(item=>item.file===file),raw=over?over.state:tagLine(text,'狀態');
@@ -71,6 +74,22 @@ function packagesFrom(stateDir,overrides){
     const {list,...extra}=status(raw,file);if(list==='archived')continue;
     const header=tagLine(text,'工作包')||'',ids=listOf(tagLine(text,'驗收條目'));
     const record={id:packageId(text,file),...extra,evidence:[file,...(extra.evidence||[])]};
+    const components=tagLine(text,'部署元件');
+    if(review && components!==null){
+      const names=JSON.parse(components);
+      if(!Array.isArray(names)||!names.length||new Set(names).size!==names.length)throw Error('List each deployment component once in '+file);
+      record.components=names;
+      if(['ready','inFlight'].includes(list)){
+        deploymentTargets??=JSON.parse(fs.readFileSync(path.join(stateDir,'deployment-targets.json'),'utf8'));
+        record.deployment=names.map(component=>{
+          const matches=deploymentTargets.targets.filter(row=>row.component===component);
+          if(matches.length!==1)throw Error('Missing or ambiguous deployment component: '+component);
+          return matches[0];
+        });
+      }
+    }
+    const questions=tagLine(text,'待回答問題');
+    if(review && questions!==null)record.questions=JSON.parse(questions);
     if(ids.length&&!extra.acceptanceIds)record.acceptanceIds=ids;
     const testKind=tagLine(text,'測試類型'), cases=listOf(tagLine(text,'驗收案例'));
     if(testKind) record.testKind=testKind;
@@ -132,7 +151,9 @@ function acquire(run){
 function save(run,binding,value){
   const output=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),temporary=output+'.tmp-'+process.pid;
   acquire(run);
-  formal.dispatchCheck(run,value,fs.existsSync(output)?JSON.parse(fs.readFileSync(output,'utf8')):null);
+  const previous=fs.existsSync(output)?JSON.parse(fs.readFileSync(output,'utf8')):null;
+  review?.validateSnapshot(value,previous,run,binding);
+  formal.dispatchCheck(run,value,previous);
   acceptance.record(run,value.acceptance,output);
   fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{flag:'wx'});
   fs.renameSync(temporary,output);
@@ -181,7 +202,18 @@ try{
           .find(file=>fs.existsSync(file)&&path.dirname(fs.realpathSync(file))===packageDir&&packageId(fs.readFileSync(file,'utf8'),file)===id);
         if(!wpFile)throw Error('No work-package file for '+id+' under '+dir);
         if(overrides.some(item=>item.file===wpFile))throw Error('Work package '+id+' is named twice in one collect');
-        const text=fs.readFileSync(wpFile,'utf8'),line='[狀態] '+JSON.stringify(result.state);
+        const text=fs.readFileSync(wpFile,'utf8'),before=JSON.parse(tagLine(text,'狀態')||'{}');
+        if(result.state.appliedRulings && JSON.stringify(result.state.appliedRulings)!==JSON.stringify(before.appliedRulings))throw Error('Use collect with the delivered ruling');
+        if(before.appliedRulings)result.state.appliedRulings=before.appliedRulings;
+        if(before.submission && !result.state.submission)result.state.submission=before.submission;
+        if(before.questions&&!result.state.questions)result.state.questions=before.questions;
+        if(result.state.list==='archived' && (before.submission || before.answers?.some(row=>row.gap)))throw Error('Resolve open evidence or submission before archiving '+id);
+        if(result.state.answers?.some(row=>row?.gap) && result.updates.some(u=>u.status==='PASS' && (before.acceptanceIds||listOf(tagLine(text,'驗收條目'))).includes(u.id)))throw Error('An unresolved answer cannot pass acceptance');
+        if(result.ruling){
+          if(!review)throw Error('A Codex ruling requires a bound Codex run');
+          review.apply(run,binding,id,before,result);
+        }
+        const line='[狀態] '+JSON.stringify(result.state);
         overrides.push({file:wpFile,state:result.state,
           text:/^\[狀態\].*$/m.test(text)?text.replace(/^\[狀態\].*$/m,()=>line):/^\[工作包\].*$/m.test(text)?text.replace(/^\[工作包\].*$/m,match=>match+'\n'+line):line+'\n'+text});
         updates.push(...result.updates);
@@ -189,14 +221,19 @@ try{
     }
     // Validate the whole snapshot before touching any package file, so a rejected change leaves everything as it was.
     const draft=build(run,binding,stateDir,options,overrides,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
+    const notes=review && command==='collect'?require('./review-followup.cjs').collectionNotes(run).filter(n=>!draft.readCollectionNotes?.includes(n.eventId)):[];
+    if(notes.length)draft.readCollectionNotes=[...(draft.readCollectionNotes||[]),...notes.map(n=>n.eventId)];
     const value=checked(run,binding,draft);
     const prior=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
-    formal.dispatchCheck(run,value,fs.existsSync(prior)?JSON.parse(fs.readFileSync(prior,'utf8')):null);
+    const previous=fs.existsSync(prior)?JSON.parse(fs.readFileSync(prior,'utf8')):null;
+    review?.validateSnapshot(value,previous,run,binding);
+    formal.dispatchCheck(run,value,previous);
     for(const item of overrides){const temporary=item.file+'.tmp-'+process.pid;fs.writeFileSync(temporary,item.text,{flag:'wx'});fs.renameSync(temporary,item.file);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
     const written=save(run,binding,value);if(starting)machine.recordStart(run);
     console.log(JSON.stringify({written:true,path:written,planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding,run),
       ...(staggeredMs>0?{staggeredSeconds:Math.round(staggeredMs/1000)}:{}),
+      ...(notes.length?{collectionNotes:notes}:{}),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}

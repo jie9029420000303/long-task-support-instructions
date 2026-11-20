@@ -113,4 +113,4 @@ function load(run, binding, contract, event) {
     JSON.stringify(JSON.parse(entry.decisionRaw)) === JSON.stringify(entry.decision) && entry.decision?.eventId === event.id, 'Invalid submitted decision');
   return entry;
 }
-module.exports = {file, draft, assertNoLegacyWatcher, submit, load};
+module.exports = {file, draft, readSnapshot, assertNoLegacyWatcher, submit, load};

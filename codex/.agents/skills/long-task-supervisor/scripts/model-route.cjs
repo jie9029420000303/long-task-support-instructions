@@ -9,8 +9,8 @@ function resolve(input) {
   const main=identity(input.supervisorModel);
   if(!input.supervisorModel)throw Error('Provide the observed supervisor model ID');
   if(!Array.isArray(input.roles)||!input.roles.length||input.roles.some(r=>!Object.hasOwn(roles,r)))throw Error('Request known roles');
-  if(!main)return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
-  const result={family:main.family,provider:main.provider,supervisorModel:input.supervisorModel,roles:{}};
+  if(!main&&!require('./openrouter-route.cjs').choices.some(r=>r.model===input.executorModel||r.model===input.supervisorModel))return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
+  const result={family:main?.family||'openrouter',provider:main?.provider||'openrouter/',supervisorModel:input.supervisorModel,roles:{}};
   let limits={};
   if(input.fallback){
     try{limits=JSON.parse(fs.readFileSync(input.fallback,'utf8')).limits||{};}
@@ -24,6 +24,16 @@ function resolve(input) {
     if(!Number.isInteger(errors)||errors<0)throw Error('errors must be a nonnegative integer for this work package');
     const unavailable=reason=>{result.roles[role]={status:'unavailable',reason};};
     if(errors>=4){result.roles[role]={status:'takeover',reason:'Fourth unsuccessful delivery; execution mainline takes over'};continue;}
+    const executorModel=input.executorModel||input.supervisorModel;
+    if(worker && require('./openrouter-route.cjs').choices.some(r=>r.model===executorModel)){
+      const requested=override.model||executorModel;
+      const permitted=require('./openrouter-route.cjs').routes(null,catalog).some(r=>r.model===requested);
+      if(requested!==executorModel || !permitted || limited(requested) || (override.effort && override.effort!=='max')){
+        unavailable('The approved upstream must be available in the actual worker inventory');continue;
+      }
+      result.roles[role]={status:'ready',model:requested,effort:'max',basis:'execution-mainline',...(errors===3?{modelAtCeiling:true,effortAtCeiling:true}:{})};
+      continue;
+    }
     if(!owner){unavailable('Unknown execution mainline model family');continue;}
     let tier=owner.family==='claude'?'sonnet':'terra';
     const previous=input.previousModel && identity(input.previousModel);

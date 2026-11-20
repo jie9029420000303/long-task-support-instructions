@@ -17,7 +17,7 @@ function keyOf(model){const match=/^(anthropic(?:-apikey)?\/)/.exec(model||'');r
 function chainFor(original,role,executorModel=original){
   const items=catalog.installed(), originalModel=catalog.identity(original), owner=catalog.identity(executorModel);
   if(role==='subagent'){
-    if(!owner)return [];
+    if(!owner)return require('./openrouter-route.cjs').routes().filter(r=>r.model===executorModel).map(r=>r.model);
     const sameFamily=originalModel?.family===owner.family;
     const tier=sameFamily?originalModel.tier:(owner.family==='claude'?'sonnet':'terra');
     const accounts=owner.family==='gpt'?['']:[...new Set([owner.provider,'anthropic/','anthropic-apikey/'])];
@@ -29,8 +29,14 @@ function chainFor(original,role,executorModel=original){
   return sol?[...claude,sol]:claude;
 }
 function limited(state,model,now=Date.now()){const item=state.rateLimits?.[keyOf(model)];return Boolean(item&&item.until>now);}
-function next(original,current,role,state,now=Date.now(),executorModel=original){
-  return chainFor(original,role,executorModel).find(model=>model!==current&&!limited(state,model,now))||null;
+function availableFourth(config){
+  const routes=require('./openrouter-route.cjs').routes(config);
+  return config?routes.find(r=>r.model===config.model && r.effort===config.effort)||null:routes[0]||null;
+}
+function next(original,current,role,state,now=Date.now(),executorModel=original,fourth=null){
+  const candidates=chainFor(original,role,executorModel);
+  if(role==='executor'&&fourth)candidates.push(fourth.model);
+  return candidates.find(model=>model!==current&&!limited(state,model,now))||null;
 }
 // The refused turn's own error names the reset: "You've hit your usage limit. Try again at 11:40 PM.", or for a later day
 // "Try again at Nov 10th, 2026 9:32 AM." (local time). WEB 2026-11-08 23:14: the error said 11:40 PM, the watcher assumed
@@ -38,6 +44,8 @@ function next(original,current,role,state,now=Date.now(),executorModel=original)
 const MONTHS=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
 const FALLBACK_BASIS='查不到額度重置時間，用 5 小時',ERROR_BASIS='錯誤訊息寫明的恢復時間',ROUTE_BASIS='同一路線之後已有成功請求';
 function retryAt(text,since){
+  const utc=/\bregain access on (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2})(?::(\d{2}))? UTC\b/i.exec(text);
+  if(utc)return Date.parse(utc[1]+'T'+utc[2]+':'+(utc[3]||'00')+'Z')||null;
   const match=/try again at (?:([a-z]{3,9})\.? (\d{1,2})(?:st|nd|rd|th)?,? (\d{4}),? )?(\d{1,2}):(\d{2})(?: ?([ap])\.?m\b)?/i.exec(String(text||''));
   if(!match)return null;
   let hour=Number(match[4]);const minute=Number(match[5]),half=match[6]?.toLowerCase();
@@ -121,6 +129,40 @@ function recovered(state,now=Date.now()){
   return changed;
 }
 function isLimit(row){return row.status===429||row.status===402||row.failureCause==='rate-limit'||['rate_limit_exceeded','insufficient_quota'].includes(row.errorCode);}
+// Anthropic's API spending cap is logged by OpenCodex as an ordinary HTTP 400.
+// Only the provider message from the refused turn distinguishes it from malformed input.
+function quotaMessage(raw){
+  let message=raw;
+  while(typeof message==='string'){
+    if(/^(?:You have reached your specified API usage limits?\b|Your credit balance is too low to access the Anthropic API\b)/i.test(message))return message;
+    const json=message.replace(/^Provider error 400:\s*/i,'').trim();
+    if(!json.startsWith('{'))break;
+    try{message=JSON.parse(json)?.error?.message;}catch{break;}
+  }
+  return null;
+}
+function checkQuotaTurn(check,owner){
+  const file=owner.file||pace.sessionFile(owner.threadId);
+  if(!file)return;
+  let stat;try{stat=fs.statSync(file);}catch(error){if(error.code==='ENOENT')return;throw error;}
+  if(check.file===file&&check.size===stat.size)return;
+  check.file=file;check.size=stat.size;
+  const tail=readRange(file,Math.max(0,stat.size-8*1024*1024),stat.size).toString('utf8');
+  let context=null;
+  for(const line of tail.split('\n')){
+    if(!line.includes('"turn_context"')&&!line.includes('"task_complete"')&&!line.includes('"task_started"')&&!line.includes('"turn_aborted"'))continue;
+    let row;try{row=JSON.parse(line);}catch{continue;}
+    const p=row.payload||{}, at=Date.parse(row.timestamp);
+    if(row.type==='turn_context'){context={model:p.model,id:p.turn_id,at};continue;}
+    if(row.type!=='event_msg')continue;
+    if(p.type==='task_started'){context=null;continue;}
+    if(p.type!=='task_complete'&&p.type!=='turn_aborted')continue;
+    if(context?.model===check.model&&context.at<=check.at&&at>=check.at&&(!p.turn_id||!context.id||p.turn_id===context.id)){
+      return {message:quotaMessage(p.error?.message)};
+    }
+    context=null;
+  }
+}
 const hitOf=(owner,row)=>({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
 function readRange(file,from,to){
   const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(to-from);
@@ -138,10 +180,9 @@ function scan(state,threads){
   try{size=fs.statSync(file).size;}catch{return [];}
   const owners=new Map(threads.map(item=>[hashId(item.threadId),item]));
   const first=state.usageOffset===undefined||size<state.usageOffset;
-  let text;
+  let text='';
   if(first){text=readRange(file,Math.max(0,size-32*1024*1024),size).toString('utf8');state.usageOffset=size;}
-  else{
-    if(size===state.usageOffset)return [];
+  else if(size>state.usageOffset){
     const buffer=readRange(file,state.usageOffset,state.usageOffset+Math.min(size-state.usageOffset,64*1024*1024));
     const complete=buffer.lastIndexOf(10);if(complete<0)return [];
     state.usageOffset+=complete+1;text=buffer.subarray(0,complete).toString('utf8');
@@ -154,9 +195,52 @@ function scan(state,threads){
     const model=row.requestedModel||row.model,at=Number(row.timestamp)||0;
     if(model&&row.status>=200&&row.status<300&&!(ok[keyOf(model)]>=at))ok[keyOf(model)]=at;
     if(model&&isLimit(row)&&!(refused[keyOf(model)]>=at))refused[keyOf(model)]=at;
-    if(owners.has(row.conversationId))latest.set(row.conversationId,row);
+    if(owners.has(row.conversationId)){
+      latest.set(row.conversationId,row);
+      const switched=state.modelSwitch?.[owners.get(row.conversationId).threadId];
+      if(switched&&!switched.respondedAt&&model===switched.current&&at>=switched.since&&row.status>=200&&row.status<300&&row.usage?.outputTokens>0)switched.respondedAt=at;
+    }
   }
-  return [...latest].filter(([,row])=>isLimit(row)&&(!first||Date.now()-Number(row.timestamp)<FALLBACK_MS)).map(([id,row])=>hitOf(owners.get(id),row));
+  const checks=state.pendingQuotaChecks||={},hits=[];
+  for(const [id,row] of latest){
+    delete checks[id];
+    if(first&&Date.now()-Number(row.timestamp)>=FALLBACK_MS)continue;
+    const owner=owners.get(id);
+    if(isLimit(row))hits.push(hitOf(owner,row));
+    else if(row.status===400&&keyOf(row.requestedModel||row.model)==='anthropic-apikey/'){
+      checks[id]={model:row.requestedModel||row.model,at:Number(row.timestamp)};
+    }
+  }
+  // The terminal error may arrive after the usage row. Check it even on a poll with no new requests.
+  for(const [id,check] of Object.entries(checks)){
+    const owner=owners.get(id);
+    if(!owner||!Number.isFinite(check.at)||Date.now()-check.at>=FALLBACK_MS){delete checks[id];continue;}
+    const result=checkQuotaTurn(check,owner);
+    if(!result)continue;
+    delete checks[id];
+    if(!result.message)continue;
+    const key=keyOf(check.model),until=retryAt(result.message,check.at);
+    refused[key]=Math.max(refused[key]||0,check.at);
+    hits.push({...owner,model:check.model,at:check.at,error:result.message.slice(0,200),
+      quotaReset:until?{until,basis:ERROR_BASIS,fromError:true}:{until:check.at+FALLBACK_MS,basis:FALLBACK_BASIS}});
+  }
+  if(Object.keys(checks).length)state.pendingQuotaChecks=checks;
+  else delete state.pendingQuotaChecks;
+  return hits;
+}
+function trackSolWindow(state,row){
+  const p=row.payload||{};
+  if(row.type==='turn_context'){
+    state.quotaTurnModel=p.model;
+    if(catalog.identity(p.model)?.tier==='sol')delete state.solWindow;
+    return;
+  }
+  if(row.type==='event_msg' && ['task_started','turn_aborted','task_complete'].includes(p.type)){delete state.quotaTurnModel;return;}
+  if(row.type!=='event_msg'||p.type!=='token_count'||catalog.identity(state.quotaTurnModel)?.tier!=='sol'||p.rate_limits?.limit_id!=='codex')return;
+  const window=[p.rate_limits.primary,p.rate_limits.secondary].find(w=>w?.window_minutes===10080);
+  if(window && Number.isFinite(window.used_percent)&&window.used_percent>=0&&window.used_percent<=100 && Number.isFinite(window.resets_at)){
+    state.solWindow={model:state.quotaTurnModel,remaining:100-window.used_percent,until:window.resets_at*1000,at:Date.parse(row.timestamp)};
+  }
 }
 // The latest model and reasoning a thread runs with, from its own rollout.
 function settingsOf(threadId){
@@ -177,15 +261,15 @@ function fullAccess(settings){
   if(!settings?.approvalPolicy)return null;
   return settings.approvalPolicy==='never'&&(!settings.sandbox||settings.sandbox==='danger-full-access');
 }
-function publish(run,state,now=Date.now()){
+function publish(run,state,now=Date.now(),fourth=null){
   const limits=Object.fromEntries(Object.entries(state.rateLimits||{}).filter(([,item])=>item.until>now)
     .map(([key,item])=>[key,{until:new Date(item.until).toISOString(),basis:item.basis,model:item.model}]));
   const sol=lastResort();
-  const body={chain:['anthropic/','anthropic-apikey/',...(sol?[sol]:[])],limits,
+  const body={chain:['anthropic/','anthropic-apikey/',...(sol?[sol]:[])],limits,...(fourth?{fourthExecutorModel:fourth}:{}),
     rule:'主線限速依 chain 選可用備援。子代理只在執行主線同一家選可用模型。',
     updatedAt:new Date(now).toISOString()};
   const file=path.join(run,'model-fallback.json');
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);
   return body;
 }
-module.exports={FALLBACK_MS,lastResort,hashId,keyOf,chainFor,limited,next,retryAt,errorReset,resetFor,refine,recovered,scan,settingsOf,fullAccess,publish};
+module.exports={FALLBACK_MS,trackSolWindow,lastResort,hashId,keyOf,chainFor,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,scan,settingsOf,fullAccess,publish};

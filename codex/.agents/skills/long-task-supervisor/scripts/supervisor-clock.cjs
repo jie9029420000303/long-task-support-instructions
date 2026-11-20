@@ -63,6 +63,7 @@ function migrateFailedCommands(state){
 }
 function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   const payload=row.payload||{},at=row.timestamp||now();
+  require('./model-fallback.cjs').trackSolWindow(state,row);
   // The clue stores only a source locator and command hash, never the command or output itself.
   parallelTest.track(state,row,commandsOf(payload),sourceFile?{path:sourceFile,offset:sourceOffset}:null,boundAt);
   // A permission mode is context, not evidence that any operation was rejected.
@@ -137,6 +138,7 @@ function readExecutor(state,binding){
   const switched=Boolean(previous&&previous!==file);
   let size;try{size=fs.statSync(file).size;}catch(error){restore();return sourceReadError(state,previous||file,error);}
   const truncated=size<(state.executorOffset||0);
+  if(switched||truncated){delete state.quotaTurnModel;delete state.solWindow;}
   if(switched||truncated)parallelTest.markSourceUncertain(state,switched?previous:file);
   if(truncated)state.executorOffset=0;
   if(size===state.executorOffset){
@@ -243,7 +245,7 @@ function check(run,binding,state,force=false){
       return Boolean(match)&&Number(match[3])===tier&&tierEnd(match[1],match[2],tier)>=end;});
   };
   const tierOnce=(item,tier)=>tierDue(item,tier)&&once('overdue:'+item.id+'@'+item.startedAt+'/'+item.executorBaselineMinutes+'x'+tier);
-  const overdue=paced.packages.filter(item=>{const tier=overdueTier(item);return Boolean(tier)&&tierOnce(item,tier);});
+  const overdue=paced.packages.filter(item=>{const tier=overdueTier(item);return Boolean(tier)&&!require('./review-followup.cjs').covered(state,snapshot,item,Date.now())&&tierOnce(item,tier);});
   // One analysis for the batch (Jay 2026-10-15, D3): an overdue wake also brings the other in-flight packages already at
   // 1.2x and records their 1.5x tier as announced; their 3x still wakes on its own.
   const nearOverdue=overdue.length?paced.packages.filter(item=>!overdue.includes(item)&&item.ratio>=OVERDUE_NEAR&&item.ratio<OVERDUE_TIERS[0]&&tierOnce(item,OVERDUE_TIERS[0])):[];

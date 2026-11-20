@@ -51,6 +51,8 @@ function init() {
   // run here, so the hourly check never starts empty (the 2026-10-13 v117 run had no login list at all).
   need(Array.isArray(input.loginSites), 'loginSites is required: the login list checked at start step 1 with login-check.cjs, or [] when the task uses no login');
   login.validate(input.loginSites);
+  const fourth=input.fourthExecutorModel && require('./model-fallback.cjs').availableFourth(input.fourthExecutorModel);
+  if(input.fourthExecutorModel)need(fourth,'The fourth executor model and effort must be in the current Codex catalog');
   fs.mkdirSync(path.dirname(run), { recursive: true });
   fs.mkdirSync(run, { recursive: false });
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
@@ -59,6 +61,7 @@ function init() {
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
   fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   const binding = {
+    ...(fourth?{fourthExecutorModel:fourth}:{}),
     platform: 'codex', projectRoot: input.projectRoot, allowedRoots: input.allowedRoots.concat(run),
     executorId: input.executorId, supervisorId: input.supervisorId,
     callerTurnId: currentTurn(input.supervisorId),
@@ -227,6 +230,8 @@ function decision() {
   const proposed = validateDecision(binding, contract, event, resolved ? current : input, resolved ? [] : state.eventQueue);
   if (resolved) return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: true, queued: 0, status: watchNow() };
   need(path.resolve(other) === require('./decision-commit.cjs').draft(run,event.id), 'Use the new isolated draft path from context; reconcile old drafts before copying them');
+  require('./package-review.cjs').requireScope(run,binding,event,proposed);
+  require('./review-followup.cjs').validateUnblock(run,binding,event,proposed);
   const submitted = require('./decision-commit.cjs').submit(run,binding,contract,event,state,input,bytes);
   return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: false, queued:(state.eventQueue || []).length, ...submitted, status: watchNow() };
 }

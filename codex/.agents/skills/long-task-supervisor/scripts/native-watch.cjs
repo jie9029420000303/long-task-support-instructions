@@ -254,13 +254,18 @@ function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
 // subagents that ran above the skill default since the last one, and with the Taipei time it was sent (2026-11-10).
 // Only the sent text carries them: receipts, saved deliveries and their hashes keep the bare prompt, so a delivery
 // saved before an upgrade still matches.
-function outgoing(target,prompt){
+function outgoing(target,prompt,key=''){
   if(target!==binding.executorId||isPaused())return prompt;
   let reminder='';
   try{
     const found=executionWake.modelReminder(pace.agentRuns(binding),{mainModel:state.executorSettings?.model,reported:state.modelReminded||[]});
     if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
   }catch{}
+  if(key.startsWith('answer-') && state.pending?.kind==='submission'){
+    const decision=require('./decision-commit.cjs').readSnapshot(run,state.pending.id)?.decision;
+    if(decision?.packageRulings)prompt+='\n當輪以 dispatch.cjs collect 登記本次裁決，讀回各包剩餘條文後再推進。'+
+      JSON.stringify({ruling:{eventId:state.pending.id,revision:state.pending.revision},packageRulings:decision.packageRulings});
+  }
   return prompt+'\n\n'+executionWake.EXECUTOR_PUSH+reminder+'\n'+executionWake.sentLine();
 }
 function assistantMarker(detail) {
@@ -327,17 +332,12 @@ async function reconcile(delivery) {
   if (await provenLost(delivery)) {
     (state.lostDeliveries ||= []).push({target:delivery.target,key:delivery.key,sentAt:delivery.at,resentAt:now()});
     delivery.resentAt = now();
-    delivery.sent = await rpc('send_message_to_thread',{threadId:delivery.target,prompt:deliveryMarker(delivery.key)+'\n'+outgoing(delivery.target,delivery.prompt)});
+    delivery.sent = await rpc('send_message_to_thread',{threadId:delivery.target,prompt:deliveryMarker(delivery.key)+'\n'+outgoing(delivery.target,delivery.prompt,delivery.key),...(delivery.route||{})});
     delivery.at = now(); delivery.phase = 'resent-awaiting-readback';
     checkpoint();
     return reconcile(delivery);
   }
   throw Error('Delivery uncertain: ' + delivery.key);
-}
-// A thread switched for a rate limit gets its original model back on the first delivery after the limit resets.
-function restoreFor(target) {
-  const item = state.modelSwitch?.[target];
-  return item && !item.restored && Date.now() >= item.until ? item : null;
 }
 async function sendAndRead(target, prompt, key, options = {}) {
   need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
@@ -358,14 +358,21 @@ async function sendAndRead(target, prompt, key, options = {}) {
     await reconcile(state.inflight);
     return;
   }
-  state.inflight = {target,prompt,key,at:now(),phase:'sending'};
+  // A regular delivery after reset can also carry the restoration, including while the thread is busy.
+  const activeRoute=state.modelSwitch?.[target];
+  const lowSol=target===binding.executorId && state.solWindow?.model===activeRoute?.original &&
+    state.solWindow?.until>Date.now() && state.solWindow.remaining<50;
+  const due=activeRoute && (!state.routeWaiting?.[target]) && activeRoute.until<=Date.now() && !lowSol && !fallback.limited(state,activeRoute.original);
+  const carryRestore=!options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt);
+  if(carryRestore)options={model:activeRoute.original,thinking:activeRoute.effort};
+  const route=options.model?{model:options.model,...(options.thinking?{thinking:options.thinking}:{})}:{};
+  state.inflight = {target,prompt,key,at:now(),phase:'sending',route};
   checkpoint();
   // If the process exits after send but before its receipt, never issue a second send.
-  const restore = options.model ? null : restoreFor(target);
-  const model = options.model || restore?.original, thinking = options.model ? options.thinking : restore?.effort;
-  const sent = await rpc('send_message_to_thread',{threadId:target,prompt:deliveryMarker(key)+'\n'+outgoing(target,prompt),
-    ...(model?{model}:{}),...(model&&thinking?{thinking}:{})});
-  if (restore) restore.restored = now();
+  const sent = await rpc('send_message_to_thread',{threadId:target,prompt:deliveryMarker(key)+'\n'+outgoing(target,prompt,key),...route});
+  if(carryRestore && !activeRoute.restored){
+    activeRoute.restored=now();activeRoute.current=activeRoute.original;activeRoute.since=Date.now();delete activeRoute.respondedAt;
+  }
   state.inflight.sent = sent;
   state.inflight.phase = 'sent-awaiting-readback';
   checkpoint();
@@ -482,6 +489,13 @@ async function refuseDecision(event,file,error){
 function ruled(event) { if (!['progress_review','dispatch_review'].includes(event.kind)) state.lastDecisionAt = Date.now(); }
 async function pendingDecision() {
   const event = state.pending;
+  if(event.kind==='dispatch_review' && !(state.messages||[]).some(m=>m.key==='review-'+event.id) && !state.inflight){
+    const preflight=stillCurrent(run,binding,state,event);
+    if(preflight.current===false){
+      releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true};state.seen.push(event.id);
+      state.pending=null;state.phase='watching';checkpoint();return;
+    }
+  }
   if (!(state.supervisorWake ||= {})[event.id]) {
     const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
     state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),activityMarker:require('./supervisor-response.cjs').activityMarker(detail),wakeSentAt:null};checkpoint();
@@ -582,6 +596,7 @@ async function pendingDecision() {
     return;
   }
   if (decision.disposition === 'observe') {
+    if(decision.collectionNote)require('./review-followup.cjs').noteCollection(run,event.id,decision.collectionNote);
     if(decision.wait){
       const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
       observeActivity(state,supervisorPollFromThread(detail),binding,Date.now(),'supervisor');
@@ -611,6 +626,7 @@ async function pendingDecision() {
   const given = decision.instruction;
   state.instruction = {eventId:event.id,what:given?.what || decision.reply.replace(/\s+/g,' ').slice(0,200),doneWhen:given?.doneWhen || null,
     sentAt:Date.now(),deadlineMs:(given?.deadlineMinutes || 30)*60000,misses:0};
+  state.coveredOverdue=require('./review-followup.cjs').coverage(clock.snapshotOf(run,binding),event,given?.coveredOverdue,state.instruction.sentAt+state.instruction.deadlineMs);
   if(event.kind==='progress_review'){state.lastProgressReviewAt=Date.now();state.failedCommands={};}
   (state.resolved ||= {})[event.id] = {event,decision,decisionSha256:submitted.decisionSha256};
   if(event.kind==='progress_review')require('./parallel-test.cjs').clear(state,event);
@@ -729,14 +745,18 @@ async function handleAmendRequest(){
 // in the configured chain; a refused subagent is re-dispatched in the current executor's family.
 async function handleRateLimits() {
   if (binding.modelFallback === false) return;
+  const awaitingOutput=Object.values(state.modelSwitch||{}).filter(record=>!record.restored&&!record.respondedAt);
   const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path,file:item.sourceFile}));
   const hits = fallback.scan(state,[{role:'supervisor',threadId:binding.supervisorId},{role:'executor',threadId:binding.executorId},...subagents]);
   for (const hit of hits) {
     const key = fallback.keyOf(hit.model), known = state.rateLimits?.[key];
     // The refused thread's own rollout names the reset; its file is kept so later looks can still find that error.
     const files = [hit.file || pace.sessionFile(hit.threadId)].filter(Boolean);
-    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...fallback.resetFor(key,hit.at,files)};
-    else known.files = [...new Set([...(known.files || []),...files])];
+    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...(hit.quotaReset||fallback.resetFor(key,hit.at,files))};
+    else {
+      known.files = [...new Set([...(known.files || []),...files])];
+      if(hit.quotaReset?.fromError)Object.assign(known,hit.quotaReset);
+    }
     const queue = state.switchQueue ||= [];
     if (!queue.some(item => item.threadId === hit.threadId && item.model === hit.model)) queue.push(hit);
   }
@@ -745,64 +765,89 @@ async function handleRateLimits() {
     item.files = Object.entries(state.modelSwitch || {}).filter(([,record]) => fallback.keyOf(record.original) === key)
       .map(([threadId]) => pace.sessionFile(threadId)).filter(Boolean);
   const refined = fallback.refine(state), back = fallback.recovered(state);
-  if (hits.length || refined || back) { fallback.publish(run,state); checkpoint(); }
-  while (state.switchQueue?.length && !state.inflight) {
-    const hit = state.switchQueue[0], record = state.modelSwitch?.[hit.threadId];
-    if (record && !record.restored && record.current !== hit.model) {
-      // A refusal for a model this thread already left is stale. A thread that runs the refused model again (switched
-      // back by hand or by a restore) was refused anew and is switched again.
-      if (fallback.settingsOf(hit.threadId)?.model !== hit.model) { state.switchQueue.shift(); checkpoint(); continue; }
-      record.restored = now(); record.restoredBy = 'thread-runs-refused-model';
-    }
-    const original = record && !record.restored ? record.original : hit.model;
-    const executorModel = hit.role==='subagent' ? fallback.settingsOf(binding.executorId)?.model || null : original;
-    const target = fallback.next(original,hit.model,hit.role,state,Date.now(),executorModel);
-    const until = state.rateLimits?.[fallback.keyOf(original)]?.until || Date.now() + fallback.FALLBACK_MS;
-    state.switchQueue.shift();
-    // The reset already passed (a watcher started after it reads the refusal): no switch, and a stopped chat continues
-    // on its original model at once instead of waiting for its next event.
-    if (until <= Date.now()) {
-      const effort = record?.effort || (fallback.settingsOf(hit.threadId) || {}).effort;
-      if (record && !record.restored) { record.restored = now(); record.restoredBy = 'reset-passed'; }
-      checkpoint();
-      if (hit.role !== 'subagent') await sendAndRead(hit.threadId,
-        '額度限速：' + hit.model + ' 於 ' + clockText(hit.at) + ' 被拒；' + original + ' 的恢復時間 ' + clockText(until) + ' 已過，本對話用 ' + original +
-        ' 從中斷處接續原本的工作，不需重述或重做已完成的部分。',
-        'rate-resume-' + hit.threadId.slice(0,8) + '-' + hit.at,{model:original,thinking:effort});
-      continue;
-    }
-    if (hit.role === 'subagent') {
-      const notice = 'subagent:' + fallback.keyOf(hit.model) + '@' + state.rateLimits[fallback.keyOf(hit.model)].since + ':' + executorModel;
-      if ((state.rateNotices ||= []).includes(notice)) { checkpoint(); continue; }
-      state.rateNotices.push(notice); checkpoint();
-      const action = target ? '依目前執行主線重派，候選為 ' + target + '。請用派工工具清單核對模型與推理。' :
-        '目前沒有可確認的相容候選。依執行主線實際模型與派工清單核對；仍無同家模型可用時只延後受影響的包，其他工作繼續。';
-      await sendAndRead(binding.executorId,
-        '子代理 ' + (hit.path || hit.threadId.slice(0,8)) + ' 使用 ' + hit.model + ' 遇額度限速（' + hit.error + '）。' + action +
-        ' 限速紀錄見 ' + path.join(run,'model-fallback.json') + '，' + clockText(until) + ' 後再依主線選模。已完成的成果照常收回。',
-        'rate-subagent-' + require('node:crypto').createHash('sha256').update(notice).digest('hex').slice(0,16));
-      continue;
-    }
-    if (!target) { state.rateLimitedAll = {threadId:hit.threadId,role:hit.role,model:hit.model,error:hit.error,at:now()}; checkpoint(); continue; }
-    const settings = fallback.settingsOf(hit.threadId) || {};
-    (state.modelSwitch ||= {})[hit.threadId] = {role:hit.role,original,current:target,effort:settings.effort || null,since:Date.now(),until,restored:null};
-    state.modelSwitches = (state.modelSwitches || 0) + 1; checkpoint();
-    await sendAndRead(hit.threadId,
-      '額度限速：' + hit.model + ' 被拒（' + hit.error + '）。本對話自此改用 ' + target + '，預計 ' + clockText(until) + ' 換回 ' + original +
-      '。請從中斷處接續原本的工作，不需重述或重做已完成的部分。',
-      'model-switch-' + hit.threadId.slice(0,8) + '-' + state.modelSwitches,{model:target,thinking:settings.effort});
+  // Keep one durable route decision per role. The next poll can resume it without a new failure or user message.
+  const waiting=state.routeWaiting||={};
+  if(state.rateLimitedAll?.threadId && !state.routeWaitMigrated){
+    const legacy=state.rateLimitedAll;
+    waiting[legacy.threadId]={...legacy,at:Date.parse(legacy.at)||Date.now()};
   }
-  // A supervisor moved for a limit gets its model back once the limit ends, without waiting for its next event
-  // (2026-11-09: WEB's supervisor, working again after 23:40, stayed on the paid key). A busy supervisor is left alone.
-  const restore = restoreFor(binding.supervisorId);
-  if (restore && !state.pending && !state.inflight) {
-    if (fallback.settingsOf(binding.supervisorId)?.model === restore.original) { restore.restored = now(); restore.restoredBy = 'already-on-original'; checkpoint(); }
-    else {
-      const detail = unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:200}));
-      if (detail.thread?.status?.type !== 'active') await sendAndRead(binding.supervisorId,
-        'LONG_TASK_MODEL_RESTORED：額度已恢復，本對話換回 ' + restore.original + '。不用處理，用一句話結束回合即可。',
-        'model-restore-' + binding.supervisorId.slice(0,8) + '-' + restore.since);
+  state.routeWaitMigrated=true;
+  if(state.switchQueue?.length){
+    for(const hit of state.switchQueue)waiting[hit.threadId]=hit;
+    state.switchQueue=[];checkpoint();
+  }
+  if(awaitingOutput.some(record=>record.respondedAt))checkpoint();
+  const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
+  // This incremental reader also runs while a decision is pending.
+  clock.readExecutor(state,binding);
+  const solWindow=state.solWindow;
+  const lowSol=solWindow?.until>Date.now() && solWindow.remaining<50;
+  const currentExecutor=state.executorSettings?.model;
+  const budgetChange=lowSol && currentExecutor===solWindow.model;
+  if(!active.length && !Object.keys(waiting).length && !budgetChange && !hits.length && !refined && !back)return;
+  const fourths=require('./openrouter-route.cjs').routes(binding.fourthExecutorModel);
+  const fourth=fourths[0]||null;
+  if(hits.length||refined||back){fallback.publish(run,state,Date.now(),fourth);checkpoint();}
+  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[])]);
+  for(const id of ids){
+    if(state.inflight)return;
+    const hit=waiting[id], record=state.modelSwitch?.[id], switched=record&&!record.restored;
+    const role=hit?.role||record?.role||'executor';
+    if(role==='subagent'){
+      const owner=fallback.settingsOf(binding.executorId)?.model;
+      const target=fallback.next(hit.model,hit.model,role,state,Date.now(),owner);
+      const notice='rate-subagent-'+fallback.hashId(id+'/'+hit.at+'/'+(owner||''));
+      await sendAndRead(binding.executorId,'子代理 '+(hit.path||id)+' 遇額度限速。'+(target?'依目前執行主線重派，候選為 '+target+'。':'依執行主線派工清單重查可用模型，先繼續其他工作。'),notice);
+      delete waiting[id];checkpoint();continue;
     }
+    if(record?.delivery){
+      const msg=record.delivery;
+      await sendAndRead(id,msg.prompt,msg.key,{model:record.current,thinking:msg.effort});
+      delete record.delivery;checkpoint();
+    }
+    const time=Date.now();
+    if(hit && switched && record.current!==hit.model && fallback.settingsOf(id)?.model!==hit.model){
+      delete waiting[id];checkpoint();continue;
+    }
+    const original=switched?record.original:hit?.model||currentExecutor;
+    const current=hit?.model||(switched?record.current:currentExecutor);
+    let chain=fallback.chainFor(original,role);
+    if(original===solWindow?.model && (budgetChange||record?.budgetOrigin))chain=[original];
+    if(!chain.includes(original) && !original?.startsWith('openrouter/'))chain.unshift(original);
+    if(role==='executor')chain.push(...fourths.map(r=>r.model));
+    const candidates=chain.filter(model=>model && !fallback.limited(state,model,time) &&
+      !(switched && model===original && record.until>time && !record.budgetOrigin && !state.rateLimits?.[fallback.keyOf(original)]) &&
+      !(role==='executor' && lowSol && model===solWindow.model));
+    const target=candidates[0];
+    if(!target){
+      if(!waiting[id])waiting[id]={threadId:id,model:current,role,at:time,error:'等待可用順位'};
+      delete state.rateLimitedAll;
+      continue;
+    }
+    if(!hit && target===current)continue;
+    if(!hit && !budgetChange && switched && current!==target && await targetBusy(id))continue;
+    // Prevent old refusal data from pulling a healthy manually selected model into the chain.
+    if(!hit && switched && target===original && (()=>{const actual=fallback.settingsOf(id);return actual?.model===original && Date.parse(actual.at)>=record.since;})() && !record.delivery){
+      record.restored=now();record.restoredBy='already-on-original';checkpoint();continue;
+    }
+    const restored=target===original;
+    const settings=fallback.settingsOf(id)||{};
+    const effort=(switched?record.effort:settings.effort)||null;
+    const targetEffort=fourths.some(r=>r.model===target)?'max':effort;
+    const until=state.rateLimits?.[fallback.keyOf(original)]?.until || (lowSol?solWindow.until:time);
+    const prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：額度已恢復。')+'本對話用 '+target+' 從中斷處接續原工作。':
+      '額度限速或執行訂閱分流：本對話改用 '+target+'，從已確認的進度接續。';
+    state.modelSwitches=(state.modelSwitches||0)+1;
+    const key='model-switch-'+id.slice(0,8)+'-'+state.modelSwitches;
+    (state.modelSwitch||={})[id]={role,original,current:target,effort,since:time,until,restored:null,
+      budgetOrigin:record?.budgetOrigin||(!hit&&original===solWindow?.model),delivery:{key,prompt,effort:targetEffort}};
+    delete waiting[id];
+    if(state.rateLimitedAll?.threadId===id)delete state.rateLimitedAll;
+    checkpoint();
+    await sendAndRead(id,prompt,key,{model:target,thinking:targetEffort});
+    const updated=state.modelSwitch[id];delete updated.delivery;
+    if(restored)updated.restored=now();
+    fallback.publish(run,state,time,fourth);checkpoint();
   }
 }
 async function watch() {
@@ -868,7 +913,6 @@ async function watch() {
     if (state.eventQueue?.length) {
       const event = state.eventQueue.shift();
       state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
-      await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
       continue;
     }
     clock.tickSleep(state);
@@ -889,7 +933,7 @@ async function watch() {
     // Unfilled seats, an unlisted agent and a package-file mismatch are re-checked for 3 minutes before they wake the model.
     audit.newIssues=holdDispatch(state,audit.newIssues);
     const auditEvent=paused?null:dispatchEvent(audit);checkpoint();
-    if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();await sendAndRead(binding.supervisorId,reviewPrompt(auditEvent),'review-'+auditEvent.id);continue;}
+    if(auditEvent){markAnnounced(state,auditEvent);state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=auditEvent;state.phase='awaiting_decision';checkpoint();continue;}
     const response = await waitExecutor();
     const poll = response.polls?.find(item => item.thread?.id === binding.executorId);
     need(poll,'Bound executor missing from wait result');
@@ -952,15 +996,13 @@ async function watch() {
       const hadCheckedWait=Boolean(state.checkedWait),found=paused?null:clock.check(run,binding,state,turnEndReads>0),silent=paused?false:progressDue(state);
       // A wait that just ended leaves one line in the run whether or not it is reviewed (checked-wait.cjs).
       if(hadCheckedWait&&!state.checkedWait)checkedWait.logRelease(run,state);
-      const allLimited=state.rateLimitedAll&&!state.rateLimitedAll.announced?state.rateLimitedAll:null;
-      if(allLimited)allLimited.announced=now();
-      if(silent||found||allLimited){
-        const reasons=[...(silent?[hadCheckedWait&&state.waitReleased?.review!==false?'wait_changed':'silence']:[]),...(found?.reasons||[]),...(allLimited?['rate_limited_all']:[])];
+      if(silent||found){
+        const reasons=[...(silent?[hadCheckedWait&&state.waitReleased?.review!==false?'wait_changed':'silence']:[]),...(found?.reasons||[])];
         const {reasons:_r,pace:_p,...extra}=found||{};
         const event=progressEvent(state,Date.now(),{reasons,pace:found?.pace||clock.paceNow(run,binding,state),overdue:found?.overdue||[],
           baselineMissing:found?.baselineMissing||[],processStalled:found?.processStalled||[],executorBlocked:found?.executorBlocked||[],
           resourceUnderused:found?.resourceUnderused||[],failedCommands:found?.failedCommands||[],
-          ...extra,...(allLimited?{rateLimitedAll:allLimited}:{})});
+          ...extra});
         state.pendingSupervisorInputMarker=state.lastSupervisorInputMarker||null;state.pending=event;state.phase='awaiting_decision';checkpoint();
         await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-'+event.id);
         continue;

@@ -1,5 +1,7 @@
 # 常用格式摘要
 
+部署與逐題收件依 [執行協定](../../goal-orchestrator/references/execution.md#部署目標與收件)。執行端讀回裁決編號、該次送審 revision 和 appliedRulings；監督處理無人解卡、階段採認及合併進度提醒時，讀[事件處理](event-review.md)。
+
 壓縮後只重讀這一頁（使用者 2026-10-29 定案）。這裡只收常用的格式與指令；規則以 SKILL.md 和各 references 為準，本頁沒寫到的才回頭讀原文件。`<skill>` 是已安裝技能的 `scripts` 目錄，`RUN` 是本 run 目錄。
 
 ## 執行端

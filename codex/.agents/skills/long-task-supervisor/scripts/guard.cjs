@@ -105,6 +105,20 @@ function validateDecision(config, contract, event, decision, queue = []) {
     // by the watcher): observing it needs no new wait.
     } else if (quietReview(event) && !(event.executorWorking === true && (event.reasons || []).includes('wait_changed'))) need(decision.wait, 'Progress observe requires a checked wait');
   }
+  if(decision.collectionNote!==undefined)need(event.kind==='progress_review' && decision.disposition==='observe' && typeof decision.collectionNote==='string' && decision.collectionNote.trim(), 'Collection notes belong to an observed progress review');
+  if(decision.instruction?.coveredOverdue!==undefined){
+    const ids=decision.instruction.coveredOverdue;
+    need(event.kind==='progress_review' && decision.disposition==='reply' && Array.isArray(ids) && ids.length &&
+      ids.every(id=>event.overdue?.includes(id)||event.nearOverdue?.includes(id)), 'Cover only the overdue packages checked in this reply');
+  }
+  if(decision.packageRulings!==undefined){
+    const rows=decision.packageRulings;
+    need(event.kind==='submission' && ['reply','reject'].includes(decision.disposition) && Array.isArray(rows) && rows.length &&
+      new Set(rows.map(r=>r?.id)).size===rows.length && rows.every(r=>typeof r?.id==='string' &&
+      Array.isArray(r.accepted)&&Array.isArray(r.remaining)&&[...r.accepted,...r.remaining].length &&
+      new Set([...r.accepted,...r.remaining]).size===r.accepted.length+r.remaining.length &&
+      [...r.accepted,...r.remaining].every(id=>contract.criteria.some(c=>c.id===id))), 'Each package ruling needs distinct scoped criteria');
+  }
   if(decision.wait){need(decision.disposition==='observe','Only observe can establish a checked wait');validateWait(config,decision.wait);}
   if (decision.disposition === 'accept') {
     if(contract.contractStateSha256)need(decision.contractStateSha256===contract.contractStateSha256,'Acceptance must bind the current effective contract');
@@ -160,6 +174,6 @@ function validateDecision(config, contract, event, decision, queue = []) {
   }
   return decision;
 }
-module.exports = { hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
+module.exports = { packageReview:()=>require('./package-review.cjs'), hash, read, inside, need, validateContract, validateDecision, PROGRESS_REVIEW_MS,
   REVIEW_INTERVAL_MS, OVERDUE_TIERS, OVERDUE_NEAR, REPEAT_FAILURES, BLOCKED_MS, NO_EVENT_REVIEW_MS, IDLE_WORK_MS,
   INSTRUCTION_DEADLINE_MS, UNPLANNED_MS, ONLINE_MS, AUTOMATION_CHECK_MS, PLATFORM_ERROR_MS, quietReview, executorBusy };

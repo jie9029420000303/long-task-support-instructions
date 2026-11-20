@@ -96,6 +96,78 @@ test('the refused turn\'s own error wins over the quota cache and the five-hour 
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
+test('an API spending-cap 400 after the subscription refusal advances the same mainline to Sol',async()=>{
+  const f=fixture(),id=fallback.hashId('executor-qa'),usage=f.env.OPENCODEX_USAGE_FILE;
+  f.env.CODEX_SUPERVISOR_DECISION_POLL_MS='100';
+  try{
+    f.start();await until(()=>read(f.statePath).usageOffset!==undefined);
+    f.refuse('executor-qa',opus);
+    await until(()=>f.calls().some(c=>c.model===paid));
+    const at=Date.now(),turn='paid-retry',reset=new Date(at+31*86400000).toISOString().slice(0,10);
+    const message='You have reached your specified API usage limits. You will regain access on '+reset+' at 00:00 UTC.';
+    line(f.executorLog,{timestamp:iso(at),type:'turn_context',payload:{model:paid,turn_id:turn}});
+    line(usage,{conversationId:id,timestamp:at,requestedModel:paid,status:400,errorCode:'invalid_request_error',failureCause:'payload-rejected'});
+    await until(()=>read(f.statePath).pendingQuotaChecks?.[id]);
+    assert.ok(!f.calls().some(c=>c.model==='gpt-6.10-sol'));
+    line(f.executorLog,{timestamp:iso(Date.now()),type:'event_msg',payload:{type:'task_complete',turn_id:turn,
+      error:{message:JSON.stringify({error:{message:'Provider error 400: '+JSON.stringify({error:{message}})}})}}});
+    await until(()=>f.calls().some(c=>c.model==='gpt-6.10-sol'));
+    const switched=()=>read(f.statePath).modelSwitch['executor-qa'];
+    assert.equal(switched().original,opus);
+    assert.equal(read(f.statePath).rateLimits['anthropic-apikey/'].until,Date.parse(reset+'T00:00:00Z'));
+    assert.ok(!switched().respondedAt,'accepting the switch message does not prove the model answered');
+    line(usage,{conversationId:id,timestamp:Date.now(),requestedModel:'gpt-6.10-sol',status:200,usage:{outputTokens:19}});
+    await until(()=>switched().respondedAt);
+    assert.equal(f.calls().filter(c=>c.model==='gpt-6.10-sol').length,1);
+  }finally{await f.stop();}
+});
+
+test('a malformed API request does not trigger a paid fallback from an old or quoted quota error',()=>{
+  const root=scratch(),file=path.join(root,'thread.jsonl'),usage=path.join(root,'usage.jsonl'),at=Date.now();
+  const id=fallback.hashId('executor-qa'),owner={role:'executor',threadId:'executor-qa',file};
+  const message='You have reached your specified API usage limits.';
+  try{
+    for(const [time,model,err] of [[at-1000,paid,message],[at,paid,'Invalid request body']]){
+      line(file,{timestamp:iso(time),type:'turn_context',payload:{model}});
+      line(file,{timestamp:iso(time),type:'response_item',payload:{type:'function_call_output',output:message}});
+      line(file,{timestamp:iso(time),type:'event_msg',payload:{type:'task_complete',error:{message:err}}});
+    }
+    line(usage,{conversationId:id,timestamp:at,requestedModel:paid,status:400,errorCode:'invalid_request_error'});
+    withEnv({OPENCODEX_USAGE_FILE:usage},()=>{
+      const state={};assert.deepEqual(fallback.scan(state,[owner]),[]);
+      assert.ok(!state.pendingQuotaChecks);
+    });
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('only an executor exhausts the three normal routes into its configured and visible fourth model',async()=>{
+  const f=fixture(),model='openrouter/deepseek-deepseek-v4.1-flash-1017',fourth={model,effort:'max'};
+  try{
+    const catalogFile=path.join(f.root,'models.json'),catalog=read(f.env.OPENCODEX_MODEL_CATALOG);
+    f.env.OPENCODEX_HOME=f.root;
+    const raw='deepseek/deepseek-v4.1-flash-1017';
+    save(path.join(f.root,'config.json'),{providers:{openrouter:{modelPinnedReasoningEfforts:{[raw]:'max'},modelOpenRouterRouting:{[raw]:{only:['ambient/fp4'],allowFallbacks:false}}}}});
+    const entry={slug:model,visibility:'list',supported_reasoning_levels:[{effort:'max'}]};
+    catalog.models.push(entry);save(catalogFile,catalog);f.env.OPENCODEX_MODEL_CATALOG=catalogFile;
+    const bindingFile=path.join(f.run,'binding.json');save(bindingFile,{...f.binding,fourthExecutorModel:fourth});
+    const resetAt=Date.now()+3600000,state=read(f.statePath);
+    state.rateLimits={'anthropic/':{until:resetAt},'anthropic-apikey/':{until:resetAt}};
+    state.modelSwitch={'executor-qa':{role:'executor',original:opus,current:'gpt-6.10-sol',effort:'high',since:Date.now()-60000,until:resetAt}};
+    save(f.statePath,state);
+    f.start();await until(()=>read(f.statePath).usageOffset!==undefined);
+    f.refuse('executor-qa','gpt-6.10-sol');
+    await until(()=>f.calls().some(c=>c.model===model));
+    assert.equal(f.calls().find(c=>c.model===model).thinking,'max');
+    const stateAfter=read(f.statePath);assert.equal(stateAfter.modelSwitch['executor-qa'].effort,'high');
+    assert.deepEqual(read(path.join(f.run,'model-fallback.json')).fourthExecutorModel,fourth);
+    withEnv({OPENCODEX_HOME:f.root,OPENCODEX_MODEL_CATALOG:catalogFile},()=>{
+      assert.equal(fallback.next(opus,'gpt-6.10-sol','supervisor',stateAfter,Date.now(),opus,fourth),null);
+      assert.equal(fallback.availableFourth({...fourth,effort:'ultra'}),null);
+      entry.visibility='hide';save(catalogFile,catalog);assert.equal(fallback.availableFourth(fourth),null);
+    });
+  }finally{await f.stop();}
+});
+
 test('a refusal already followed by a success is history on every read, and each route remembers when it last worked',()=>{
   const root=scratch(),usage=path.join(root,'usage.jsonl'),threads=[{role:'supervisor',threadId:'supervisor-qa'}],state={},id=fallback.hashId('supervisor-qa');
   try{

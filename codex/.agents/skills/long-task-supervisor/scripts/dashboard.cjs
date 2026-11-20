@@ -22,19 +22,21 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},push
   const items=snapshot?.acceptance?.items||[],passed=items.filter(item=>item.status==='PASS').length;
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
   const autoReview=settings?.approvalPolicy&&settings.approvalPolicy!=='never';
-  const switched=Object.entries(state.modelSwitch||{}).filter(([,item])=>!item.restored);
+  const switched=Object.entries(state.modelSwitch||{}).filter(([,item])=>!item.restored||!item.respondedAt && item.current===item.original);
   const queued=(state.eventQueue||[]).length;
   const handling=(state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無')+
     (queued?'；另有 '+queued+' 個執行對話事件排隊，處理完依序送監督':'');
   const permission=(!settings?'尚未讀到':(autoReview?'自動審查（是否允許依實際審查結果）':'不需逐項審查（是否可操作依實際工具結果）'))+
     (state.rejectionCount?'，疑似審查拒絕紀錄 '+state.rejectionCount+' 次（待核對原始事件）':'')+
     (require('./model-fallback.cjs').fullAccess(settings)===false?'；不是完全存取，監督會請你切換一次':'');
-  const models=switched.length?switched.map(([id,item])=>who(id,binding)+' 改用 '+item.current+'，'+clock(item.until)+' 換回 '+item.original).join('；'):'無';
+  const models=switched.length?switched.map(([id,item])=>who(id,binding)+' 改用 '+item.current+
+    (item.respondedAt?'，已確認模型產生輸出':'，尚未確認模型產生輸出')+(item.current===item.original?'':'，背景持續查核較高順位')).join('；'):'無';
   const failed=state.platformError?clock(state.platformError.since)+' 執行對話被平台錯誤中斷：'+String(state.platformError.text||'').slice(0,120)+'；2 分鐘內沒恢復就叫醒監督處理':'無';
   const lines=['# 監督儀表板','','更新時間：'+clock(now)+'（台北）','','## 監看','',
     '- 背景監看：'+(alive?'運作中':'已停止')+'（狀態 '+(state.phase||'—')+(paused?'，使用者暫停中':'')+'）',
     '- 執行對話最後一次交回進度：'+clock(state.lastRealEventAt)+'（'+ago(state.lastRealEventAt,now)+'）',
     '- 等監督處理：'+handling,'- 執行對話權限：'+permission,'- 限速換模型：'+models,'- 平台錯誤：'+failed,pushLine(pushProblem)];
+  for(const [id,item] of Object.entries(state.routeWaiting||{}))lines.push('- '+who(id,binding)+' 正在等可用模型，由背景檢查恢復。');
   const response=state.pending&&state.supervisorWake?.[state.pending.id];
   if(response?.completionRecovery)lines.push('- 監督決策：上一回合已結束，這個事件仍未結案；'+
     (response.completionWakeSentAt?'已補送原事件的決策提醒，等待正式提交。':'正在補送原事件的決策提醒。'));
