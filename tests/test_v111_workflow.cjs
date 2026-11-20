@@ -60,6 +60,30 @@ function isolated(t) {
 function ok(result) { assert.equal(result.status,0,result.stderr||String(result.error)); }
 function refused(result) { assert.notEqual(result.status,0,'unexpectedly accepted the original failure'); }
 
+function compactExecutor(f) {
+  const dir=path.join(f.root,'sessions','2026','11','20');
+  fs.mkdirSync(dir,{recursive:true});
+  const old=path.join(dir,'rollout-2026-11-20T12-00-00-executor.jsonl');
+  const next=path.join(dir,'rollout-2026-11-20T12-30-00-executor_segment.jsonl');
+  const meta=JSON.stringify({type:'session_meta',payload:{id:'executor'}})+'\n';
+  fs.writeFileSync(old,meta);
+  fs.writeFileSync(next,meta+JSON.stringify({type:'compacted',payload:{message:'Continue from persisted task records.'}})+'\n');
+  const probe=`
+    const [clock,old,offset]=process.argv.slice(1);
+    const state={executorLog:old,executorOffset:Number(offset)},binding={executorId:'executor'};
+    const reader=require(clock).readExecutor;
+    const moved=reader(state,binding),current=reader(state,binding);
+    process.stdout.write(JSON.stringify({moved,current,file:state.executorLog}));
+  `;
+  const result=spawnSync(process.execPath,['-e',probe,path.join(scripts,'supervisor-clock.cjs'),old,String(fs.statSync(old).size)],
+    {encoding:'utf8',timeout:5000,env:{...process.env,CODEX_HOME:f.root}});
+  ok(result);
+  const record=JSON.parse(result.stdout);
+  assert.equal(record.moved.reason,'segment_changed');
+  assert.equal(record.current.readable,true);
+  assert.equal(record.file,next);
+}
+
 // Exercise the actual send-and-confirm and observe paths with no connection to a live conversation.
 async function consume(f,event) {
   const log=path.join(f.root,'mock-messages.jsonl');
@@ -106,6 +130,8 @@ test('WebRPA environmental evidence must actually address every assigned questio
   refused(f.collect('RESOURCES',result));
   result.status.answers=answers.map((a,i)=>i?{...a,evidence:[path.join(f.root,'missing-report')]}:a);
   refused(f.collect('RESOURCES',result));
+  compactExecutor(f);
+  assert.deepEqual(read(f.snapshot).packages.inFlight[0].questions,questions);
   result.status.answers=answers;
   result.status.list='returned';
   result.status.resultEvidence=[f.source];
@@ -297,6 +323,7 @@ test('work area E applies only the delivered ruling for this package and submiss
   write(receiptFile,{...receipt,target:'some-other-thread'});
   refused(f.collect('WP-E142',payload));
   write(receiptFile,receipt);
+  compactExecutor(f);
   refused(f.collect('OTHER',payload));
   refused(f.collect('WP-E142',{...payload,ruling:{...payload.ruling,revision:'sha256:'+'0'.repeat(64)}}));
   refused(f.collect('WP-E142',{...payload,status:{list:'completed',acceptanceIds:['E1','E2'],evidence:[manifest]}}));
