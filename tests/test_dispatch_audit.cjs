@@ -307,3 +307,45 @@ test('Codex watcher reissues the surviving member of a stale bundle without deli
     assert.equal(JSON.parse(fs.readFileSync(sent)).some(prompt=>prompt.includes('Add agents')),false);
   }finally{child.kill('SIGTERM');fs.rmSync(f.root,{recursive:true,force:true});}
 });
+
+test('a work package owns a Codex worker by path and UUID, within its own executor only',()=>{
+  for(const mode of ['app index','rollout header']){
+    const f=fixture('worker-identity-','codex'),home=path.join(f.root,'home');
+    fs.mkdirSync(home);
+    const id=crypto.randomUUID(),foreign=crypto.randomUUID(),worker='/root/check';
+    const nodes=[[id,f.executorId],[foreign,'another-executor']];
+    if(mode==='app index'){
+      const {DatabaseSync}=require('node:sqlite'),db=new DatabaseSync(path.join(home,'state_5.sqlite'));
+      db.exec('create table threads(id text primary key,agent_path text);create table thread_spawn_edges(child_thread_id text primary key,parent_thread_id text)');
+      for(const [who,owner] of nodes){
+        db.prepare('insert into threads values(?,?)').run(who,worker);
+        db.prepare('insert into thread_spawn_edges values(?,?)').run(who,owner);
+      }
+      db.close();
+    }else{
+      const date=new Date(),day=path.join(home,'sessions',String(date.getFullYear()),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0'));
+      fs.mkdirSync(day,{recursive:true});
+      for(const [who,owner] of nodes){
+        const meta={id:who,parent_thread_id:owner,thread_source:'subagent',agent_path:worker};
+        fs.writeFileSync(path.join(day,'rollout-t-'+who+'.jsonl'),JSON.stringify({type:'session_meta',payload:meta})+'\n');
+      }
+    }
+    const send=(pkg,handle)=>{
+      const draft=path.join(f.root,'input.json'),inFlight=handle?[{id:pkg,handle,exclusiveResources:[],evidence:['qa']}]:[];
+      save(draft,snapshot(f.executorId,{packages:{inFlight}}));
+      return execFileSync(process.execPath,[path.join(codex,'dispatch.cjs'),'write',f.run,draft],
+        {encoding:'utf8',stdio:'pipe',env:{...process.env,CODEX_HOME:home,LT_CODEX_STATE_DB:path.join(home,'state_5.sqlite')}});
+    };
+    try{
+      // Exercise both arrival orders across the two stores, and persist the same-package continuation.
+      const [first,alias]=mode==='app index'?[worker,'agent:'+id]:['agent:'+id,worker];
+      send('A',first);send();
+      const before=fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8');
+      assert.throws(()=>send('B',alias),/Use a new subagent/);
+      assert.throws(()=>send('B',first),/Use a new subagent/);
+      assert.equal(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'),before);
+      assert.doesNotThrow(()=>send('A',alias),'the same work package may follow up using the other name');send();
+      assert.doesNotThrow(()=>send('Other','agent:'+foreign),'a name in another executor cannot establish a conflicting identity');
+    }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+  }
+});

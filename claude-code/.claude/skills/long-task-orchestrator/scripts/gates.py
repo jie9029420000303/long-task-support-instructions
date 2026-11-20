@@ -14,7 +14,7 @@ exit 2 把原因交回模型自行修正。絕不用 ask 跳確認框（長任�
   改用 supervise.cjs ask 取全部未決項、以不會停住回合的選擇卡一次列出（2026-10-13 A 開發監督在提問框裡等了
   9 小時 57 分，期間送驗沒人處理）。
 - G1＋G2 PreToolUse(Agent)：派 lt-* 子代理時，工作包要有 [工作區]／[可修改範圍]／[共用資源]；
-  新包從基準檔起跳、升一檔＝錯一次；錯 3 停止子代理鏈由主線接手。工作包＝派工提示加上它引用的 wp 檔
+  新包從基準檔起跳、升一檔＝錯一次；錯 4 停止子代理鏈由主線接手。工作包＝派工提示加上它引用的 wp 檔
   （技能規定 prompt 先存成 <狀態目錄>/wp/<id>.md，派工訊息常只引用該檔）。錯誤次數以狀態檔工作包表為準，
   查不到才用派工提示表頭；兩者都查不到就放行加備註，不猜。
 - G1＋G2 也套用到 PreToolUse(Workflow)：長任務一批互不相依的包改交技能附的 long-task-batch 工作流程一次派出，
@@ -33,7 +33,7 @@ from pathlib import Path
 
 TIERS = {"visual-checker": ["medium", "high", "xhigh"], "tech-worker": ["medium", "high", "xhigh"],
          "researcher": ["medium", "high", "xhigh"], "ui-tester": ["low", "medium", "high"]}
-AGENT = re.compile(r"^lt-(visual-checker|tech-worker|researcher|ui-tester)-(low|medium|high|xhigh)$")
+AGENT = re.compile(r"^lt-(visual-checker|tech-worker|researcher|ui-tester)-(?:(opus|fable)-)?(low|medium|high|xhigh|max)$")
 REQUIRED = ("[工作區]", "[可修改範圍]", "[共用資源]")
 PACKAGE = re.compile(r"\[工作包\]\s*id\s*[=＝]\s*([^\s；;，,|]+)")
 PROMPT_ERRORS = re.compile(r"錯誤次數\s*[=＝:：]?\s*(\d+)")
@@ -278,7 +278,10 @@ def check(data, subagent_type, prompt, fallback_id=None):
     match = AGENT.match(str(subagent_type or "").split(":")[-1])
     if not match:
         return None
-    role, tier = match.groups()
+    role, model, tier = match.groups()
+    override = (data.get("tool_input") or {}).get("model")
+    if override and override != (model or "sonnet"):
+        return "block", "此角色已指定模型；省略會覆寫角色模型的 model 參數，再依工作包派工。"
     prompt = str(prompt or "")
     wps = file_refs(prompt, WP_TAIL)
     work = "\n".join([prompt] + [wp.read_text(encoding="utf-8", errors="replace") for wp in wps])
@@ -294,14 +297,39 @@ def check(data, subagent_type, prompt, fallback_id=None):
             if errors is not None:
                 source = state
                 break
+    # A fresh research package inherits escalation only from its registered failing parent.
+    parent = re.search(r"^\[研究來源工作包\]\s*([\w-]+)\s*$", work, re.M)
+    if parent and role == "researcher" and model:
+        for state in states(data, wps):
+            count = table_errors(state.read_text(encoding="utf-8", errors="replace"), parent.group(1))
+            if count is not None:
+                if count == 3 and (errors is None or errors < 4):
+                    errors, source = 3, state
+                else:
+                    return "block", "高階研究必須對應到第三次品質失敗的原工作包。"
+                break
+        else:
+            return "block", "請登記研究來源工作包與實際品質失敗次數。"
     header = PROMPT_ERRORS.search(work)
     header_errors = int(header.group(1)) if header else None
     if errors is None:
         errors = header_errors
+    if errors is None and model:
+        return "block", "高階派工需要原工作包的品質錯誤次數。"
     if errors is None:
         return "note", "派工閘：查不到這個工作包的錯誤次數（狀態檔工作包表或派工表頭的「目前錯誤次數」），未檢查起跳檔。"
-    if errors >= 3:
+    if errors >= 4:
         return "block", f"工作包{' ' + package if package else ''}已錯 {errors} 次：停止子代理鏈，由主線接手未完成部分並復用正確成果。"
+    if errors == 3:
+        previous = re.search(r"^\[上次模型\]\s*(sonnet|opus|fable)\s*$", work, re.M)
+        source_model = previous.group(1) if previous else "sonnet"
+        expected_model = "opus" if source_model == "sonnet" else "fable"
+        expected_effort = "xhigh" if role == "ui-tester" else "max"
+        if (model, tier) != (expected_model, expected_effort):
+            return "block", f"錯 3 要派 lt-{role}-{expected_model}-{expected_effort} 重新研究再試；第 4 次失敗由主線接手。"
+        return None
+    if model:
+        return "block", "高階模型用於第三次品質失敗後的研究與重試。"
     ladder = TIERS[role]
     if tier not in ladder or ladder.index(tier) > errors:
         # 2026-10-07 GDB：主線只改了工作包檔表頭就派高一檔，被擋時看不出是哪邊記的次數；直接講清楚兩邊各記幾次。
@@ -327,7 +355,7 @@ def workflow(data):
     tool = data.get("tool_input") or {}
     if tool.get("name") != BATCH and not str(tool.get("scriptPath") or "").endswith(BATCH + ".js"):
         return block(f"長任務的批次派工用技能附的工作流程：Workflow(name=\"{BATCH}\", args={{packages:[{{id, agentType, prompt}}]}})，"
-                     "每包的 agentType 與 prompt 同單獨派工；其他工作流程不經過派工閘（起跳檔、錯 3 接手、隔離欄位），長任務中不用。")
+                     "每包的 agentType 與 prompt 同單獨派工；其他工作流程不經過派工閘（起跳檔、錯 4 接手、隔離欄位），長任務中不用。")
     args = tool.get("args")
     if isinstance(args, str):
         try:

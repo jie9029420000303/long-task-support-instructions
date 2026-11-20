@@ -4,6 +4,7 @@ const contractState=require('./contract-state.cjs');
 const path=require('node:path');
 const {parse,planningBasis,planReview}=require('./dispatch-audit.cjs');
 const acceptance=require('./acceptance-audit.cjs');
+const formal=require('./formal-case.cjs');
 const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
 const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]]] [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [PACKAGE_ID ABSOLUTE_RESULT_JSON ...] [same options]';
 
@@ -71,6 +72,19 @@ function packagesFrom(stateDir,overrides){
     const header=tagLine(text,'工作包')||'',ids=listOf(tagLine(text,'驗收條目'));
     const record={id:packageId(text,file),...extra,evidence:[file,...(extra.evidence||[])]};
     if(ids.length&&!extra.acceptanceIds)record.acceptanceIds=ids;
+    const testKind=tagLine(text,'測試類型'), cases=listOf(tagLine(text,'驗收案例'));
+    if(testKind) record.testKind=testKind;
+    if(cases.length) record.caseIds=cases;
+    if(record.testKind==='formal'){
+      const map=tagLine(text,'案例對照'),suite=tagLine(text,'案例套件'),target=tagLine(text,'稀缺實機'),preflight=tagLine(text,'實機前置');
+      if(map) record.caseMap=JSON.parse(map);
+      if(suite) record.suite=suite;
+      if(target) {record.target=target;record.scarceMachine=true;}
+      if(preflight && list==='inFlight'){
+        if(!path.isAbsolute(preflight)) throw Error('Use an absolute target preflight evidence path in '+file);
+        record.preflight=JSON.parse(fs.readFileSync(preflight,'utf8').replace(/^\uFEFF/,''));
+      }
+    }
     if(['ready','inFlight','blocked'].includes(list)&&!extra.exclusiveResources)record.exclusiveResources=claims(text);
     if(['ready','inFlight','blocked'].includes(list)&&!extra.dependencies)record.dependencies=listOf((header.match(/依賴\s*[：:]\s*([^；;]*)/)||[])[1]);
     if(list==='ready'){
@@ -118,6 +132,7 @@ function acquire(run){
 function save(run,binding,value){
   const output=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),temporary=output+'.tmp-'+process.pid;
   acquire(run);
+  formal.dispatchCheck(run,value,fs.existsSync(output)?JSON.parse(fs.readFileSync(output,'utf8')):null);
   acceptance.record(run,value.acceptance,output);
   fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{flag:'wx'});
   fs.renameSync(temporary,output);
@@ -175,6 +190,8 @@ try{
     // Validate the whole snapshot before touching any package file, so a rejected change leaves everything as it was.
     const draft=build(run,binding,stateDir,options,overrides,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
     const value=checked(run,binding,draft);
+    const prior=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
+    formal.dispatchCheck(run,value,fs.existsSync(prior)?JSON.parse(fs.readFileSync(prior,'utf8')):null);
     for(const item of overrides){const temporary=item.file+'.tmp-'+process.pid;fs.writeFileSync(temporary,item.text,{flag:'wx'});fs.renameSync(temporary,item.file);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
     const written=save(run,binding,value);if(starting)machine.recordStart(run);

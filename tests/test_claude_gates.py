@@ -140,12 +140,27 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(0, self.dispatch("lt-ui-tester-low", WP.format(errors=0)).returncode)
         self.assertEqual(2, self.dispatch("lt-ui-tester-medium", WP.format(errors=0)).returncode)
 
-    def test_one_step_per_quality_error_and_main_thread_takes_over_at_three(self):
+    def test_one_step_per_quality_error_and_main_thread_takes_over_at_four(self):
         self.assertEqual(0, self.dispatch("lt-tech-worker-high", WP.format(errors=1), rows=(("WP-1", 1),)).returncode)
         self.assertEqual(2, self.dispatch("lt-tech-worker-xhigh", WP.format(errors=1), rows=(("WP-1", 1),)).returncode)
         result = self.dispatch("lt-tech-worker-xhigh", WP.format(errors=3), rows=(("WP-1", 3),))
         self.assertEqual(2, result.returncode)
-        self.assertIn("主線接手", result.stderr)
+        self.assertIn("lt-tech-worker-opus-max", result.stderr)
+        self.assertEqual(0, self.dispatch("lt-tech-worker-opus-max", WP.format(errors=3), rows=(("WP-1", 3),)).returncode)
+        self.assertEqual(0, self.dispatch("lt-tech-worker-fable-max", WP.format(errors=3) + "\n[上次模型] opus", rows=(("WP-1", 3),)).returncode)
+        self.assertEqual(2, self.dispatch("lt-tech-worker-opus-max", WP.format(errors=4), rows=(("WP-1", 4),)).returncode)
+
+    def test_escalated_research_uses_the_failing_parent_and_rejects_model_downgrade(self):
+        package = WP.format(errors=0).replace("WP-1", "RESEARCH")
+        prompt = package + "\n[研究來源工作包] WP-1\n[上次模型] sonnet"
+        rows = (("WP-1", 3), ("RESEARCH", 0))
+        self.assertEqual(0, self.dispatch("lt-researcher-opus-max", prompt, rows=rows).returncode)
+        self.assertEqual(2, self.dispatch("lt-researcher-opus-max", prompt, rows=(("WP-1", 1),)).returncode)
+        tool = {"subagent_type": "lt-researcher-opus-max", "model": "sonnet", "prompt": prompt}
+        gate = Gate([user(SKILL_ROW)], state(rows=rows))
+        self.addCleanup(gate.close)
+        result = gate.run(hook_event_name="PreToolUse", tool_name="Agent", tool_input=tool)
+        self.assertEqual(2, result.returncode)
 
     def test_state_table_is_authoritative_over_the_prompt_header(self):
         # 主線在派工表頭少寫錯誤次數時，以狀態檔為準，避免藉表頭把錯 2 的包當新包重派。

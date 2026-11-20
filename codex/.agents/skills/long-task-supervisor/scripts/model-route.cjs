@@ -1,55 +1,70 @@
 #!/usr/bin/env node
-// Resolve only the roles needed now from the actual tool inventories. This does not change a running model or
-// infer user authorization. It substitutes another provider only for a recorded rate limit (input.fallback =
-// RUN/model-fallback.json), in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol (2026-10-11; last stop 2026-10-29).
+// This resolver never switches a chat. Only explicit requests and observed tool inventories
+// determine the role, model and supported reasoning level.
 const fs=require('node:fs');
-const {keyOf,LAST_RESORT}=require('./model-fallback.cjs');
-const roles={executor:{tier:'opus',effort:'high',catalog:'executor'},general:{tier:'sonnet',effort:'medium',catalog:'subagent'},ui:{tier:'sonnet',effort:'low',catalog:'subagent'}};
-function identity(id){
-  const match=typeof id==='string'&&id.match(/^(.*\/)?claude-([^/]+)$/i);
-  if(!match)return null;
-  return {provider:match[1]||'',name:match[2].toLowerCase()};
-}
-function resolve(input){
-  if(typeof input.supervisorModel!=='string'||!input.supervisorModel.trim())throw Error('Provide the observed supervisor model ID');
-  if(!Array.isArray(input.roles)||!input.roles.length||input.roles.some(role=>!roles[role]))throw Error('Request only the needed roles: executor, general, ui');
-  const supervisor=identity(input.supervisorModel);
-  if(!supervisor)return {family:'unchanged',reason:'監督不是 Claude；沿用既有 OpenAI 選模規則與已鎖定模型。',roles:{}};
-  const result={family:'claude',supervisorModel:input.supervisorModel,provider:supervisor.provider,roles:{}};
+const {keyOf}=require('./model-fallback.cjs');
+const {tiers,efforts,identity,available,latest}=require('./model-catalog.cjs');
+const roles={executor:'high',general:'medium',ui:'low'};
+function resolve(input) {
+  const main=identity(input.supervisorModel);
+  if(!input.supervisorModel)throw Error('Provide the observed supervisor model ID');
+  if(!Array.isArray(input.roles)||!input.roles.length||input.roles.some(r=>!Object.hasOwn(roles,r)))throw Error('Request known roles');
+  if(!main)return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
+  const result={family:main.family,provider:main.provider,supervisorModel:input.supervisorModel,roles:{}};
   let limits={};
-  if(input.fallback)try{limits=Object.fromEntries(Object.entries(JSON.parse(fs.readFileSync(input.fallback,'utf8')).limits||{}).filter(([,item])=>Date.parse(item.until)>Date.now()));}catch{}
+  if(input.fallback){
+    try{limits=JSON.parse(fs.readFileSync(input.fallback,'utf8')).limits||{};}
+    catch(error){if(error.code!=='ENOENT')throw error;} // A new run has no limit ledger yet.
+  }
+  const limited=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now();
   for(const role of input.roles){
-    const policy=roles[role],catalog=input.catalogs?.[policy.catalog]||[],override=input.overrides?.[role];
-    if(!Array.isArray(catalog)||catalog.some(item=>typeof item.id!=='string'||!Array.isArray(item.efforts)))throw Error('Catalog entries require observed id and supported efforts');
-    const candidates=catalog.filter(item=>{
-      if(override?.model)return item.id===override.model;
-      const value=identity(item.id);
-      return value&&value.provider===supervisor.provider&&value.name.startsWith(policy.tier+'-');
-    }).sort((a,b)=>b.id.localeCompare(a.id,undefined,{numeric:true}));
-    let model=(!override?.model&&role==='executor'&&candidates.find(item=>item.id===input.supervisorModel))||candidates[0];
-    const effort=override?.effort||policy.effort;
-    let basis=override?'explicit-user-override':'claude-role-policy',limitedUntil=null;
-    if(model&&!override?.model&&limits[keyOf(model.id)]){
-      limitedUntil=limits[keyOf(model.id)].until;
-      const sameTier=prefix=>catalog.filter(item=>{const value=identity(item.id);return value&&value.provider===prefix&&value.name.startsWith(policy.tier+'-');})
-        .sort((a,b)=>b.id.localeCompare(a.id,undefined,{numeric:true}))[0];
-      const substitute=['anthropic/','anthropic-apikey/'].filter(prefix=>!limits[prefix]).map(sameTier).find(Boolean)||
-        (!limits[LAST_RESORT]&&catalog.find(item=>item.id===LAST_RESORT));
-      if(!substitute){result.roles[role]={status:'unavailable',reason:'這個角色可用的系列都在額度限速中，'+limitedUntil+' 後恢復；其他角色照常。'};continue;}
-      model=substitute;basis='rate-limit-fallback';
+    const worker=role!=='executor', owner=worker?identity(input.executorModel||input.supervisorModel):main;
+    const catalog=available(input.catalogs?.[worker?'subagent':'executor']||[]);
+    const override=input.overrides?.[role]||{}, errors=worker?(input.errors||0):0;
+    if(!Number.isInteger(errors)||errors<0)throw Error('errors must be a nonnegative integer for this work package');
+    const unavailable=reason=>{result.roles[role]={status:'unavailable',reason};};
+    if(errors>=4){result.roles[role]={status:'takeover',reason:'Fourth unsuccessful delivery; execution mainline takes over'};continue;}
+    if(!owner){unavailable('Unknown execution mainline model family');continue;}
+    let tier=owner.family==='claude'?'sonnet':'terra';
+    const previous=input.previousModel && identity(input.previousModel);
+    if(errors===3){
+      if(!previous || previous.family!==owner.family || !efforts.includes(input.previousEffort)){unavailable('Provide the last actual worker model and effort for escalation');continue;}
+      const ladder=tiers[owner.family], level=ladder.indexOf(previous.tier);
+      tier=ladder[Math.min(level+1,ladder.length-1)];
     }
-    if(!model){
-      result.roles[role]={status:'unavailable',reason:override?.model?`工具未提供指定模型 ${override.model}。`:`工具未提供與監督相同供應商路徑 ${supervisor.provider||'(無前綴)'} 的 Claude ${policy.tier}；不自動換帳號、GPT 或其他層級。`};continue;
+    let selected=override.model?catalog.find(x=>x.id===override.model):
+      worker?latest(catalog,owner.family,owner.provider,tier):catalog.find(x=>x.id===input.supervisorModel);
+    let basis=Object.keys(override).length?'explicit-user-override':'role-policy', restoreAfter;
+    if(selected && identity(selected.id)?.family!==owner.family && worker){unavailable('The worker must be compatible with the execution mainline');continue;}
+    if(selected && limited(selected.id) && !override.model){
+      restoreAfter=limits[keyOf(selected.id)].until;
+      const m=identity(selected.id);
+      const substitute=m.family==='claude'?['anthropic/','anthropic-apikey/'].map(provider=>latest(catalog,m.family,provider,m.tier)).find(x=>x&&!limited(x.id)):null;
+      const sol=worker?null:latest(catalog,'gpt','','sol');
+      selected=substitute||(sol&&!limited(sol.id)?sol:null);basis='rate-limit-fallback';
     }
-    if(!model.efforts.includes(effort)){
-      result.roles[role]={status:'unavailable',model:model.id,reason:`工具未提供 ${model.id} 的 ${effort} 推理；保留該角色待處理，其他角色可繼續。`};continue;
+    if(!selected){unavailable('The requested enabled role/model is unavailable in this tool inventory');continue;}
+    const supported=efforts.filter(e=>selected.efforts.includes(e));
+    let effort=override.effort||roles[role];
+    if(errors && !override.effort){
+      const prior=errors===3?input.previousEffort:roles[role];
+      const higher=supported.filter(e=>efforts.indexOf(e)>efforts.indexOf(prior));
+      effort=higher[Math.min(higher.length,errors===3?1:errors)-1]||supported.at(-1);
+      if(efforts.indexOf(effort)<efforts.indexOf(prior)){unavailable('Escalation would reduce the previous effort');continue;}
     }
-    result.roles[role]={status:'ready',model:model.id,effort,basis,...(limitedUntil?{restoreAfter:limitedUntil}:{})};
+    if(!supported.includes(effort)){unavailable('The selected model does not support '+effort);continue;}
+    let ceiling={};
+    if(errors===3){
+      if(identity(selected.id)?.tier!==tier){unavailable('The explicit model cannot satisfy this research escalation');continue;}
+      const effortStep=efforts.indexOf(effort)-efforts.indexOf(input.previousEffort);
+      const effortAtCeiling=effortStep===0 && effort===supported.at(-1);
+      if(effortStep<0 || (effortStep===0&&!effortAtCeiling)){unavailable('This research retry requires higher reasoning');continue;}
+      ceiling={modelAtCeiling:previous.tier===tier,effortAtCeiling};
+    }
+    result.roles[role]={status:'ready',model:selected.id,effort,basis,...ceiling,...(restoreAfter?{restoreAfter}:{})};
   }
   return result;
 }
 module.exports={resolve};
-if(require.main===module){
-  try{console.log(JSON.stringify(resolve(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),null,2));}
-  catch(error){console.error(error.message);process.exitCode=1;}
-}
+if(require.main===module){try{console.log(JSON.stringify(resolve(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),null,2));}
+catch(error){console.error(error.message);process.exitCode=1;}}

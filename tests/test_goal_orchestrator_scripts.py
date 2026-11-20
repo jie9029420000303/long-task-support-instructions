@@ -157,8 +157,8 @@ class CodexDispatchContractTests(unittest.TestCase):
         # tool uses a different model. Only effort is known before resolving each role.
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
-        self.assertIn("優先沿用可實際派發的 GPT-5.6 Terra；Medium", skill)
-        self.assertIn("介面子代理：具備所需瀏覽器", skill)
+        self.assertIn("GPT 工作者取最新 Terra，Claude 工作者取同一路徑最新 Sonnet", skill)
+        self.assertIn("介面子代理需具備所需瀏覽器", skill)
         self.assertIn("Goal 續跑／恢復沿用已鎖定模型", skill)
         for row in (
             "| 主線 | | High |",

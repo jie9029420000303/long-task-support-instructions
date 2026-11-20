@@ -12,7 +12,7 @@ const FILE='pending-decisions.json';
 // authorized at the start go ahead. Jay 2026-11-09 (「這些改法都OK」): inside the contract the supervisor decides by the
 // spec; only these floors still wait on him, named by these labels on his dashboard. Of 139 questions he answered
 // across four runs, 66 of 92 decisions took the recommendation and 13 more chose the option that asked less of him.
-const KINDS={irreversible:'不可逆（改寫 Git 歷史、未授權的正式部署等）',paid:'付費（開工時沒授權或超出上限的）',delete:'刪除或永久改動既有資料（開發過程產物除外）',credential:'帳號或憑證（開工時沒授權的）',external:'正式對外發送（寄信、對客戶或公開發布；非測試）',
+const KINDS={defer_scope:'推薦延後、不做或少做',restrict:'推薦新增、保留限制或在使用者規則上開例外',manual_alternative:'推薦人手處理且另有自動選項',irreversible:'不可逆（改寫 Git 歷史、未授權的正式部署等）',paid:'付費（開工時沒授權或超出上限的）',delete:'刪除或永久改動既有資料（開發過程產物除外）',credential:'帳號或憑證（開工時沒授權的）',external:'正式對外發送（寄信、對客戶或公開發布；非測試）',
   prohibition:'推翻你的禁令',acceptance:'改驗收條文（縮窄、列例外、換證據）',user_action:'要你本人操作，或只有你知道的事實',major_change:'超出契約目標或範圍、沒有明確推薦的變更',gate:'你在契約自設的核准關卡'};
 const FIELDS=['kind','ask','recommend','why','options'],OPS=['raise','reopen','withdraw','answer','delegate'];
 const KEY=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -135,6 +135,8 @@ function apply(run,change,{binding,checkQuote,at=new Date().toISOString()}={}){
     need(!old||isOpen(old)||old.status==='delegated',key+' is already '+old?.status+'; a delegated decision needs an open or delegated item, or a new key');
     for(const field of ['ask','choice','basis','revert'])need(text(item[field]),key+': a delegated decision needs '+field+' (revert says how Jay can undo it)');
     need(item.kind==null||Object.hasOwn(KINDS,item.kind),key+': kind must be one of '+Object.keys(KINDS).join(', '));
+    const mustAsk = ['defer_scope','restrict','manual_alternative','external','paid','delete','prohibition','user_action','credential','irreversible','gate'];
+    need(!mustAsk.includes(item.kind) && !mustAsk.includes(old?.kind),key+': this recommendation needs Jay’s answer; record it with raise or answer');
     const delegated={choice:item.choice.trim(),basis:item.basis.trim(),revert:item.revert.trim(),at};
     if(old){(old.history||=[]).push({at,...pick(old),status:old.status,...(old.delegated?{delegated:old.delegated}:{})});
       Object.assign(old,{status:'delegated',ask:item.ask.trim(),...(item.kind?{kind:item.kind}:{}),delegated,updatedAt:at});}

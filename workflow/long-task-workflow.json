@@ -44,7 +44,7 @@
     { "id": "research_work", "lane": "research_agents", "col": 3, "type": "database", "label": "C｜分面研究與反證整理", "width": 196 },
     { "id": "same_version_review", "lane": "main", "col": 5, "type": "security", "label": "主線整合查核／正式產出", "width": 210 },
     { "id": "quality_gate", "lane": "exceptions", "col": 1, "type": "messagebus", "label": "代理交付品質錯誤", "width": 196 },
-    { "id": "main_takeover", "lane": "exceptions", "col": 4, "type": "backend", "label": "錯 3｜主線接手該工作包", "width": 196 },
+    { "id": "main_takeover", "lane": "exceptions", "col": 4, "type": "backend", "label": "錯 4｜主線接手該工作包", "width": 196 },
     { "id": "task_done", "lane": "task", "col": 5, "type": "external", "label": "任務完成", "width": 138 }
   ],
   "edges": [
@@ -61,7 +61,7 @@
     { "id": "research_to_review", "from": "research_work", "to": "same_version_review", "label": "來源、反證與待確認事項；主線決策並撰稿", "variant": "emphasis" },
     { "id": "review_done", "from": "same_version_review", "to": "task_done", "label": "同一候選版全部 PASS", "variant": "emphasis" },
     { "id": "report_quality_fail", "from": "same_version_review", "to": "quality_gate", "label": "未達標：先判定歸屬", "variant": "security", "role": "error", "fromSide": "bottom", "toSide": "bottom", "route": "bottom-channel" },
-    { "id": "takeover", "from": "quality_gate", "to": "main_takeover", "label": "同一工作包錯 3", "variant": "security" },
+    { "id": "takeover", "from": "quality_gate", "to": "main_takeover", "label": "同一工作包錯 4", "variant": "security" },
     { "id": "takeover_review", "from": "main_takeover", "to": "same_version_review", "label": "主線完成未解工作", "variant": "emphasis" }
   ]
 }

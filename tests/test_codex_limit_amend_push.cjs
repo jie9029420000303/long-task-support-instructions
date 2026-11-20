@@ -53,7 +53,7 @@ function fixture({executorModel=opus,supervisorModel=null,finals,state={},usageR
   fs.writeFileSync(usage,JSON.stringify({conversationId:'unrelated',status:200})+'\n');for(const row of usageRows)line(usage,row);
   save(mockFile,{supervisorId:binding.supervisorId,executorId:binding.executorId,...(finals?{finals}:{noTurn:true})});
   const env={...process.env,CODEX_HOME:home,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mockFile,MOCK_CODEX_SENT:sent,
-    OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:quota,CHROME_RELAY_BIN:path.join(root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200'};
+    OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json'),OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:quota,CHROME_RELAY_BIN:path.join(root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200'};
   delete env.CODEX_THREAD_ID;
   let child;
   const grant=id=>{
@@ -223,6 +223,32 @@ test('a supervisor moved to the paid key gets its model back once its route work
     assert.equal(read(g.statePath).modelSwitch['supervisor-qa'].restoredBy,'already-on-original');
     assert.ok(!g.calls().some(call=>/LONG_TASK_MODEL_RESTORED/.test(call.prompt)),'already back on its model: no extra turn');
   }finally{await g.stop();}
+});
+
+test('a refused child from the previous executor family is reassigned using the current executor family',async()=>{
+  const f=fixture(),id='child-qa',model='anthropic/claude-sonnet-5-5',at=iso(Date.now());
+  try{
+    const child=path.join(path.dirname(f.executorLog),'rollout-t-'+id+'.jsonl');
+    line(child,{timestamp:at,type:'session_meta',payload:{id,thread_source:'subagent',parent_thread_id:'executor-qa',agent_path:'/root/qa'}});
+    line(child,{timestamp:at,type:'turn_context',payload:{model,effort:'medium'}});
+    line(f.executorLog,{timestamp:at,type:'turn_context',payload:{model:'gpt-6.10-sol',effort:'high'}});
+    f.start();await until(()=>read(f.statePath).usageOffset!==undefined);
+    f.refuse(id,model);
+    await until(()=>f.calls().some(c=>c.threadId==='executor-qa'&&c.prompt.includes('rate-subagent-')));
+    const notice=f.calls().find(c=>c.prompt.includes('rate-subagent-'));
+    assert.match(notice.prompt,/候選為 gpt-6\.1-terra/);
+    assert.equal(notice.model,null,'the message asking for a new worker leaves the execution mainline model alone');
+  }finally{await f.stop();}
+});
+
+test('reset still restores the recorded model and effort after a manual model change',async()=>{
+  const record={role:'supervisor',original:opus,current:paid,effort:'high',since:Date.now()-3600000,until:Date.now()-4000,restored:null};
+  const f=fixture({supervisorModel:'gpt-6.2-sol',state:{modelSwitch:{'supervisor-qa':record}}});
+  try{
+    f.start();await until(()=>f.calls().some(c=>c.threadId==='supervisor-qa'&&c.prompt.includes('LONG_TASK_MODEL_RESTORED')));
+    const restore=f.calls().find(c=>c.prompt.includes('LONG_TASK_MODEL_RESTORED'));
+    assert.equal(restore.model,opus);assert.equal(restore.thinking,'high');
+  }finally{await f.stop();}
 });
 
 test('every message to the executor carries the full-speed push and ends with its Taipei send time; receipts keep the bare prompt and a paused run gets none',async()=>{

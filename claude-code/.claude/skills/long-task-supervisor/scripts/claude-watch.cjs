@@ -212,6 +212,8 @@ function scanSupervisor(){
   for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){
     let row;try{row=JSON.parse(line);}catch{continue;}
     const source=inputSource(row),at=Date.parse(row.timestamp)||Date.now();
+    if(row.type==='assistant'&&!row.isSidechain&&!row.isApiErrorMessage&&row.message?.model&&row.message.model!=='<synthetic>')
+      state.supervisorModel=row.message.model;
     if(source==='human')state.lastUserInputAt=Math.max(state.lastUserInputAt||0,Math.min(at,Date.now()));
     if(source==='scheduled')noteAutomation('supervisor',row,at);
   }
@@ -371,10 +373,12 @@ function supervisorClock(){
   }else if(settings?.permissionMode==='bypassPermissions'&&state.permissionWarned){state.permissionWarned=false;permissionChanged={permissionMode:settings.permissionMode,at:settings.at};}
   const automations=(state.automations||[]).filter(item=>once('automation:'+item.key));
   const loggedOut=paused()?[]:login.due(state,run)||[];
-  // The executor runs on Opus at high effort unless Jay named another model (Jay 2026-10-13, as Codex 2026-10-11).
+  // The selected supervisor model is the default for the executor. No fixed tier or guessed model for old runs.
   let executorModel=null;
-  if(settings?.model&&!binding.executorModelOverride&&(!signals.isOpus(settings.model)||['low','medium'].includes(settings.effort))&&once('model:'+settings.model+':'+settings.effort))
-    executorModel={model:settings.model,effort:settings.effort||null,want:{family:'opus',effort:'high'},executorDesktopId:binding.executorDesktopId};
+  const desired=state.supervisorModel;
+  if(desired&&settings?.model&&!binding.executorModelOverride&&
+     (settings.model!==desired||['low','medium'].includes(settings.effort))&&once('model:'+settings.model+':'+settings.effort+'->'+desired))
+    executorModel={model:settings.model,effort:settings.effort||null,want:{model:desired,effort:'high'},executorDesktopId:binding.executorDesktopId};
   const repeated=Object.entries(state.failedCommands||{}).filter(([,item])=>item.count>=REPEAT_FAILURES&&!item.announced);
   for(const [,item] of repeated)item.announced=now();
   // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time): one wake at half to see

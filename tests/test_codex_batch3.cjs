@@ -43,7 +43,7 @@ function fixture({settings,quietMinutes=0,createdMinutesAgo=1,finals,mock={}}={}
   fs.writeFileSync(usage,JSON.stringify({conversationId:'unrelated',status:200})+'\n');
   save(mockFile,{supervisorId:binding.supervisorId,executorId:binding.executorId,...(finals?{finals}:{noTurn:true}),...mock});
   const env={...process.env,CODEX_HOME:home,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mockFile,MOCK_CODEX_SENT:sent,
-    OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:quota,CHROME_RELAY_BIN:path.join(root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200'};
+    OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json'),OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:quota,CHROME_RELAY_BIN:path.join(root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200'};
   delete env.CODEX_THREAD_ID;
   let child;
   return {root,home,run,binding,executorLog,sent,usage,quota,env,statePath:path.join(run,'daemon-state.json'),
@@ -119,16 +119,20 @@ test('a refused executor continues on the next model in Jay\'s order and gets it
   }finally{await f.stop();fs.rmSync(gate,{force:true});}
 });
 
-// Jay 2026-10-29: the last stop is gpt-6.1-sol (was gpt-5.6-sol).
-test('model fallback follows anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol and skips what is still limited',()=>{
+test('mainline fallback uses the newest visible Sol and new workers stay with the current executor family',()=>{
   const fallback=require(path.join(scripts,'model-fallback.cjs'));
-  const state={rateLimits:{'anthropic/':{until:Date.now()+60000}}};
-  assert.equal(fallback.next('anthropic/claude-opus-5-5','anthropic/claude-opus-5-5','executor',state),'anthropic-apikey/claude-opus-5-5');
-  state.rateLimits['anthropic-apikey/']={until:Date.now()+60000};
-  assert.equal(fallback.next('anthropic/claude-sonnet-5-5','anthropic/claude-sonnet-5-5','subagent',state),'gpt-6.1-sol');
-  state.rateLimits['gpt-6.1-sol']={until:Date.now()+60000};
-  assert.equal(fallback.next('anthropic/claude-opus-5-5','anthropic/claude-opus-5-5','executor',state),null,'all limited is reported, not guessed');
-  assert.equal(fallback.next('gpt-6-luna','gpt-6-luna','executor',{}),'anthropic/claude-opus-5-5','a GPT thread goes to Anthropic first');
+  withEnv({OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json')},()=>{
+    const state={rateLimits:{'anthropic/':{until:Date.now()+60000}}};
+    const opus='anthropic/claude-opus-5-5', child='anthropic/claude-sonnet-5-5';
+    assert.equal(fallback.next(opus,opus,'executor',state),'anthropic-apikey/claude-opus-5-5');
+    state.rateLimits['anthropic-apikey/']={until:Date.now()+60000};
+    assert.equal(fallback.next(child,child,'subagent',state),null,'no compatible Claude account is available');
+    assert.equal(fallback.next(child,child,'subagent',state,Date.now(),'gpt-6.2-sol'),'gpt-6.1-terra','executor changed family while a Claude child was in flight');
+    assert.equal(fallback.next(opus,opus,'executor',state),'gpt-6.10-sol');
+    state.rateLimits['gpt-6.10-sol']={until:Date.now()+60000};
+    assert.equal(fallback.next(opus,opus,'executor',state),null);
+    assert.equal(fallback.next('gpt-6-luna','gpt-6-luna','executor',{}),opus);
+  });
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'batch3-quota-'));
   try{
     const quota=path.join(root,'quota.json');

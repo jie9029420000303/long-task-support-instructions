@@ -22,7 +22,7 @@ const FOUR='失敗證據、已排除原因、外部來源連結與查閱時間�
 test('the shared spec carries the five v1.9.0 rules and both adapters hold the same copy',()=>{
   const spec=read('SPEC.md');
   for(const marker of [
-    '同一工作包第 2 次被退回重做',FOUR+'四項','第 1 次退回與不涉及技術判斷的小修不強制','第 3 次照舊由主線接手','監督不做技術研究，只核對四項',
+    '同一工作包第 2 次被退回重做',FOUR+'四項','第 1 次退回與不涉及技術判斷的小修不強制','第 4 次由執行主線接手','監督只在送驗時核對四項證據',
     '電腦睡眠不叫醒監督、不通知使用者','等待只因執行端自己重新開始工作而解除時只記錄、不查核','監督對話正在回合中或事件送出後已有新動作',
     '以檔案系統的寫入時複製複本取用，不整份複製','主線刪除其中可重建的過程檔','未通過或主線接手者不刪',
     '已通過卻未清理也未寫明無可刪原因的工作資料夾須先處理','寫在該工作包自己的暫存資料夾','仍有程序使用者不刪，系統暫存區裡不屬本任務的內容不碰',
@@ -38,7 +38,7 @@ test('a second return sends the main line outside for a fix before it redoes the
     const skill=read(p.orchestrator+'SKILL.md');
     for(const marker of ['**第 2 次退回先向外找解法**','recurringRework 達 2','同一個問題修過後又失敗','官方文件、上游 GitHub 問題單與原始碼、相關開源專案的做法、技術論壇',
       '每筆附連結與查閱時間','在本案環境確認候選解法確實消除這個失敗','查不到可行解法也照實交回','第 1 次退回，以及錯字、設定值這類不涉及技術判斷的小修不強制',
-      '錯 3 照舊由主線接手','監督只核對四項，不自己做技術研究'])assert.ok(skill.includes(marker),p.name+' SKILL: '+marker);
+      '錯 4：由執行主線接手','主線自行安排研究和小實驗'])assert.ok(skill.includes(marker),p.name+' SKILL: '+marker);
     // The rule sits with the error ladder it extends: after the third error and before the per-line counting.
     const at=skill.indexOf('**第 2 次退回先向外找解法**');
     assert.ok(at>skill.indexOf('3. 錯 3')&&at<skill.indexOf('A 查核、B 技術、C 研究、介面操作各自計數'),p.name+': placed with the error ladder');
@@ -49,7 +49,7 @@ test('a second return sends the main line outside for a fix before it redoes the
       const text=read(p.supervisor+file);
       assert.ok(text.includes(FOUR)&&text.includes('不自己做技術研究'),p.name+' supervisor '+file);
     }
-    assert.ok(read(p.supervisor+'references/dispatch.md').includes('監督第 2 次退回同一工作包的送驗時，reply 一併要求先做這一步再重做'),p.name+': second reject asks for it');
+    assert.ok(read(p.supervisor+'references/dispatch.md').includes('監督督促執行主線啟動外研'),p.name+': second reject asks for it');
   }
 });
 

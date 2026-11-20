@@ -116,8 +116,22 @@ function summarize(run,progress,details=false){
 function issues(run,progress){
   const summary=summarize(run,progress,true);if(!summary)return [];
   const result=[];
+  // Formal retry policy follows the case across revisions. Independent product verdicts still use summarize().
+  const formal = require('./formal-case.cjs');
+  const rows = history(run, true);
+  const state = formal.loadState(run);
+  const caseIds = new Set(rows.filter(r => r.kind === 'attempt').map(r => r.caseId));
+  for (const caseId of caseIds) {
+    const item = {caseId};
+    if (!formal.needsResearch(rows, state, item)) continue;
+    const failed = formal.failures(rows, item);
+    const studied = state.research.filter(r => r.caseId === caseId && failed.some(a => a.id === r.afterId));
+    const episode = [failed[0].id, studied.at(-1)?.afterId || null];
+    result.push({kind:'acceptance_rework', affected:[...new Set(failed.map(a => a.criterionId))].sort(), cases:[caseId], episode,
+      detail:{finding:'同一驗收案例連續兩次未通過。核對執行主線已開始研究並登記後續工作包；小實驗由執行端安排。',
+        caseId, evidence:failed.flatMap(a => a.evidence)}});
+  }
   for(const item of summary.items){
-    for(const trial of item.cases)if(item.status!=='PASS'&&trial.unresolvedAttempts.length>=2)result.push({kind:'acceptance_rework',affected:[item.id],cases:[trial.caseId],episode:trial.lastPassId,detail:{finding:'同一驗收案例反覆執行，仍未取得通過證據；核對原因及下一步',caseId:trial.caseId,evidence:trial.unresolvedAttempts.flatMap(a=>a.evidence)}});
     if(item.wasPass&&item.status!=='PASS')result.push({kind:'acceptance_withdrawn',affected:[item.id],episode:item.passGeneration,detail:{finding:'先前通過證據已撤回；核對變更影響與必要重測',evidence:item.evidence}});
   }
   return result;

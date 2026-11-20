@@ -1,0 +1,15 @@
+{
+  "models": [
+    {"slug": "anthropic/claude-sonnet-5-5", "visibility": "list"},
+    {"slug": "anthropic/claude-opus-5-5", "visibility": "list"},
+    {"slug": "anthropic/claude-fable-5-2", "visibility": "list"},
+    {"slug": "anthropic-apikey/claude-sonnet-5-5", "visibility": "list"},
+    {"slug": "anthropic-apikey/claude-opus-5-5", "visibility": "list"},
+    {"slug": "anthropic-apikey/claude-fable-5-2", "visibility": "list"},
+    {"slug": "gpt-6.1-sol", "visibility": "hide"},
+    {"slug": "gpt-6.2-sol", "visibility": "list"},
+    {"slug": "gpt-6.10-sol", "visibility": "list"},
+    {"slug": "gpt-7.0-sol", "visibility": "hide"},
+    {"slug": "gpt-6.1-terra", "visibility": "list"}
+  ]
+}

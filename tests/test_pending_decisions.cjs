@@ -39,6 +39,18 @@ for(const [platform,scripts] of versions){
   const heard=quote=>{if(!['R24R21: A 兩個都重登','A','B','C'].includes(quote))throw Error('Answer quote did not reach the supervisor in this turn');};
   const change=(f,value,minute=0)=>pending.apply(f.run,value,{binding:f.binding,checkQuote:heard,at:at(minute)});
 
+  test(platform+': mandatory recommendation directions cannot be silently delegated or relabelled',()=>{
+    const f=fixture(platform);
+    try{
+      for(const kind of ['defer_scope','restrict','manual_alternative','external']){
+        change(f,{raise:[item(kind,kind,{kind})]});
+        const record={key:kind,ask:kind,choice:'choose',basis:'evidence',revert:'restore previous choice'};
+        assert.throws(()=>change(f,{delegate:[record]}),/answer/);
+        assert.throws(()=>change(f,{delegate:[{...record,kind:'major_change'}]}),/answer/);
+        assert.ok(pending.ask(f.run).items.some(i=>i.key===kind));
+      }
+    }finally{f.done();}
+  });
   test(platform+': only decisions that need Jay can be registered, and a mistyped change is refused',()=>{
     // 2026-10-13 GDB: 5 of the 9 items on Jay's cards were reversible choices the supervisor could make itself.
     const f=fixture(platform);

@@ -54,7 +54,7 @@ test('each supervisor fixes the version itself, decides a recommended out-of-sco
     assert.ok(authorization.indexOf('**超出契約目標或範圍的方向選擇有明確推薦**')<authorization.indexOf('仍要停下來問使用者'),p.name+': a recommended choice is on the do-it list');
     assert.ok(!authorization.includes('**執行端提問 30 分鐘沒人答**'),p.name);
     // What still waits for Jay is unchanged.
-    for(const kept of ['**改驗收條件**','**刪除或永久改動既有資料**','**開工時沒授權或超出授權上限的帳號密碼、付費、正式部署**','**會讓歷史回不去的 Git 操作**','**寄信與不是測試的正式對外發送**','**推翻使用者明示的禁令**','**使用者在契約自設的核准關卡**','**要使用者本人到場或操作，或只有他知道的事實**'])
+    for(const kept of ['**推薦減少工作**','**推薦加限制或開例外**','**推薦人手而有自動選項**','**刪除或永久改動既有資料**','**開工時沒授權或超出授權上限的帳號密碼、付費、正式部署**','**會讓歷史回不去的 Git 操作**','**寄信與不是測試的正式對外發送**','**推翻使用者明示的禁令**','**使用者在契約自設的核准關卡**','**要使用者本人到場或操作，或只有他知道的事實**'])
       assert.ok(authorization.includes(kept),p.name+': still asked: '+kept);
     const review=read(p.supervisor+'references/event-review.md');
     for(const marker of ['用 `delegate`（kind `major_change`）登記後回覆、不等使用者','同一則回覆點名執行端接著做的','dependsOn:[{id:未通過條文 ID','由監督用 reply 通知執行端定版'])

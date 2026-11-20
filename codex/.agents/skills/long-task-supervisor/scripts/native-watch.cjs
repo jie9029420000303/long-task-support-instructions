@@ -726,7 +726,7 @@ async function handleAmendRequest(){
   return true;
 }
 // Rate limits (Jay 2026-10-11, default on): a refused supervisor or executor is told to continue on the next model
-// in anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol; a refused subagent makes the executor re-dispatch on the next one.
+// in the configured chain; a refused subagent is re-dispatched in the current executor's family.
 async function handleRateLimits() {
   if (binding.modelFallback === false) return;
   const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path,file:item.sourceFile}));
@@ -755,7 +755,8 @@ async function handleRateLimits() {
       record.restored = now(); record.restoredBy = 'thread-runs-refused-model';
     }
     const original = record && !record.restored ? record.original : hit.model;
-    const target = fallback.next(original,hit.model,hit.role,state);
+    const executorModel = hit.role==='subagent' ? fallback.settingsOf(binding.executorId)?.model || null : original;
+    const target = fallback.next(original,hit.model,hit.role,state,Date.now(),executorModel);
     const until = state.rateLimits?.[fallback.keyOf(original)]?.until || Date.now() + fallback.FALLBACK_MS;
     state.switchQueue.shift();
     // The reset already passed (a watcher started after it reads the refusal): no switch, and a stopped chat continues
@@ -770,17 +771,19 @@ async function handleRateLimits() {
         'rate-resume-' + hit.threadId.slice(0,8) + '-' + hit.at,{model:original,thinking:effort});
       continue;
     }
-    if (!target) { state.rateLimitedAll = {threadId:hit.threadId,role:hit.role,model:hit.model,error:hit.error,at:now()}; checkpoint(); continue; }
     if (hit.role === 'subagent') {
-      const notice = 'subagent:' + fallback.keyOf(hit.model) + '@' + state.rateLimits[fallback.keyOf(hit.model)].since;
+      const notice = 'subagent:' + fallback.keyOf(hit.model) + '@' + state.rateLimits[fallback.keyOf(hit.model)].since + ':' + executorModel;
       if ((state.rateNotices ||= []).includes(notice)) { checkpoint(); continue; }
       state.rateNotices.push(notice); checkpoint();
+      const action = target ? '依目前執行主線重派，候選為 ' + target + '。請用派工工具清單核對模型與推理。' :
+        '目前沒有可確認的相容候選。依執行主線實際模型與派工清單核對；仍無同家模型可用時只延後受影響的包，其他工作繼續。';
       await sendAndRead(binding.executorId,
-        '子代理 ' + (hit.path || hit.threadId.slice(0,8)) + ' 使用 ' + hit.model + ' 遇額度限速（' + hit.error + '）。之後派子代理依 ' + path.join(run,'model-fallback.json') +
-        ' 改用 ' + target + ' 同層級模型，' + clockText(until) + ' 後恢復原模型；已完成的成果照常收回，未完成的包改用新模型重派。',
+        '子代理 ' + (hit.path || hit.threadId.slice(0,8)) + ' 使用 ' + hit.model + ' 遇額度限速（' + hit.error + '）。' + action +
+        ' 限速紀錄見 ' + path.join(run,'model-fallback.json') + '，' + clockText(until) + ' 後再依主線選模。已完成的成果照常收回。',
         'rate-subagent-' + require('node:crypto').createHash('sha256').update(notice).digest('hex').slice(0,16));
       continue;
     }
+    if (!target) { state.rateLimitedAll = {threadId:hit.threadId,role:hit.role,model:hit.model,error:hit.error,at:now()}; checkpoint(); continue; }
     const settings = fallback.settingsOf(hit.threadId) || {};
     (state.modelSwitch ||= {})[hit.threadId] = {role:hit.role,original,current:target,effort:settings.effort || null,since:Date.now(),until,restored:null};
     state.modelSwitches = (state.modelSwitches || 0) + 1; checkpoint();

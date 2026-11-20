@@ -9,8 +9,12 @@ const path=require('node:path');
 // subagent rollouts on Jay's Mac with this file's own parser (May–Oct 2026, finished, at least a minute of turn
 // time): median output tokens per second of turn time and median output tokens, n = 60, 31 and 11.
 const DEFAULTS={'gpt-5.6-sol':{tokensPerSecond:34.9,outputTokens:19817},'gpt-5.6-terra':{tokensPerSecond:42.2,outputTokens:14627},
-  'gpt-6.1-sol':{tokensPerSecond:25.7,outputTokens:9554}};
-// Unmeasured models use the rate-limit fallback's last stop (gpt-6.1-sol since 2026-10-29).
+  'gpt-6.1-sol':{tokensPerSecond:25.7,outputTokens:9554},
+  // Nov 20: single-model, completed subagents with at least 60 seconds of turn time.
+  // 117 Sol and 43 Sonnet workers from the Nov 19–20 WebRPA and accounting cohort.
+  'gpt-6.2-sol':{tokensPerSecond:32.8,outputTokens:16068},
+  'anthropic/claude-sonnet-5-5':{tokensPerSecond:66.5,outputTokens:79927}};
+// Keep the explicitly labelled historical estimate when neither a run nor the table measures this model.
 const FALLBACK=DEFAULTS['gpt-6.1-sol'];
 const MIN_SAMPLES=3;
 const median=values=>{const sorted=[...values].sort((a,b)=>a-b),mid=sorted.length>>1;return sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;};
@@ -93,6 +97,21 @@ function rollouts(binding,now=Date.now()){
   }
   // Archived rollouts keep their local start time in the name, so the same window applies.
   return files.concat(archivedFiles(name=>name.slice(0,first.length)>=first));
+}
+// Older or isolated installations may lack the App index. Read only matching session headers, never work output.
+function workerPaths(binding, ids){
+  const found=new Map();
+  for(const file of rollouts(binding)){
+    const id=path.basename(file).match(/-([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(?:_[a-f0-9-]+)?\.jsonl$/i)?.[1];
+    if(!ids.has(id)||found.has(id))continue;
+    try{
+      const row=JSON.parse(firstLine(file)),meta=row.payload;
+      if(row.type==='session_meta'&&meta.id===id&&meta.thread_source==='subagent'&&
+         [meta.parent_thread_id,meta.session_id].includes(binding.executorId)&&meta.agent_path?.startsWith('/root/'))
+        found.set(id,meta.agent_path);
+    }catch{}
+  }
+  return found;
 }
 function agentRuns(binding){
   const runs=new Map();
@@ -213,7 +232,7 @@ function resourceUse(snapshot){
   const candidates=[...(packages.ready||[]).filter(item=>item.independent&&item.safe),...(packages.blocked||[]).filter(item=>item.kind==='resource_conflict')].filter(startable);
   return resources.map(item=>({...item,waiting:candidates.filter(candidate=>uses(candidate,item.key).length).map(candidate=>candidate.id)}));
 }
-module.exports={DEFAULTS,sessionsRoot,sessionFile,sessionFiles,markerIn,agentRuns,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
+module.exports={DEFAULTS,sessionsRoot,sessionFile,sessionFiles,markerIn,agentRuns,workerPaths,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
 if(require.main===module){
   const [command,runArg,...rest]=process.argv.slice(2);
   try{

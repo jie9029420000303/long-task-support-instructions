@@ -353,18 +353,22 @@ test('a scheduled turn in a supervised chat is reported so the automation can be
   }finally{await stopWatch(child);f.done();}
 });
 
-test('an executor below Opus at high effort is reported once with the desktop chat to switch',async()=>{
+test('model review follows the supervisor, including Fable, and ignores sidechain models',async()=>{
+  const supervisorModel=(f,model,sidechain=false)=>line(f.supervisorLog,{type:'assistant',isSidechain:sidechain,timestamp:new Date().toISOString(),message:{model,content:[]}});
   const f=fixture({quietMinutes:0});
-  assistant(f,[{type:'text',text:'working'}],{effort:'medium',message:{id:'m1',model:'claude-sonnet-5-5',stop_reason:'tool_use',content:[{type:'text',text:'working'}]}});
+  supervisorModel(f,'claude-fable-5-2');supervisorModel(f,'claude-opus-5-5',true);
+  assistant(f,[{type:'text',text:'working'}],{effort:'high',message:{id:'m1',model:'claude-sonnet-5-5',stop_reason:'tool_use',content:[{type:'text',text:'working'}]}});
   let child=start(f);
   try{
     await until(()=>pending(f)?.kind==='progress_review');
     assert.deepEqual(pending(f).reasons,['executor_model']);
+    assert.equal(pending(f).executorModel.want.model,'claude-fable-5-2');
     assert.equal(pending(f).executorModel.model,'claude-sonnet-5-5');assert.match(pending(f).executorModel.executorDesktopId,/^local_/);
     await stopWatch(child);
     const g=fixture({quietMinutes:0});
     try{
-      assistant(g,[{type:'text',text:'working'}],{effort:'high',message:{id:'m2',model:'claude-opus-5-5',stop_reason:'tool_use',content:[{type:'text',text:'working'}]}});
+      supervisorModel(g,'claude-sonnet-5-5');
+      assistant(g,[{type:'text',text:'working'}],{effort:'high',message:{id:'m2',model:'claude-sonnet-5-5',stop_reason:'tool_use',content:[{type:'text',text:'working'}]}});
       child=start(g);await watching(g);await sleep(500);
       assert.equal(pending(g),null);
     }finally{await stopWatch(child);g.done();}

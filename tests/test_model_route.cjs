@@ -5,11 +5,11 @@ const base=()=>({supervisorModel:opus,roles:['executor','general','ui'],catalogs
 test('Claude supervisor explicitly routes an Opus executor and Sonnet workers at their baseline efforts',()=>{
  const r=resolve(base());assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.model,v.effort]])),{executor:[opus,'high'],general:[sonnet,'medium'],ui:[sonnet,'low']});
 });
-test('a Sonnet supervisor still uses the Claude-side Opus executor policy',()=>{
- const input=base();input.supervisorModel=sonnet;assert.equal(resolve(input).roles.executor.model,opus);
+test('a Sonnet supervisor selects its own model for the executor',()=>{
+ const input=base();input.supervisorModel=sonnet;input.catalogs.executor.push(item(sonnet));assert.equal(resolve(input).roles.executor.model,sonnet);
 });
 test('GPT supervision keeps the existing policy instead of being silently redirected to Claude',()=>{
- assert.equal(resolve({...base(),supervisorModel:'gpt-6.1-sol'}).family,'unchanged');
+ const r=resolve({...base(),supervisorModel:'gpt-6.1-sol'});assert.equal(r.family,'gpt');assert.equal(r.roles.general.status,'unavailable');
 });
 test('missing Sonnet never crosses provider or fabricates an available GPT or Haiku model',()=>{
  const input=base();input.catalogs.subagent=[item('anthropic-apikey/claude-sonnet-5-5'),item('gpt-5.6-terra'),item('anthropic/claude-haiku-5-5')];
@@ -36,11 +36,11 @@ for(const provider of ['anthropic-apikey','anthropic']){
  test(`${provider} supervision keeps every role in its active series even when the other series offers newer models`,()=>{
   const ownOpus=`${provider}/claude-opus-5-5`,ownSonnet=`${provider}/claude-sonnet-5-5`;
   const input={supervisorModel:ownSonnet,roles:['executor','general','ui'],catalogs:{
-   executor:[item(`${other}/claude-opus-99-0`),item(ownOpus)],
+   executor:[item(`${other}/claude-opus-99-0`),item(ownOpus),item(ownSonnet)],
    subagent:[item(`${other}/claude-sonnet-99-0`),item(ownSonnet)]}};
   const r=resolve(input);assert.equal(r.provider,provider+'/');
   assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.status,v.model,v.effort]])),{
-   executor:['ready',ownOpus,'high'],general:['ready',ownSonnet,'medium'],ui:['ready',ownSonnet,'low']});
+   executor:['ready',ownSonnet,'high'],general:['ready',ownSonnet,'medium'],ui:['ready',ownSonnet,'low']});
  });
  test(`${provider} supervision never borrows the other series when its own role models are missing`,()=>{
   const r=resolve({supervisorModel:`${provider}/claude-opus-5-5`,roles:['executor','general','ui'],catalogs:{
@@ -48,3 +48,29 @@ for(const provider of ['anthropic-apikey','anthropic']){
   for(const role of ['executor','general','ui'])assert.equal(r.roles[role].status,'unavailable');
  });
 }
+
+for(const [first,second,highest] of [
+ ['gpt-6.1-terra','gpt-6.2-sol','gpt-6.2-astra'],
+ ['anthropic/claude-sonnet-5-5','anthropic/claude-opus-5-5','anthropic/claude-fable-5-2']
+]){
+ test('third failure raises model and reasoning, fourth assigns mainline: '+first,()=>{
+  const subagent=[first,second,highest].map(id=>({id,efforts:['low','medium','high','xhigh','max']}));
+  const input={supervisorModel:second,roles:['general'],catalogs:{subagent},errors:3,previousEffort:'xhigh'};
+  for(const [previousModel,target] of [[first,second],[second,highest],[highest,highest]]){
+    const row=resolve({...input,previousModel}).roles.general;
+    assert.equal(row.status,'ready');assert.equal(row.model,target);assert.equal(row.effort,'max');
+  }
+  const capped=resolve({...input,previousModel:highest,previousEffort:'max'}).roles.general;
+  assert.equal(capped.effort,'max');assert.equal(capped.modelAtCeiling,true);assert.equal(capped.effortAtCeiling,true);
+  const promoted=resolve({...input,previousModel:first}).roles.general;
+  assert.equal(promoted.modelAtCeiling,false);assert.equal(promoted.effortAtCeiling,false);
+  assert.equal(resolve({...input,previousModel:first,overrides:{general:{effort:'xhigh'}}}).roles.general.status,'unavailable');
+  assert.equal(resolve({...input,errors:4}).roles.general.status,'takeover');
+ });
+}
+test('worker catalog uses visible numerically latest release of actual executor family',()=>{
+ const catalog=[item('gpt-6.9-terra'),item('gpt-6.10-terra'),{...item('gpt-7.0-terra'),visibility:'hide'},item(sonnet)];
+ const input={supervisorModel:opus,executorModel:'gpt-6.2-sol',roles:['general'],catalogs:{subagent:catalog}};
+ assert.equal(resolve(input).roles.general.model,'gpt-6.10-terra');
+ assert.equal(resolve({...input,overrides:{general:{model:sonnet}}}).roles.general.status,'unavailable');
+});

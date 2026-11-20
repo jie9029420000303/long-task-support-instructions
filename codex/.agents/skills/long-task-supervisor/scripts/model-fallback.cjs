@@ -1,26 +1,36 @@
 // Rate-limit model fallback (Jay 2026-10-11): when the supervisor, the executor or one of its subagents is refused
-// for quota, switch to the next model in Jay's order anthropic/ -> anthropic-apikey/ -> gpt-6.1-sol, and switch
+// for quota, mainlines follow the Claude accounts then the latest visible Sol. Workers stay with their current parent. Switch
 // back when the limit resets. opencodex records every request in usage.jsonl with conversationId =
 // sha256(Codex thread id)[:32], so a 429 maps to the exact thread (2026-10-11 05:04: this research chat on
 // anthropic/claude-opus-5-5, "All Anthropic OAuth accounts are temporarily rate-limited").
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const pace=require('./pace.cjs');
 const FALLBACK_MS=5*60*60*1000;
-// The last stop moved from gpt-5.6-sol to the current GPT model (Jay 2026-10-29: 「限速後換模型換成你的推薦的那個 SOL」).
-const LAST_RESORT='gpt-6.1-sol';
+const catalog=require('./model-catalog.cjs');
+const lastResort=()=>catalog.latest(catalog.installed(),'gpt','','sol')?.id;
 const home=()=>process.env.OPENCODEX_HOME||path.join(os.homedir(),'.opencodex');
 const usageFile=()=>process.env.OPENCODEX_USAGE_FILE||path.join(home(),'usage.jsonl');
 const quotaFile=()=>process.env.OPENCODEX_QUOTA_FILE||path.join(home(),'provider-account-quota-cache.json');
 const hashId=id=>crypto.createHash('sha256').update(String(id)).digest('hex').slice(0,32);
 // The limit belongs to a provider path: anthropic/ and anthropic-apikey/ are separate accounts; other models stand alone.
 function keyOf(model){const match=/^(anthropic(?:-apikey)?\/)/.exec(model||'');return match?match[1]:String(model||'');}
-function chainFor(original,role){
-  const name=/(claude-[^/]+)$/.exec(original||'')?.[1]||(role==='subagent'?'claude-sonnet-5-5':'claude-opus-5-5');
-  return ['anthropic/'+name,'anthropic-apikey/'+name,LAST_RESORT];
+function chainFor(original,role,executorModel=original){
+  const items=catalog.installed(), originalModel=catalog.identity(original), owner=catalog.identity(executorModel);
+  if(role==='subagent'){
+    if(!owner)return [];
+    const sameFamily=originalModel?.family===owner.family;
+    const tier=sameFamily?originalModel.tier:(owner.family==='claude'?'sonnet':'terra');
+    const accounts=owner.family==='gpt'?['']:[...new Set([owner.provider,'anthropic/','anthropic-apikey/'])];
+    return accounts.map(provider=>catalog.latest(items,owner.family,provider,tier)?.id).filter(Boolean);
+  }
+  const tier=originalModel?.family==='claude'?originalModel.tier:'opus';
+  const claude=['anthropic/','anthropic-apikey/'].map(provider=>catalog.latest(items,'claude',provider,tier)?.id).filter(Boolean);
+  const sol=catalog.latest(items,'gpt','','sol')?.id;
+  return sol?[...claude,sol]:claude;
 }
 function limited(state,model,now=Date.now()){const item=state.rateLimits?.[keyOf(model)];return Boolean(item&&item.until>now);}
-function next(original,current,role,state,now=Date.now()){
-  return chainFor(original,role).find(model=>model!==current&&!limited(state,model,now))||null;
+function next(original,current,role,state,now=Date.now(),executorModel=original){
+  return chainFor(original,role,executorModel).find(model=>model!==current&&!limited(state,model,now))||null;
 }
 // The refused turn's own error names the reset: "You've hit your usage limit. Try again at 11:40 PM.", or for a later day
 // "Try again at Nov 10th, 2026 9:32 AM." (local time). WEB 2026-11-08 23:14: the error said 11:40 PM, the watcher assumed
@@ -170,11 +180,12 @@ function fullAccess(settings){
 function publish(run,state,now=Date.now()){
   const limits=Object.fromEntries(Object.entries(state.rateLimits||{}).filter(([,item])=>item.until>now)
     .map(([key,item])=>[key,{until:new Date(item.until).toISOString(),basis:item.basis,model:item.model}]));
-  const body={chain:['anthropic/','anthropic-apikey/',LAST_RESORT],limits,
-    rule:'派子代理前：模型的系列在 limits 且 until 未到，就依 chain 改用下一個同層級模型（Opus 換 Opus、Sonnet 換 Sonnet），全被限速才用 '+LAST_RESORT+'；until 過後回到原模型。',
+  const sol=lastResort();
+  const body={chain:['anthropic/','anthropic-apikey/',...(sol?[sol]:[])],limits,
+    rule:'主線限速依 chain 選可用備援。子代理只在執行主線同一家選可用模型。',
     updatedAt:new Date(now).toISOString()};
   const file=path.join(run,'model-fallback.json');
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);
   return body;
 }
-module.exports={FALLBACK_MS,LAST_RESORT,hashId,keyOf,chainFor,limited,next,retryAt,errorReset,resetFor,refine,recovered,scan,settingsOf,fullAccess,publish};
+module.exports={FALLBACK_MS,lastResort,hashId,keyOf,chainFor,limited,next,retryAt,errorReset,resetFor,refine,recovered,scan,settingsOf,fullAccess,publish};
