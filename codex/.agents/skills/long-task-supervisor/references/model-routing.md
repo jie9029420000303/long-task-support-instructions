@@ -41,7 +41,7 @@ Claude API 有時以 HTTP 400 回報帳戶用量上限。背景程式以同一�
 
 監督從所選的 Claude 訂閱開始，依序為同級 Claude API、目前可見的最新 GPT Sol 訂閱。執行路線進入 Sol 後，由背景程式讀該執行對話、該 Sol 回合的有效一週用量。剩餘剛好 50% 留在 Sol；低於 50% 或實際被拒則轉第四順位。百分比未知時可用的 Sol 繼續。監督保留前三順位。
 
-第四順位應使用 OpenCodex 目錄中可用、max 推理且鎖定供應商的模型。程式實作預設 DeepSeek V4.1 Flash 1017／Ambient FP4，其次 Muse Ember／Google Vertex Global；多工具任務可用 binding 的 fourthExecutorModel 指定 Muse 優先。任何一款被拒會查另一款，沒有用量比例。子代理要在實際派工清單中找到與當前主線相容的型號。每個角色分別保留等待狀態，背景自動重查各順位，較高順位先恢復即續接。送達回執證明訊息到達，對話由目標模型產生輸出才確認接手。
+第四順位預設先選 DeepSeek V4.1 Flash 1017，再選 Muse Ember。兩款均須在 OpenCodex 目錄可用、鎖定 max 推理且有合格供應商。OpenCodex 每日依加權成本篩選及排序各模型的供應商，對每次請求套用該模型的名單。技能每次選模讀取目前設定，單一合格端點也可使用，某款沒有合格端點時略過該款。舊安裝的 Ambient FP4（DeepSeek）或 Google Vertex Global（Muse）單點設定仍適用。多工具任務可用 binding 的 fourthExecutorModel 指定 Muse 優先。任何一款被拒會查另一款，沒有用量比例。子代理要在實際派工清單中找到與當前主線相容的型號。每個角色分別保留等待狀態，背景自動重查各順位，較高順位先恢復即續接。送達回執證明訊息到達，對話由目標模型產生輸出才確認接手。
 
 - 平台限制（2026-10-11 實測）：所有 OAuth 帳號都被限速時，App 會照 opencodex 給的最早恢復時間，讓當下的回合原地等待；帶 `model` 的訊息會立即改掉該對話的模型設定，但不會中斷正在等待的回合，新模型從下一個回合起生效，排隊的訊息在回合恢復後照常收進去。App 工具沒有中斷別的對話回合的功能，所以已在等待的回合無法提早改用新模型。
 - 子代理：執行端將 `RUN/model-fallback.json` 視為可選限速紀錄，新 run 未遇限速時允許缺檔。在 model-route 輸入加上 `"fallback":"RUN/model-fallback.json"`，會自動選替代模型並回傳 `restoreAfter`。原模型的系列在 limits 裡且 until 還沒到，就依當時主線家族選替代模型，恢復後重新依主線選模。

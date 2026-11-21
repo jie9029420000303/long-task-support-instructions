@@ -12,8 +12,8 @@ const subscription = 'anthropic/claude-opus-5-5';
 const paid = 'anthropic-apikey/claude-opus-5-5';
 const sol = 'gpt-6.2-sol';
 const cheap = new Map([
-  ['deepseek/deepseek-v4.1-flash-1017','ambient/fp4'],
-  ['meta/muse-ember','google-vertex/global']
+  ['deepseek/deepseek-v4.1-flash-1017',['ambient/fp4','pearl-research/fp8']],
+  ['meta/muse-ember',['google-vertex/global','meta']]
 ]);
 const slug = raw => 'openrouter/'+raw.replace('/','-');
 const fourths = [...cheap.keys()].map(slug);
@@ -50,7 +50,7 @@ function sandbox(t,{state={},preferred}={}) {
   const catalog = path.join(home,'opencodex-catalog.json'), usage = path.join(proxyHome,'usage.jsonl');
   write(catalog,{models:[subscription,paid,sol,...fourths].map(id=>({slug:id,visibility:'list',supported_reasoning_levels:[{effort:'high'},{effort:'max'}]}))});
   write(path.join(proxyHome,'config.json'),{providers:{openrouter:{disabled:false,enforceSelectedModels:true,selectedModels:[...cheap.keys()],
-    modelOpenRouterRouting:Object.fromEntries([...cheap].map(([id,provider])=>[id,{only:[provider],allowFallbacks:false}])),
+    modelOpenRouterRouting:Object.fromEntries([...cheap].map(([id,endpoints])=>[id,{order:endpoints,only:endpoints,allowFallbacks:true}])),
     modelPinnedReasoningEfforts:Object.fromEntries([...cheap.keys()].map(id=>[id,'max']))}}});
   fs.writeFileSync(usage,'');
   const rollout = id => path.join(logs,'rollout-test-'+id+'.jsonl');
@@ -113,6 +113,7 @@ test('the current Sol conversation can protect subscription capacity without swi
   assert.deepEqual(f.calls().filter(call=>call.model),[],'exactly 50% stays on Sol');
   f.quota(executor,51,{slot:'secondary'});
   await waitFor(()=>f.calls().some(call=>call.threadId===executor&&fourths.includes(call.model)),'no automatic fourth route at 49%');
+  assert.equal(f.calls().find(call=>fourths.includes(call.model)).model,fourths[0]);
   assert.equal(f.calls().find(call=>fourths.includes(call.model)).thinking,'max');
   assert.ok(!f.calls().some(call=>call.threadId===supervisor&&fourths.includes(call.model)));
 });
@@ -139,10 +140,25 @@ test('the approved explicit choice is used at max when the third model refuses a
   assert.equal(f.calls().find(call=>call.model===preferred).thinking,'max');
 });
 
-test('an unpinned OpenRouter provider or changed effort cannot silently consume a fourth route',async t=>{
+test('an empty DeepSeek price list sends the executor directly to eligible Muse at max',async t=>{
+  const f=sandbox(t,{state:initialState()});
+  const config=read(f.config);
+  const [deepseek]=cheap.keys();
+  config.providers.openrouter.modelOpenRouterRouting[deepseek]={
+    only:['opencodex-price-cap.invalid/no-eligible-endpoint'],allowFallbacks:false
+  };
+  write(f.config,config);
+  f.refuse(executor,sol);
+  await f.start();
+  await waitFor(()=>f.calls().some(call=>call.model===fourths[1]),'no continuation on Muse');
+  const calls=f.calls().filter(call=>fourths.includes(call.model));
+  assert.deepEqual(calls.map(c=>[c.threadId,c.model,c.thinking]),[[executor,fourths[1],'max']]);
+});
+
+test('unrestricted supplier fallback or changed effort cannot silently consume a fourth route',async t=>{
   const f=sandbox(t,{state:initialState()});
   const config=read(f.config),provider=config.providers.openrouter;
-  provider.modelOpenRouterRouting['deepseek/deepseek-v4.1-flash-1017'].allowFallbacks=true;
+  delete provider.modelOpenRouterRouting['deepseek/deepseek-v4.1-flash-1017'].only;
   provider.modelPinnedReasoningEfforts['meta/muse-ember']='low';
   write(f.config,config);
   f.refuse(executor,sol);
@@ -168,7 +184,7 @@ test('a stale visible catalog cannot reactivate a disabled provider or a model r
   }
 });
 
-test('a fourth-route 429 continues the same executor on the other pinned model at max and keeps the supervisor on subscription',async t=>{
+test('a fourth-route 429 continues the same executor on the other eligible model at max and keeps the supervisor on subscription',async t=>{
   const f=sandbox(t,{state:initialState()});
   f.refuse(executor,sol);
   await f.start();
@@ -204,4 +220,24 @@ test('an executor that moved off Sol selects its actual fourth-route model for t
     const row=f.resolveWorker({supervisorModel:sol,executorModel:sol,roles:['general'],catalogs:{subagent:catalog}},executor);
     assert.equal(row.model,model);assert.equal(row.effort,'max');
   }
+});
+
+test('workers follow the refreshed supplier list and never select an empty or inconsistent route',t=>{
+  const f=sandbox(t),config=read(f.config),rules=config.providers.openrouter.modelOpenRouterRouting;
+  const [raw]=cheap.keys(),model=fourths[0];
+  const worker=rule=>{
+    rules[raw]=rule;write(f.config,config);
+    return f.resolveWorker({supervisorModel:sol,executorModel:model,roles:['general'],catalogs:{subagent:[{id:model,efforts:['max']}]}});
+  };
+  const pearl='pearl-research/fp8',ambient='ambient/fp4';
+  assert.equal(worker({order:[pearl],only:[pearl],allowFallbacks:false}).model,model,'the cheapest eligible supplier can change');
+  assert.equal(worker({only:[ambient],allowFallbacks:false}).model,model,'existing single-supplier installs still work');
+  for(const rule of [
+    {only:['opencodex-price-cap.invalid/no-eligible-endpoint'],allowFallbacks:false},
+    {order:[],only:[],allowFallbacks:false},
+    {order:[ambient],only:[ambient,pearl],allowFallbacks:true},
+    {order:[pearl,ambient],only:[pearl,ambient,'unranked'],allowFallbacks:true},
+    {order:[ambient,pearl],allowFallbacks:true},
+    {order:[ambient,ambient],only:[ambient,ambient],allowFallbacks:true}
+  ]) assert.equal(worker(rule).status,'unavailable',JSON.stringify(rule));
 });
