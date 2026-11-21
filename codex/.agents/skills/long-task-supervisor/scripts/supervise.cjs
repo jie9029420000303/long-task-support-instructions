@@ -53,6 +53,7 @@ function init() {
   login.validate(input.loginSites);
   const fourth=input.fourthExecutorModel && require('./model-fallback.cjs').availableFourth(input.fourthExecutorModel);
   if(input.fourthExecutorModel)need(fourth,'The fourth executor model and effort must be in the current Codex catalog');
+  const modelPolicy=require('./model-fallback.cjs').modelPolicy(input.modelPolicy!==undefined || input.modelFallback!==undefined ? input : inherited?.binding||{});
   fs.mkdirSync(path.dirname(run), { recursive: true });
   fs.mkdirSync(run, { recursive: false });
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
@@ -62,7 +63,7 @@ function init() {
   fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   const binding = {
     ...(fourth?{fourthExecutorModel:fourth}:{}),
-    platform: 'codex', projectRoot: input.projectRoot, allowedRoots: input.allowedRoots.concat(run),
+    modelPolicy, platform: 'codex', projectRoot: input.projectRoot, allowedRoots: input.allowedRoots.concat(run),
     executorId: input.executorId, supervisorId: input.supervisorId,
     callerTurnId: currentTurn(input.supervisorId),
     contractSha256: hash(path.join(run, 'contract.json')), dispatchAudit:{enabled:input.dispatchAudit!==false,snapshot:'dispatch.json',acceptance:true}, createdAt: now(),
@@ -164,6 +165,10 @@ function brief() {
     executorPermission:permissionOf(state.executorSettings), reviewRejections:(state.reviewRejections || []).slice(-3).map(require('./supervisor-clock.cjs').safeRejection),
     instruction:state.instruction || null, modelSwitch:state.modelSwitch || null,
     rateLimits:Object.fromEntries(Object.entries(state.rateLimits || {}).filter(([, item]) => item.until > Date.now()).map(([key, item]) => [key, {until:iso(item.until), basis:item.basis}])),
+    // The model order the watcher applies (Jay 2026-11-21): read it here, never switch a model by hand.
+    claudeQuota:state.claudeQuota ? {executorMayUseClaude:state.claudeQuota.allowed === true, summary:require('./claude-quota.cjs').describe(state.claudeQuota), readAt:iso(state.claudeQuota.at)} : null,
+    apiMonth:state.apiMonth?.until > Date.now() ? {until:iso(state.apiMonth.until), basis:state.apiMonth.basis} : null,
+    heldFinalReviews:(state.heldFinalReviews || []).map(item => ({id:item.event?.id || null, model:item.model || null, at:item.at || null})),
     // An executor turn the platform ended and the executor has not left yet (Jay 2026-10-14): later wakes see it too.
     platformError:state.platformError ? {...state.platformError, since:iso(state.platformError.since)} : null,
     dashboard:path.join(run, require('./dashboard.cjs').FILE),

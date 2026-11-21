@@ -45,8 +45,9 @@ function fixture({executorModel=opus,supervisorModel=null,finals,state={},usageR
   const executorLog=path.join(today(home),'rollout-t-executor-qa.jsonl');
   line(executorLog,{timestamp:binding.createdAt,type:'session_meta',payload:{id:'executor-qa'}});
   line(executorLog,{timestamp:binding.createdAt,type:'turn_context',payload:settings(executorModel)});
+  let supervisorLog=null;
   if(supervisorModel){
-    const log=path.join(today(home),'rollout-t-supervisor-qa.jsonl');
+    const log=supervisorLog=path.join(today(home),'rollout-t-supervisor-qa.jsonl');
     line(log,{timestamp:binding.createdAt,type:'session_meta',payload:{id:'supervisor-qa'}});line(log,{timestamp:binding.createdAt,type:'turn_context',payload:settings(supervisorModel)});
   }
   const sent=path.join(root,'sent.json'),mockFile=path.join(root,'mock.json'),usage=path.join(root,'usage.jsonl'),quota=path.join(root,'quota.json');
@@ -62,7 +63,7 @@ function fixture({executorModel=opus,supervisorModel=null,finals,state={},usageR
       source:{path:source,sha256:sha(source)}},changes:[{action:'authorization',id:'push-'+id,scope:'release branch push',instruction:'Push the release branch whenever tests pass'}]});
     return file;
   };
-  return {root,run,binding,executorLog,env,statePath:path.join(run,'daemon-state.json'),grant,
+  return {root,run,binding,executorLog,supervisorLog,env,statePath:path.join(run,'daemon-state.json'),grant,
     supervise:(args,extra={})=>execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),...args],{env:{...env,...extra},encoding:'utf8',stdio:['ignore','pipe','pipe']}),
     start(){child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{env,stdio:['ignore','pipe','pipe']});return child;},
     calls(){const file=sent+'.args.json';return fs.existsSync(file)?read(file):[];},
@@ -96,29 +97,34 @@ test('the refused turn\'s own error wins over the quota cache and the five-hour 
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('an API spending-cap 400 after the subscription refusal advances the same mainline to Sol',async()=>{
-  const f=fixture(),id=fallback.hashId('executor-qa'),usage=f.env.OPENCODEX_USAGE_FILE;
+// Only the supervisor has the Claude API key in its order (Jay 2026-11-21); its monthly cap is remembered for every run.
+test('an API spending-cap 400 after the supervisor\'s subscription refusal advances it to Sol and skips the key until the named month reset',async()=>{
+  const f=fixture({supervisorModel:opus}),id=fallback.hashId('supervisor-qa'),usage=f.env.OPENCODEX_USAGE_FILE;
   f.env.CODEX_SUPERVISOR_DECISION_POLL_MS='100';
   try{
     f.start();await until(()=>read(f.statePath).usageOffset!==undefined);
-    f.refuse('executor-qa',opus);
-    await until(()=>f.calls().some(c=>c.model===paid));
+    f.refuse('supervisor-qa',opus);
+    await until(()=>f.calls().some(c=>c.threadId==='supervisor-qa'&&c.model===paid));
     const at=Date.now(),turn='paid-retry',reset=new Date(at+31*86400000).toISOString().slice(0,10);
     const message='You have reached your specified API usage limits. You will regain access on '+reset+' at 00:00 UTC.';
-    line(f.executorLog,{timestamp:iso(at),type:'turn_context',payload:{model:paid,turn_id:turn}});
+    line(f.supervisorLog,{timestamp:iso(at),type:'turn_context',payload:{model:paid,turn_id:turn}});
     line(usage,{conversationId:id,timestamp:at,requestedModel:paid,status:400,errorCode:'invalid_request_error',failureCause:'payload-rejected'});
     await until(()=>read(f.statePath).pendingQuotaChecks?.[id]);
     assert.ok(!f.calls().some(c=>c.model==='gpt-6.10-sol'));
-    line(f.executorLog,{timestamp:iso(Date.now()),type:'event_msg',payload:{type:'task_complete',turn_id:turn,
+    line(f.supervisorLog,{timestamp:iso(Date.now()),type:'event_msg',payload:{type:'task_complete',turn_id:turn,
       error:{message:JSON.stringify({error:{message:'Provider error 400: '+JSON.stringify({error:{message}})}})}}});
     await until(()=>f.calls().some(c=>c.model==='gpt-6.10-sol'));
-    const switched=()=>read(f.statePath).modelSwitch['executor-qa'];
+    const switched=()=>read(f.statePath).modelSwitch['supervisor-qa'];
     assert.equal(switched().original,opus);
-    assert.equal(read(f.statePath).rateLimits['anthropic-apikey/'].until,Date.parse(reset+'T00:00:00Z'));
+    assert.equal(read(f.statePath).rateLimits['supervisor|anthropic-apikey/'].until,Date.parse(reset+'T00:00:00Z'));
+    assert.equal(read(f.statePath).apiMonth.until,Date.parse(reset+'T00:00:00Z'),'the month cap is kept for every run');
+    assert.equal(read(path.join(f.run,'anthropic-api-month.json')).until,Date.parse(reset+'T00:00:00Z'));
+    assert.ok(fallback.limited({apiMonth:read(f.statePath).apiMonth},paid,Date.now(),'supervisor'),'another run with no refusal of its own also skips the key');
     assert.ok(!switched().respondedAt,'accepting the switch message does not prove the model answered');
     line(usage,{conversationId:id,timestamp:Date.now(),requestedModel:'gpt-6.10-sol',status:200,usage:{outputTokens:19}});
     await until(()=>switched().respondedAt);
     assert.equal(f.calls().filter(c=>c.model==='gpt-6.10-sol').length,1);
+    assert.ok(!f.calls().some(c=>c.threadId==='executor-qa'&&c.model),'the supervisor\'s refusals never move the executor');
   }finally{await f.stop();}
 });
 
@@ -140,7 +146,7 @@ test('a malformed API request does not trigger a paid fallback from an old or qu
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('only an executor exhausts the three normal routes into its configured and visible fourth model',async()=>{
+test('an executor can prefer an eligible fourth model and an exhausted supervisor can use the default fourth model',async()=>{
   const f=fixture(),model='openrouter/deepseek-deepseek-v4.1-flash-1017',fourth={model,effort:'max'};
   try{
     const catalogFile=path.join(f.root,'models.json'),catalog=read(f.env.OPENCODEX_MODEL_CATALOG);
@@ -161,7 +167,7 @@ test('only an executor exhausts the three normal routes into its configured and 
     const stateAfter=read(f.statePath);assert.equal(stateAfter.modelSwitch['executor-qa'].effort,'high');
     assert.deepEqual(read(path.join(f.run,'model-fallback.json')).fourthExecutorModel,fourth);
     withEnv({OPENCODEX_HOME:f.root,OPENCODEX_MODEL_CATALOG:catalogFile},()=>{
-      assert.equal(fallback.next(opus,'gpt-6.10-sol','supervisor',stateAfter,Date.now(),opus,fourth),null);
+      assert.equal(fallback.next(opus,'gpt-6.10-sol','supervisor',stateAfter,Date.now(),opus,fourth),model);
       assert.equal(fallback.availableFourth({...fourth,effort:'ultra'}),null);
       entry.visibility='hide';save(catalogFile,catalog);assert.equal(fallback.availableFourth(fourth),null);
     });
@@ -188,14 +194,20 @@ test('a refusal already followed by a success is history on every read, and each
 
 test('a route that serves requests again ends its limit early, but only after ten quiet minutes and a success since the limit',()=>{
   const now=Date.now(),since=now-30*60000;
-  const limited=extra=>({rateLimits:{'anthropic/':{since,until:now+4*3600000,model:opus}},modelSwitch:{s:{original:opus,current:paid,since,until:now+4*3600000,restored:null}},...extra});
+  const limited=extra=>({rateLimits:{'supervisor|anthropic/':{since,until:now+4*3600000,model:opus}},modelSwitch:{s:{role:'supervisor',original:opus,current:paid,since,until:now+4*3600000,restored:null}},...extra});
   const recent=limited({routeRefused:{'anthropic/':now-5*60000},routeOk:{'anthropic/':now-60000}});
   assert.equal(fallback.recovered(recent,now),false,'refused five minutes ago: one chat\'s success could otherwise bounce another back and forth');
   const quiet=limited({routeRefused:{'anthropic/':now-15*60000},routeOk:{'anthropic/':now-60000}});
   assert.equal(fallback.recovered(quiet,now),true);
-  assert.equal(quiet.rateLimits['anthropic/'].until,now);assert.equal(quiet.modelSwitch.s.until,now,'the switched chat is due to return now, not at a guessed 04:14');
+  assert.equal(quiet.rateLimits['supervisor|anthropic/'].until,now);assert.equal(quiet.modelSwitch.s.until,now,'the switched chat is due to return now, not at a guessed 04:14');
   const before=limited({routeRefused:{'anthropic/':now-40*60000},routeOk:{'anthropic/':since-60000}});
   assert.equal(fallback.recovered(before,now),false,'a success from before the limit proves nothing');
+  // The supervisor shares the Claude subscription: its success must not send a refused executor back onto it.
+  const sonnet='anthropic/claude-sonnet-5-5';
+  const executor={rateLimits:{'executor|anthropic/':{since,until:now+4*3600000,model:sonnet}},modelSwitch:{e:{role:'executor',original:sonnet,current:'gpt-6.10-sol',since,until:now+4*3600000,restored:null}},
+    routeRefused:{'anthropic/':now-15*60000},routeOk:{'anthropic/':now-60000}};
+  assert.equal(fallback.recovered(executor,now),false,'the executor returns on a quota reading or its named reset only');
+  assert.equal(executor.rateLimits['executor|anthropic/'].until,now+4*3600000);assert.equal(executor.modelSwitch.e.until,now+4*3600000);
 });
 
 test('an authorization reaches the effective contract through the running watcher, which keeps watching',async()=>{
@@ -251,24 +263,25 @@ test('a refusal whose named reset already passed keeps the model and continues t
     assert.equal(resume.threadId,'executor-qa');assert.equal(resume.model,opus,'no move to the paid key for a limit that is over');
     assert.ok(resume.prompt.includes('\n\n'+EXECUTOR_PUSH+'\n'));assert.match(resume.prompt.split('\n').at(-1),/^背景程式送出時間（台北）：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     assert.ok(!f.calls().some(call=>call.model===paid));
-    assert.equal(read(f.statePath).rateLimits['anthropic/'].fromError,true);
+    assert.equal(read(f.statePath).rateLimits['executor|anthropic/'].fromError,true);
   }finally{await f.stop();}
 });
 
 test('a refusal for a model the chat already left is ignored, but a chat back on that model is switched again',async()=>{
-  const record={role:'executor',original:opus,current:paid,effort:'high',since:Date.now()-60000,until:Date.now()+3600000,restored:null};
-  const stale=fixture({executorModel:paid,state:{modelSwitch:{'executor-qa':{...record}}}});
+  const sol='gpt-6.10-sol',record={role:'executor',original:opus,current:sol,effort:'high',since:Date.now()-60000,until:Date.now()+3600000,restored:null};
+  const stale=fixture({executorModel:sol,state:{modelSwitch:{'executor-qa':{...record}}}});
   const back=fixture({executorModel:opus,state:{modelSwitch:{'executor-qa':{...record}}}});
   try{
     stale.start();back.start();
     await until(()=>read(stale.statePath).usageOffset!==undefined&&read(back.statePath).usageOffset!==undefined);
     stale.refuse('executor-qa',opus);back.refuse('executor-qa',opus);
-    await until(()=>back.calls().some(call=>call.model===paid));
-    const again=back.calls().find(call=>call.model===paid);
+    await until(()=>back.calls().some(call=>call.model===sol));
+    const again=back.calls().find(call=>call.model===sol);
     assert.equal(again.threadId,'executor-qa');assert.match(again.prompt,/額度限速/);
-    assert.equal(read(back.statePath).modelSwitch['executor-qa'].current,paid);
-    await until(()=>read(stale.statePath).rateLimits?.['anthropic/']&&!(read(stale.statePath).switchQueue||[]).length);
-    assert.ok(!stale.calls().some(call=>call.model),'the chat already runs the paid key: nothing to switch');
+    assert.equal(read(back.statePath).modelSwitch['executor-qa'].current,sol);
+    assert.ok(!back.calls().some(call=>call.model===paid),'the executor never moves to the Claude API key');
+    await until(()=>read(stale.statePath).rateLimits?.['executor|anthropic/']&&!(read(stale.statePath).switchQueue||[]).length);
+    assert.ok(!stale.calls().some(call=>call.model),'the chat already runs Sol: nothing to switch');
   }finally{await stale.stop();await back.stop();}
 });
 
@@ -286,7 +299,10 @@ test('a supervisor moved to the paid key gets its model back once its route work
     assert.equal(restore.threadId,'supervisor-qa');assert.equal(restore.model,opus);assert.equal(restore.thinking,'high');
     assert.ok(!restore.prompt.includes(EXECUTOR_PUSH));
     await until(()=>read(f.statePath).modelSwitch['supervisor-qa'].restored);
-    assert.deepEqual(read(path.join(f.run,'model-fallback.json')).limits,{},'subagents stop avoiding a route that works');
+    const published=read(path.join(f.run,'model-fallback.json'));
+    assert.deepEqual(published.supervisorLimits,{},'the supervisor stops avoiding a route that works');
+    // The pre-2026-11-21 record covered every role; the executor's half returns on a quota reading or the reset only.
+    assert.deepEqual(Object.keys(published.limits),['anthropic/']);
   }finally{await f.stop();}
   const g=fixture({supervisorModel:opus,state:{modelSwitch:{'supervisor-qa':{...record,until:now-1000}}}});
   try{
@@ -345,8 +361,8 @@ test('every message to the executor carries the full-speed push and ends with it
     p.start();
     await until(()=>read(p.statePath).usageOffset!==undefined);
     p.refuse('executor-qa',opus);
-    await until(()=>p.calls().some(call=>call.model===paid));
-    assert.ok(!p.calls().find(call=>call.model===paid).prompt.includes(EXECUTOR_PUSH),'Jay paused the run: no push to dispatch more');
+    await until(()=>p.calls().some(call=>call.model==='gpt-6.10-sol'));
+    assert.ok(!p.calls().find(call=>call.model==='gpt-6.10-sol').prompt.includes(EXECUTOR_PUSH),'Jay paused the run: no push to dispatch more');
   }finally{await p.stop();}
 });
 

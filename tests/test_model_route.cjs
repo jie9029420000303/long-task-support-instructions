@@ -1,12 +1,18 @@
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {resolve}=require(path.join(process.env.CODEX_SUPERVISOR_SCRIPTS||path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts'),'model-route.cjs'));
-const item=id=>({id,efforts:['low','medium','high','xhigh']}),opus='anthropic/claude-opus-5-5',sonnet='anthropic/claude-sonnet-5-5';
-const base=()=>({supervisorModel:opus,roles:['executor','general','ui'],catalogs:{executor:[item(opus)],subagent:[item(sonnet)]}});
-test('Claude supervisor explicitly routes an Opus executor and Sonnet workers at their baseline efforts',()=>{
- const r=resolve(base());assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.model,v.effort]])),{executor:[opus,'high'],general:[sonnet,'medium'],ui:[sonnet,'low']});
+const item=id=>({id,efforts:['low','medium','high','xhigh']}),opus='anthropic/claude-opus-5-5',sonnet='anthropic/claude-sonnet-5-5',sol='gpt-6.2-sol';
+const base=()=>({supervisorModel:opus,roles:['executor','general','ui'],catalogs:{executor:[item(opus),item(sonnet),item(sol)],subagent:[item(sonnet)]}});
+const fs=require('node:fs'),os=require('node:os');
+function published(t,body){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'model-route-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'model-fallback.json');fs.writeFileSync(file,JSON.stringify(body));return file;
+}
+// Jay 2026-11-21: the executor side starts on subscription Sonnet; Opus stays with the supervisor.
+test('a Claude supervisor starts the executor and its workers on subscription Sonnet at their baseline efforts',()=>{
+ const r=resolve(base());assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.model,v.effort]])),{executor:[sonnet,'high'],general:[sonnet,'medium'],ui:[sonnet,'low']});
 });
 test('a Sonnet supervisor selects its own model for the executor',()=>{
- const input=base();input.supervisorModel=sonnet;input.catalogs.executor.push(item(sonnet));assert.equal(resolve(input).roles.executor.model,sonnet);
+ const input=base();input.supervisorModel=sonnet;assert.equal(resolve(input).roles.executor.model,sonnet);
 });
 test('GPT supervision keeps the existing policy instead of being silently redirected to Claude',()=>{
  const r=resolve({...base(),supervisorModel:'gpt-6.1-sol'});assert.equal(r.family,'gpt');assert.equal(r.roles.general.status,'unavailable');
@@ -16,38 +22,56 @@ test('missing Sonnet never crosses provider or fabricates an available GPT or Ha
  const r=resolve(input);assert.equal(r.roles.executor.status,'ready');assert.equal(r.roles.general.status,'unavailable');
 });
 test('unused roles do not block startup and explicit user choices supersede defaults',()=>{
- const input=base();input.roles=['executor'];input.catalogs.subagent=[];input.catalogs.executor.push(item(sonnet));input.overrides={executor:{model:sonnet,effort:'medium'}};
- assert.deepEqual(resolve(input).roles.executor,{status:'ready',model:sonnet,effort:'medium',basis:'explicit-user-override'});
+ const input=base();input.roles=['executor'];input.catalogs.subagent=[];input.overrides={executor:{model:opus,effort:'medium'}};
+ assert.deepEqual(resolve(input).roles.executor,{status:'ready',model:opus,effort:'medium',basis:'explicit-user-override'});
 });
 test('separate creation and subagent inventories cannot claim a model supported only by the other tool',()=>{
- const input=base();input.catalogs.executor=[item(sonnet)];input.catalogs.subagent=[item(opus)];const r=resolve(input);
- assert.equal(r.roles.executor.status,'unavailable');assert.equal(r.roles.general.status,'unavailable');
+ const input=base();input.catalogs.executor=[item(opus)];input.catalogs.subagent=[item(sonnet)];
+ assert.equal(resolve(input).roles.executor.status,'unavailable');
+ input.catalogs.executor=[item(sonnet)];input.catalogs.subagent=[item(opus)];
+ assert.equal(resolve(input).roles.general.status,'unavailable');
 });
 test('unsupported effort is not reported as applied or silently downgraded',()=>{
  const input=base();input.catalogs.subagent=[{id:sonnet,efforts:['high']}];assert.equal(resolve(input).roles.general.status,'unavailable');assert.equal(resolve(input).roles.ui.status,'unavailable');
 });
-test('an already selected Opus version is preserved and another provider requires an explicit user choice',()=>{
- const input=base();input.catalogs.executor.push(item('anthropic/claude-opus-6-0'));assert.equal(resolve(input).roles.executor.model,opus);
- const other='anthropic-apikey/claude-sonnet-5-5';input.catalogs.subagent.push(item(other));input.overrides={general:{model:other}};assert.equal(resolve(input).roles.general.model,other);
+test('the executor takes the newest subscription Sonnet and an API-key worker needs an explicit user choice',()=>{
+ const input=base();input.catalogs.executor.push(item('anthropic/claude-sonnet-6-0'));assert.equal(resolve(input).roles.executor.model,'anthropic/claude-sonnet-6-0');
+ const other='anthropic-apikey/claude-sonnet-5-5';input.catalogs.subagent.push(item(other));
+ assert.equal(resolve(input).roles.general.model,sonnet);
+ input.overrides={general:{model:other}};assert.equal(resolve(input).roles.general.model,other);
 });
 
+// The Claude API key is the supervisor's reserve: no executor-side role uses it, even under an API-key supervisor.
 for(const provider of ['anthropic-apikey','anthropic']){
- const other=provider==='anthropic'?'anthropic-apikey':'anthropic';
- test(`${provider} supervision keeps every role in its active series even when the other series offers newer models`,()=>{
-  const ownOpus=`${provider}/claude-opus-5-5`,ownSonnet=`${provider}/claude-sonnet-5-5`;
-  const input={supervisorModel:ownSonnet,roles:['executor','general','ui'],catalogs:{
-   executor:[item(`${other}/claude-opus-99-0`),item(ownOpus),item(ownSonnet)],
-   subagent:[item(`${other}/claude-sonnet-99-0`),item(ownSonnet)]}};
+ test(`${provider} supervision puts every executor-side Claude role on the subscription path`,()=>{
+  const input={supervisorModel:`${provider}/claude-opus-5-5`,roles:['executor','general','ui'],catalogs:{
+   executor:[item('anthropic-apikey/claude-sonnet-5-5'),item(sonnet),item('anthropic-apikey/claude-opus-5-5')],
+   subagent:[item('anthropic-apikey/claude-sonnet-5-5'),item(sonnet)]}};
   const r=resolve(input);assert.equal(r.provider,provider+'/');
   assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.status,v.model,v.effort]])),{
-   executor:['ready',ownSonnet,'high'],general:['ready',ownSonnet,'medium'],ui:['ready',ownSonnet,'low']});
+   executor:['ready',sonnet,'high'],general:['ready',sonnet,'medium'],ui:['ready',sonnet,'low']});
  });
- test(`${provider} supervision never borrows the other series when its own role models are missing`,()=>{
+ test(`${provider} supervision never moves executor-side roles to the API key when the subscription models are missing`,()=>{
   const r=resolve({supervisorModel:`${provider}/claude-opus-5-5`,roles:['executor','general','ui'],catalogs:{
-   executor:[item(`${other}/claude-opus-5-5`)],subagent:[item(`${other}/claude-sonnet-5-5`)]}});
+   executor:[item('anthropic-apikey/claude-sonnet-5-5')],subagent:[item('anthropic-apikey/claude-sonnet-5-5')]}});
   for(const role of ['executor','general','ui'])assert.equal(r.roles[role].status,'unavailable');
  });
 }
+// Q48 A: below the 35% reserve the executor starts on Sol and no new Claude worker is started (Q49 A).
+test('the Claude reserve starts the executor on Sol and holds new Claude workers until the mainline moves',t=>{
+ const fallback=published(t,{limits:{},claudeQuota:{executorMayUseClaude:false,weeklyRemaining:19.4,reserve:35}});
+ const r=resolve({...base(),fallback});
+ assert.deepEqual([r.roles.executor.model,r.roles.executor.basis],[sol,'claude-reserve']);
+ assert.equal(r.roles.general.status,'unavailable');assert.match(r.roles.general.reason,/保留給監督/);
+ const gpt=resolve({...base(),fallback,executorModel:sol,catalogs:{executor:[item(sol)],subagent:[item('gpt-6.1-terra')]}});
+ assert.equal(gpt.roles.general.model,'gpt-6.1-terra');
+ assert.equal(resolve({...base(),fallback:published(t,{limits:{},claudeQuota:{executorMayUseClaude:true}})}).roles.executor.model,sonnet);
+});
+test('an executor-side Sonnet limit starts the executor on Sol',t=>{
+ const until=new Date(Date.now()+3600000).toISOString();
+ const r=resolve({...base(),fallback:published(t,{limits:{'anthropic/':{until}}})});
+ assert.deepEqual([r.roles.executor.model,r.roles.executor.basis,r.roles.executor.restoreAfter],[sol,'rate-limit-fallback',until]);
+});
 
 for(const [first,second,highest] of [
  ['gpt-6.1-terra','gpt-6.2-sol','gpt-6.2-astra'],

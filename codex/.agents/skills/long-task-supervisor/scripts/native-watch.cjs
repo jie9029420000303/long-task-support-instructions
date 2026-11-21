@@ -8,6 +8,8 @@ const { createClient } = require('./mcp-client.cjs');
 const { hash, read, need, validateContract, validateDecision, quietReview, PROGRESS_REVIEW_MS } = require('./guard.cjs');
 const clock = require('./supervisor-clock.cjs');
 const fallback = require('./model-fallback.cjs');
+const quota = require('./claude-quota.cjs');
+const catalog = require('./model-catalog.cjs');
 const dashboard = require('./dashboard.cjs');
 const pace = require('./pace.cjs');
 const executionWake = require('./execution-wake.cjs');
@@ -34,6 +36,13 @@ const WATCH_IDLE_SLEEP_MS = Number(process.env.CODEX_WATCH_IDLE_SLEEP_MS) || 180
 // After 10 minutes without a working watch the supervisor gets one warning and Jay one push (Jay 2026-10-29).
 const OUTAGE_MS = Number(process.env.LONG_TASK_OUTAGE_MS) || 10 * 60000;
 const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
+// A delivery queued behind a running turn no longer holds the whole watcher (2026-11-21 review): after 10 minutes it
+// stays queued in the target's own message queue and is confirmed later, so rate limits and other events still run.
+const BUSY_LIMIT_MS = Number(process.env.LONG_TASK_BUSY_LIMIT_MS) || 10 * 60000;
+// Before the executor leaves the Claude subscription for its reserve, its running Claude subagents may finish (Q49 A).
+const DRAIN_MS = Number(process.env.LONG_TASK_QUOTA_DRAIN_MS) || 15 * 60000;
+// A switched chat that has produced no successful answer after 15 minutes moves on to the next route.
+const SILENT_SWITCH_MS = Number(process.env.LONG_TASK_SILENT_SWITCH_MS) || 15 * 60000;
 // The App unloads a chat idle for about three hours and ends the processes it started, this watcher included
 // (2026-10-12: research chat idle 02:16→05:33, both watchers gone; every chat in the log unloaded after ~3h idle).
 // After 150 idle minutes the watcher sends its host, the supervisor chat, one short turn to stay loaded.
@@ -340,6 +349,11 @@ async function reconcile(delivery) {
   }
   if (!(await targetBusy(delivery.target))) break;
   if (!delivery.busySince) { delivery.busySince = now(); delivery.phase = 'queued-behind-running-turn'; checkpoint(); }
+  // The message waits in the target's own queue; confirm it later instead of holding every other check.
+  if (Date.now() - Date.parse(delivery.busySince) >= BUSY_LIMIT_MS && state.inflight === delivery) {
+    (state.queuedDeliveries ||= {})[delivery.key] = {...delivery, queuedAt:now()};
+    state.inflight = null; checkpoint(); return;
+  }
   await sleep(Number(process.env.LONG_TASK_BUSY_RETRY_MS)||15000);
   }
   if (await provenLost(delivery)) {
@@ -352,10 +366,32 @@ async function reconcile(delivery) {
   }
   throw Error('Delivery uncertain: ' + delivery.key);
 }
+// Queued deliveries are confirmed by their marker; once the target is idle without it, the normal read-back,
+// proven-lost resend or uncertain-delivery path takes over as for any other delivery.
+async function settleQueued() {
+  for (const [key, delivery] of Object.entries(state.queuedDeliveries || {})) {
+    if (state.inflight) return;
+    if (localReceipt(delivery.target, key)) {
+      save(path.join(run,'receipt-' + key + '.json'),{target:delivery.target,key,promptSha256:require('node:crypto').createHash('sha256').update(delivery.prompt).digest('hex'),
+        sent:delivery.sent || null,confirmed:true,at:now()});
+      if (!state.messages.some(item => item.key === key)) state.messages.push({target:delivery.target,key,at:now()});
+      delete state.queuedDeliveries[key]; checkpoint(); continue;
+    }
+    if (await targetBusy(delivery.target)) continue;
+    delete state.queuedDeliveries[key];
+    state.inflight = {...delivery, busySince:null, phase:'queued-target-idle'}; checkpoint();
+    await reconcile(state.inflight);
+  }
+  if (state.queuedDeliveries && !Object.keys(state.queuedDeliveries).length) { delete state.queuedDeliveries; checkpoint(); }
+}
+// The executor may use the Claude subscription only while the reserve for the supervisor holds (Q48 A / Q49 A).
+function claudeHeld(target, model) {
+  return target === binding.executorId && fallback.subscriptionClaude(model) && !quota.allowed(state);
+}
 async function sendAndRead(target, prompt, key, options = {}) {
   need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
   need([binding.executorId,binding.supervisorId].includes(target), 'Target is not bound');
-  if (state.messages.some(item => item.key === key)) return;
+  if (state.messages.some(item => item.key === key) || state.queuedDeliveries?.[key]) return;
   const receiptFile = path.join(run,'receipt-' + key + '.json');
   if (state.inflight) {
     need(state.inflight.key === key && state.inflight.target === target && state.inflight.prompt === prompt,'Another delivery remains unresolved');
@@ -373,10 +409,10 @@ async function sendAndRead(target, prompt, key, options = {}) {
   }
   // A regular delivery after reset can also carry the restoration, including while the thread is busy.
   const activeRoute=state.modelSwitch?.[target];
-  const lowSol=target===binding.executorId && state.solWindow?.model===activeRoute?.original &&
-    state.solWindow?.until>Date.now() && state.solWindow.remaining<50;
-  const due=activeRoute && (!state.routeWaiting?.[target]) && activeRoute.until<=Date.now() && !lowSol && !fallback.limited(state,activeRoute.original);
-  const carryRestore=!options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt);
+  const role=target===binding.supervisorId?'supervisor':'executor';
+  const due=activeRoute && !activeRoute.original?.startsWith('openrouter/') && (!state.routeWaiting?.[target]) && activeRoute.until<=Date.now() &&
+    !claudeHeld(target,activeRoute.original) && !fallback.limited(state,activeRoute.original,Date.now(),role);
+  const carryRestore=fallback.modelPolicy(binding)==='automatic' && !options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt);
   if(carryRestore)options={model:activeRoute.original,thinking:activeRoute.effort};
   const route=options.model?{model:options.model,...(options.thinking?{thinking:options.thinking}:{})}:{};
   state.inflight = {target,prompt,key,at:now(),phase:'sending',route};
@@ -500,6 +536,40 @@ async function refuseDecision(event,file,error){
 // clocks restart when the ruling is applied, not at its submission (GDB 05:07 and 08:10: a 21- and a 27-minute review
 // each ended in a silence check of an executor that had been waiting for the verdict). Clock reviews do not stop it.
 function ruled(event) { if (!['progress_review','dispatch_review'].includes(event.kind)) state.lastDecisionAt = Date.now(); }
+// An interim open-source supervisor reviews every event as usual (Jay 2026-11-21). Only its acceptance waits: the
+// submission tool keeps it as a marker, the watcher parks the candidate here and frees the supervisor for other events.
+function holdAcceptance(event,marker){
+  let saved=null;try{saved=JSON.parse(fs.readFileSync(marker,'utf8'));}catch{}
+  try{fs.unlinkSync(marker);}catch{}
+  if(saved?.eventId!==event.id||saved.eventSha256!==require('./decision-commit.cjs').eventHash(event))return;
+  fs.appendFileSync(path.join(run,'held-acceptances.jsonl'),JSON.stringify({...saved,heldAt:now()})+'\n');
+  (state.heldFinalReviews||=[]).push({event,model:saved.model,at:now()});
+  if(!state.seen.includes(event.id))state.seen.push(event.id);
+  delete state.supervisorWake?.[event.id];
+  // The kept acceptance is on the dashboard at once, not up to a minute later.
+  state.pending=null;state.phase='watching';checkpoint();lastDashboardAt=0;writeDashboard();
+}
+// Once Sol, Astra, Opus or Fable runs the supervisor again, the newest kept candidate goes back for a fresh review;
+// an older one is replaced by it, as a newer submission replaces an older one.
+function scheduleFinalReviews(){
+  const held=(state.heldFinalReviews||[]).map(item=>item.event?item:{event:item,model:null});
+  if(!held.length||state.pending||state.inflight)return;
+  const route=state.modelSwitch?.[binding.supervisorId], actual=fallback.settingsOf(binding.supervisorId);
+  const inTransit=route && !route.restored && Date.parse(actual?.at||0)<route.since;
+  if(inTransit||!fallback.finalReviewer(actual?.model))return;
+  const latest=held[held.length-1];
+  for(const item of held.slice(0,-1))(state.resolved||={})[item.event.id]={event:item.event,obsolete:true,supersededBy:latest.event.id};
+  const id=latest.event.id;
+  (state.finalReviewAttempts||={})[id]=(state.finalReviewAttempts[id]||0)+1;
+  (state.finalReviewFrom||={})[id]=latest.model;
+  delete state.supervisorWake?.[id];
+  (state.eventQueue||=[]).unshift(latest.event);state.heldFinalReviews=[];checkpoint();lastDashboardAt=0;writeDashboard();
+}
+function finalReviewPrompt(event){
+  const attempt=state.finalReviewAttempts?.[event.id];
+  if(!attempt)return reviewPrompt(event);
+  return '高階監督複驗：暫代監督（'+(state.finalReviewFrom?.[event.id]||'開源模型')+'）已審查這個候選並要求結案。請在本回合逐條核對原件，重新寫裁決草稿後提交；不沿用暫代的結論。\n'+reviewPrompt(event);
+}
 async function pendingDecision() {
   const event = state.pending;
   if(event.kind==='dispatch_review' && !(state.messages||[]).some(m=>m.key==='review-'+event.id) && !state.inflight){
@@ -513,22 +583,24 @@ async function pendingDecision() {
     const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}));
     state.supervisorWake[event.id]={deliveredAt:null,assistantMarker:assistantMarker(detail),activityMarker:require('./supervisor-response.cjs').activityMarker(detail),wakeSentAt:null};checkpoint();
   }
-  await sendAndRead(binding.supervisorId,reviewPrompt(event),'review-' + event.id);
-  const file = require('./decision-commit.cjs').file(run,event.id);
+  const reviewKey='review-'+event.id+(state.finalReviewAttempts?.[event.id]?'-high-'+state.finalReviewAttempts[event.id]:'');
+  await sendAndRead(binding.supervisorId,finalReviewPrompt(event),reviewKey);
+  const file = require('./decision-commit.cjs').file(run,event.id), heldMarker = require('./decision-commit.cjs').held(run,event.id);
   const armed=state.supervisorWake[event.id];
   if(!armed.deliveredAt){armed.deliveredAt=Date.now();checkpoint();}
   if (!fs.existsSync(file)) {
-    await changed(run,()=>fs.existsSync(file));
+    if(event.kind==='submission'&&fs.existsSync(heldMarker)){holdAcceptance(event,heldMarker);return;}
+    await changed(run,()=>fs.existsSync(file)||fs.existsSync(heldMarker));
     const wake=state.supervisorWake[event.id];
-    if(fs.existsSync(file)||fs.existsSync(path.join(run,'STOP'))||isPaused())return;
+    if(fs.existsSync(file)||fs.existsSync(heldMarker)||fs.existsSync(path.join(run,'STOP'))||isPaused())return;
     if(!wake.completionWakeSentAt){
       const detail=unpack(await rpc('read_thread',{threadId:binding.supervisorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
       const closed=require('./supervisor-response.cjs').closedWithoutDecision(detail,wake.deliveredAt);
       if(closed&&!wake.completionRecovery){
         // Persist the key and exact prompt before sending, so a restart reconciles this delivery instead of
         // inventing another recovery for a newer turn. One completion reminder per unresolved event.
-        wake.completionRecovery={...closed,key:'decision-required-'+event.id,prompt:
-          `監督回合已結束，但事件 ${event.id} 尚未提交決策。先核對 STOP、原事件與既有提交；已授權且有答案的部分先正式提交並確認送達，再處理延展研究。仍須本人決定的部分只登記待決，不凍結其他工作。不要重建或重送業務事件。\n`+reviewPrompt(event)};
+        wake.completionRecovery={...closed,key:'decision-required-'+reviewKey.slice(7),prompt:
+          `監督回合已結束，但事件 ${event.id} 尚未提交決策。先核對 STOP、原事件與既有提交；已授權且有答案的部分先正式提交並確認送達，再處理延展研究。仍須本人決定的部分只登記待決，不凍結其他工作。不要重建或重送業務事件。\n`+finalReviewPrompt(event)};
         checkpoint();
       }
       if(wake.completionRecovery){
@@ -541,8 +613,8 @@ async function pendingDecision() {
       const busy=require('./supervisor-response.cjs').working(detail,wake.activityMarker);
       if(assistantMarker(detail)===wake.assistantMarker&&!busy){
         await sendAndRead(binding.supervisorId,
-          `監督喚醒補訊 ${event.id}：既有事件已送達，但本對話之後沒有進行中的回合，也沒有新的指令或模型活動。請處理既有 ${deliveryMarker('review-'+event.id)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
-          'wake-review-' + event.id);
+          `監督喚醒補訊 ${event.id}：既有事件已送達，但本對話之後沒有進行中的回合，也沒有新的指令或模型活動。請處理既有 ${deliveryMarker(reviewKey)}；不要重建或重送業務事件，先檢查 STOP 與既有 decision。`,
+          'wake-' + reviewKey);
         wake.wakeSentAt=Date.now();checkpoint();
       }else{wake.modelStartedAt=Date.now();if(busy)wake.workingBecause=busy;checkpoint();}
       }
@@ -754,30 +826,65 @@ async function handleAmendRequest(){
   }
   return true;
 }
-// Rate limits (Jay 2026-10-11, default on): a refused supervisor or executor is told to continue on the next model
-// in the configured chain; a refused subagent is re-dispatched in the current executor's family.
+// Model routes (Jay 2026-10-11, revised 2026-11-21): this background watcher, not the chats, moves each mainline. The
+// supervisor moves down only when it is refused itself and returns to Opus once the reset passes. The executor also
+// leaves the Claude subscription while the weighted weekly remainder is below the 35% kept for the supervisor or every
+// usable account has used 80% of its five-hour window, and returns on the next turn once the reading allows it. A
+// refused subagent is re-dispatched in the current executor's family.
 async function handleRateLimits() {
-  if (binding.modelFallback === false) return;
+  if (fallback.modelPolicy(binding)==='locked') return;
+  let dirty=fallback.migrateLimits(state);
+  if(fallback.syncApiMonth(state,run))dirty=true;
+  if(await quota.refresh(state,Date.now(),run))dirty=true;
+  const claudeOk=quota.allowed(state);
   const awaitingOutput=Object.values(state.modelSwitch||{}).filter(record=>!record.restored&&!record.respondedAt);
   const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path,file:item.sourceFile}));
   const hits = fallback.scan(state,[{role:'supervisor',threadId:binding.supervisorId},{role:'executor',threadId:binding.executorId},...subagents]);
+  // A switched chat that took the new model but has produced no successful answer for 15 minutes, or never started a
+  // turn on it while idle, is treated like a failing route.
+  for (const [id,record] of Object.entries(state.modelSwitch||{})) {
+    if (record.restored || record.respondedAt || record.delivery || record.silentAt) continue;
+    const actual=fallback.settingsOf(id), after=Boolean(actual&&Date.parse(actual.at)>=record.since);
+    // A model chosen by hand after the switch is not a silent route.
+    if (after && actual.model!==record.current) continue;
+    // Only a fresh switch is judged: a record older than an hour (saved before this check, or whose answer fell
+    // outside the first usage read) is left alone.
+    const waited=Date.now()-(after?Date.parse(actual.at):record.since);
+    if (waited < SILENT_SWITCH_MS || waited >= 4*SILENT_SWITCH_MS || !after && await targetBusy(id)) continue;
+    record.silentAt=Date.now();
+    hits.push({role:record.role,threadId:id,model:record.current,at:Date.now(),failure:true,silent:true,error:'切換後 '+Math.round(SILENT_SWITCH_MS/60000)+' 分鐘沒有成功回應'});
+  }
   for (const hit of hits) {
-    const key = fallback.keyOf(hit.model), known = state.rateLimits?.[key];
+    const plain=fallback.keyOf(hit.model), open=String(hit.model||'').startsWith('openrouter/');
+    const key=open&&hit.status===402?fallback.OPENROUTER_ACCOUNT:fallback.limitKey(hit.role,hit.model), known=state.rateLimits?.[key];
     // The refused thread's own rollout names the reset; its file is kept so later looks can still find that error.
     const files = [hit.file || pace.sessionFile(hit.threadId)].filter(Boolean);
-    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...(hit.quotaReset||fallback.resetFor(key,hit.at,files))};
+    const reset=hit.quotaReset||(hit.failure?{until:hit.at+fallback.FAILURE_COOLDOWN_MS,basis:hit.silent?fallback.SILENT_BASIS:fallback.FAILURE_BASIS,cooldown:'failure'}:
+      open&&hit.status!==402?{until:hit.at+fallback.OPENROUTER_COOLDOWN_MS,basis:fallback.OPENROUTER_BASIS,cooldown:'short'}:fallback.resetFor(plain,hit.at,files));
+    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...reset};
     else {
       known.files = [...new Set([...(known.files || []),...files])];
       if(hit.quotaReset?.fromError)Object.assign(known,hit.quotaReset);
     }
+    // The Claude API month cap holds for every run until its named reset.
+    if(plain==='anthropic-apikey/'&&hit.quotaReset)fallback.recordApiMonth(state,run,hit.quotaReset.until,hit.quotaReset.basis);
     const queue = state.switchQueue ||= [];
     if (!queue.some(item => item.threadId === hit.threadId && item.model === hit.model)) queue.push(hit);
   }
   // Limits saved before 2026-11-09 have no files: use the rollouts of the threads switched for them.
   for (const [key,item] of Object.entries(state.rateLimits || {})) if (!item.files)
-    item.files = Object.entries(state.modelSwitch || {}).filter(([,record]) => fallback.keyOf(record.original) === key)
+    item.files = Object.entries(state.modelSwitch || {}).filter(([,record]) => fallback.limitKey(record.role,record.original) === key)
       .map(([threadId]) => pace.sessionFile(threadId)).filter(Boolean);
   const refined = fallback.refine(state), back = fallback.recovered(state);
+  // The executor's Claude limit ends on a later reading that shows the subscription can serve it again; another
+  // conversation's success never counts for it.
+  const executorClaude=state.rateLimits?.['executor|anthropic/'], reading=state.claudeQuota;
+  let quotaBack=false;
+  if(executorClaude&&executorClaude.until>Date.now()&&claudeOk&&!reading.unconfigured&&!reading.fiveHourHigh&&reading.at>executorClaude.since+60000){
+    executorClaude.until=Date.now();executorClaude.basis='額度讀值顯示訂閱可再供執行端使用';quotaBack=true;
+    const record=state.modelSwitch?.[binding.executorId];
+    if(record&&!record.restored&&fallback.subscriptionClaude(record.original)&&record.until>Date.now())record.until=Date.now();
+  }
   // Keep one durable route decision per role. The next poll can resume it without a new failure or user message.
   const waiting=state.routeWaiting||={};
   if(state.rateLimitedAll?.threadId && !state.routeWaitMigrated){
@@ -790,22 +897,36 @@ async function handleRateLimits() {
     state.switchQueue=[];checkpoint();
   }
   if(awaitingOutput.some(record=>record.respondedAt))checkpoint();
-  const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
   // This incremental reader also runs while a decision is pending.
   clock.readExecutor(state,binding);
-  const solWindow=state.solWindow;
-  const lowSol=solWindow?.until>Date.now() && solWindow.remaining<50;
-  const currentExecutor=state.executorSettings?.model;
-  const budgetChange=lowSol && currentExecutor===solWindow.model;
-  if(!active.length && !Object.keys(waiting).length && !budgetChange && !hits.length && !refined && !back)return;
-  const fourths=require('./openrouter-route.cjs').routes(binding.fourthExecutorModel);
-  const fourth=fourths[0]||null;
-  if(hits.length||refined||back){fallback.publish(run,state,Date.now(),fourth);checkpoint();}
+  const executorRecord=state.modelSwitch?.[binding.executorId], executorSwitched=executorRecord&&!executorRecord.restored;
+  const executorModel=executorSwitched?executorRecord.current:state.executorSettings?.model;
+  // Below the reserve the executor first stops new Claude subagents and lets running ones finish (at most 15 minutes,
+  // the mainline keeps working), then moves to Sol with Terra workers (Q49 A).
+  let budgetChange=false;
+  if(!claudeOk && fallback.subscriptionClaude(executorModel) && !waiting[binding.executorId]){
+    if(!state.quotaDrain){state.quotaDrain={since:Date.now(),hold:reading?.hold||null};dirty=true;}
+    const drain=state.quotaDrain;
+    const running=pace.agentRuns(binding).filter(agent=>agent.active&&catalog.identity(agent.model)?.family==='claude');
+    if(!drain.noticeKey && running.length && !isPaused() && !state.inflight){
+      drain.noticeKey='quota-reserve-'+fallback.hashId(binding.executorId+'/'+drain.since).slice(0,12);checkpoint();
+      await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE：'+quota.describe(reading)+'。先停派新的 Claude 子代理；在途子代理完成後（最多 '+
+        Math.round(DRAIN_MS/60000)+' 分鐘），背景程式會把本對話改用 Sol，新子代理改用 Terra。等待期間照常工作。',drain.noticeKey);
+    }
+    budgetChange=!running.length||Date.now()-drain.since>=DRAIN_MS;
+  }else if(state.quotaDrain){
+    const drain=state.quotaDrain;delete state.quotaDrain;dirty=true;
+    if(drain.noticeKey&&claudeOk&&fallback.subscriptionClaude(executorModel)&&!isPaused()&&!state.inflight)
+      await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE_CLEARED：Claude 訂閱額度回到保留值以上，可照常派 Claude 子代理。',drain.noticeKey+'-cleared');
+  }
+  const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
+  if(hits.length||refined||back||quotaBack||dirty){fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();}
+  if(!active.length && !Object.keys(waiting).length && !budgetChange)return;
   const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[])]);
   for(const id of ids){
     if(state.inflight)return;
     const hit=waiting[id], record=state.modelSwitch?.[id], switched=record&&!record.restored;
-    const role=hit?.role||record?.role||'executor';
+    const role=hit?.role||record?.role||(id===binding.supervisorId?'supervisor':'executor');
     if(role==='subagent'){
       const owner=fallback.settingsOf(binding.executorId)?.model;
       const target=fallback.next(hit.model,hit.model,role,state,Date.now(),owner);
@@ -822,45 +943,57 @@ async function handleRateLimits() {
     if(hit && switched && record.current!==hit.model && fallback.settingsOf(id)?.model!==hit.model){
       delete waiting[id];checkpoint();continue;
     }
-    const original=switched?record.original:hit?.model||currentExecutor;
-    const current=hit?.model||(switched?record.current:currentExecutor);
-    let chain=fallback.chainFor(original,role);
-    if(original===solWindow?.model && (budgetChange||record?.budgetOrigin))chain=[original];
-    if(!chain.includes(original) && !original?.startsWith('openrouter/'))chain.unshift(original);
-    if(role==='executor')chain.push(...fourths.map(r=>r.model));
-    const candidates=chain.filter(model=>model && !fallback.limited(state,model,time) &&
-      !(switched && model===original && record.until>time && !record.budgetOrigin && !state.rateLimits?.[fallback.keyOf(original)]) &&
-      !(role==='executor' && lowSol && model===solWindow.model));
+    const observed=id===binding.executorId?state.executorSettings?.model:fallback.settingsOf(id)?.model;
+    const original=switched?record.original:hit?.model||observed;
+    const current=hit?.model||(switched?record.current:observed);
+    const chain=fallback.chainFor(original,role);
+    // A manually chosen start stays in the chain; the executor never starts on the Claude API key.
+    if(!chain.includes(original) && !original?.startsWith('openrouter/') && !(role!=='supervisor'&&fallback.keyOf(original)==='anthropic-apikey/'))chain.unshift(original);
+    chain.push(...fallback.openRoutes(role,binding.fourthExecutorModel).map(r=>r.model));
+    const candidates=[...new Set(chain)].filter(model=>model && !fallback.limited(state,model,time,role) &&
+      !(switched && model===original && record.until>time && !state.rateLimits?.[fallback.limitKey(role,original)]) &&
+      !(role==='executor' && fallback.subscriptionClaude(model) && !claudeOk));
     const target=candidates[0];
+    // Without its own refusal the supervisor is never moved down to an open-source route.
+    if(role==='supervisor' && !hit && !current?.startsWith('openrouter/') && target?.startsWith('openrouter/'))continue;
     if(!target){
       if(!waiting[id])waiting[id]={threadId:id,model:current,role,at:time,error:'等待可用順位'};
       delete state.rateLimitedAll;
       continue;
     }
     if(!hit && target===current)continue;
-    if(!hit && !budgetChange && switched && current!==target && await targetBusy(id))continue;
+    const budget=budgetChange && id===binding.executorId && !hit;
+    if(!hit && !budget && switched && current!==target && await targetBusy(id))continue;
     // Prevent old refusal data from pulling a healthy manually selected model into the chain.
-    if(!hit && switched && target===original && (()=>{const actual=fallback.settingsOf(id);return actual?.model===original && Date.parse(actual.at)>=record.since;})() && !record.delivery){
+    if(!hit && switched && target===original && !original.startsWith('openrouter/') && (()=>{const actual=fallback.settingsOf(id);return actual?.model===original && Date.parse(actual.at)>=record.since;})() && !record.delivery){
       record.restored=now();record.restoredBy='already-on-original';checkpoint();continue;
     }
-    const restored=target===original;
+    const restored=target===original && !original.startsWith('openrouter/');
     const settings=fallback.settingsOf(id)||{};
     const effort=(switched?record.effort:settings.effort)||null;
-    const targetEffort=fourths.some(r=>r.model===target)?'max':effort;
-    const until=state.rateLimits?.[fallback.keyOf(original)]?.until || (lowSol?solWindow.until:time);
-    const prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：額度已恢復。')+'本對話用 '+target+' 從中斷處接續原工作。':
-      '額度限速或執行訂閱分流：本對話改用 '+target+'，從已確認的進度接續。';
+    const targetEffort=target.startsWith('openrouter/')?'max':effort;
+    const until=state.rateLimits?.[fallback.limitKey(role,original)]?.until || time;
+    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：額度已恢復。')+'本對話用 '+target+' 從中斷處接續原工作。':
+      budget?'Claude 訂閱保留給監督（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
+      (hit?.failure?'目前模型連續出錯或沒有回應：':'額度限速：')+'本對話改用 '+target+'，從已確認的進度接續。';
+    const familyOf=model=>String(model||'').startsWith('openrouter/')?model:catalog.identity(model)?.family||model;
+    if(role==='executor' && !isPaused() && familyOf(current)!==familyOf(target)){
+      const worker=familyOf(target)==='claude'?'同一家的 Sonnet（anthropic/，不用 Claude API）':familyOf(target)==='gpt'?'最新 Terra':'同一完整模型 ID、max 推論';
+      prompt+=' 換到不同家模型：在途的舊模型子代理改從工作包交付檔與原件收件，不再向它發訊；新派子代理用'+worker+'。';
+    }
+    if(role==='supervisor' && !isPaused() && target.startsWith('openrouter/'))prompt+=' 暫代監督依原契約照常收件、查證與派工；要結案的候選照常審查並提交，背景程式會保留原件，交恢復的高階監督逐條複驗結案。';
     state.modelSwitches=(state.modelSwitches||0)+1;
     const key='model-switch-'+id.slice(0,8)+'-'+state.modelSwitches;
     (state.modelSwitch||={})[id]={role,original,current:target,effort,since:time,until,restored:null,
-      budgetOrigin:record?.budgetOrigin||(!hit&&original===solWindow?.model),delivery:{key,prompt,effort:targetEffort}};
+      ...(budget||switched&&record.budgetOrigin&&!hit?{budgetOrigin:true}:{}),delivery:{key,prompt,effort:targetEffort}};
     delete waiting[id];
+    if(budget)delete state.quotaDrain;
     if(state.rateLimitedAll?.threadId===id)delete state.rateLimitedAll;
     checkpoint();
     await sendAndRead(id,prompt,key,{model:target,thinking:targetEffort});
     const updated=state.modelSwitch[id];delete updated.delivery;
     if(restored)updated.restored=now();
-    fallback.publish(run,state,time,fourth);checkpoint();
+    fallback.publish(run,state,time,binding.fourthExecutorModel);checkpoint();
   }
 }
 async function watch() {
@@ -899,6 +1032,7 @@ async function watch() {
   state.phase = state.pending ? 'awaiting_decision' : 'watching';
   checkpoint();
   while (!fs.existsSync(path.join(run,'STOP'))) {
+    await settleQueued();
     await handleRateLimits();
     if (await handleAmendRequest()) continue;
     writeDashboard();
@@ -912,6 +1046,7 @@ async function watch() {
       continue;
     }
     if(await keepLoaded())continue;
+    if(!isPaused())scheduleFinalReviews();
     if (state.pending) {
       // While the supervisor reviews a declared wait, its result still goes straight to the executor; the ruling lands after.
       if(state.pending.kind==='waiting'&&state.progressWait?.event?.id===state.pending.id&&!isPaused()){
@@ -977,7 +1112,7 @@ async function watch() {
     observeActivity(state,supervisorPoll,binding,Date.now(),'supervisor');
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
-    if(!paused && turn?.status==='failed' && poll.thread?.status?.type==='idle' && !state.pending && !state.eventQueue?.length){
+    if(!paused && turn?.status==='failed' && ['idle','systemError'].includes(poll.thread?.status?.type) && !state.pending && !state.eventQueue?.length){
       clock.readExecutor(state,binding);
       const receipt=require('./worker-handoff.cjs').workerHandoff(turn,state.workerMailTurn,clock.snapshotOf(run,binding),pace.agentRuns(binding),binding.executorId);
       if(receipt && state.workerHandoffKey!==receipt.key){

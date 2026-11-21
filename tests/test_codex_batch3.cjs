@@ -95,7 +95,9 @@ test('an active automation aimed at the executor wakes the supervisor to pause i
   }finally{await f.stop();}
 });
 
-test('a refused executor continues on the next model in Jay\'s order and gets its own model back after the reset',async()=>{
+// Jay 2026-11-21: the executor side never uses the Claude API key (it is the supervisor's reserve); a refused Claude
+// executor goes to Sol and returns to its own model once the named reset passes.
+test('a refused executor continues on Sol, never on the API key, and gets its own model back after the reset',async()=>{
   const gate=path.join(os.tmpdir(),'batch3-gate-'+crypto.randomUUID());
   const f=fixture({settings:fullAccess,finals:['LONG_TASK_EVENT {"kind":"progress","nextAction":"run the B6 checks"}','LONG_TASK_EVENT {"kind":"progress","nextAction":"integrate B6"}'],mock:{secondTurnGate:gate}});
   // Every Anthropic OAuth account is exhausted and the earliest one resets in about three seconds.
@@ -106,12 +108,14 @@ test('a refused executor continues on the next model in Jay\'s order and gets it
     await until(()=>read(f.statePath).usageOffset!==undefined);
     line(f.usage,{timestamp:Date.now(),conversationId:hashId('executor-qa'),requestedModel:'anthropic/claude-opus-5-5',status:429,failureCause:'rate-limit',
       upstreamError:'All Anthropic OAuth accounts are temporarily rate-limited'});
-    await until(()=>f.calls().some(call=>call.model==='anthropic-apikey/claude-opus-5-5'));
+    await until(()=>f.calls().some(call=>call.model==='gpt-6.10-sol'));
+    assert.ok(!f.calls().some(call=>call.model?.startsWith('anthropic-apikey/')),'the executor never takes the supervisor reserve');
     const switched=f.calls().find(call=>call.model);
     assert.equal(switched.threadId,'executor-qa');assert.equal(switched.thinking,'high','reasoning stays as it was');
-    assert.match(switched.prompt,/額度限速/);assert.match(switched.prompt,/anthropic-apikey\/claude-opus-5-5/);
+    assert.match(switched.prompt,/額度限速/);assert.match(switched.prompt,/gpt-6\.10-sol/);assert.match(switched.prompt,/最新 Terra/,'a family change says how new workers are chosen');
     const published=read(path.join(f.run,'model-fallback.json'));
     assert.ok(published.limits['anthropic/'],'subagents read the same limit');assert.match(published.limits['anthropic/'].basis,/最早重置/);
+    assert.deepEqual(published.supervisorLimits,{},'an executor refusal does not move the supervisor');
     await new Promise(resolve=>setTimeout(resolve,3500));
     fs.writeFileSync(gate,'open');
     await until(()=>f.calls().some(call=>call.prompt.includes('integrate B6')));
@@ -119,19 +123,23 @@ test('a refused executor continues on the next model in Jay\'s order and gets it
   }finally{await f.stop();fs.rmSync(gate,{force:true});}
 });
 
-test('mainline fallback uses the newest visible Sol and new workers stay with the current executor family',()=>{
+test('each side falls back in its own order: the supervisor through the API key to Sol, the executor straight to Sol',()=>{
   const fallback=require(path.join(scripts,'model-fallback.cjs'));
   withEnv({OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json')},()=>{
-    const state={rateLimits:{'anthropic/':{until:Date.now()+60000}}};
+    const state={rateLimits:{'executor|anthropic/':{until:Date.now()+60000}}};
     const opus='anthropic/claude-opus-5-5', child='anthropic/claude-sonnet-5-5';
-    assert.equal(fallback.next(opus,opus,'executor',state),'anthropic-apikey/claude-opus-5-5');
-    state.rateLimits['anthropic-apikey/']={until:Date.now()+60000};
+    assert.equal(fallback.next(child,child,'executor',state),'gpt-6.10-sol');
+    assert.equal(fallback.next(opus,opus,'supervisor',state),'anthropic-apikey/claude-opus-5-5','the executor refusal is not the supervisor\'s');
     assert.equal(fallback.next(child,child,'subagent',state),null,'no compatible Claude account is available');
     assert.equal(fallback.next(child,child,'subagent',state,Date.now(),'gpt-6.2-sol'),'gpt-6.1-terra','executor changed family while a Claude child was in flight');
-    assert.equal(fallback.next(opus,opus,'executor',state),'gpt-6.10-sol');
-    state.rateLimits['gpt-6.10-sol']={until:Date.now()+60000};
-    assert.equal(fallback.next(opus,opus,'executor',state),null);
-    assert.equal(fallback.next('gpt-6-luna','gpt-6-luna','executor',{}),opus);
+    state.rateLimits['supervisor|anthropic/']={until:Date.now()+60000};
+    state.apiMonth={until:Date.now()+86400000};
+    assert.equal(fallback.next(opus,opus,'supervisor',state),'gpt-6.10-sol','an API key known used up this month is skipped');
+    state.rateLimits['executor|gpt-6.10-sol']={until:Date.now()+60000};
+    assert.equal(fallback.next(child,child,'executor',state),null);
+    assert.equal(fallback.next('gpt-6-luna','gpt-6-luna','executor',{}),child,'the executor side starts on subscription Sonnet');
+    assert.deepEqual(fallback.chainFor(opus,'supervisor'),[opus,'anthropic-apikey/claude-opus-5-5','gpt-6.10-sol']);
+    assert.deepEqual(fallback.chainFor('anthropic-apikey/claude-opus-5-5','executor'),[opus,'gpt-6.10-sol'],'never the API key on the executor side');
   });
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'batch3-quota-'));
   try{
@@ -146,7 +154,7 @@ test('mainline fallback uses the newest visible Sol and new workers stay with th
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('Claude subagent routing substitutes only for a recorded rate limit',()=>{
+test('Claude subagent routing never substitutes the API key for a recorded rate limit',()=>{
   const {resolve}=require(path.join(scripts,'model-route.cjs'));
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'batch3-route-'));
   try{
@@ -156,7 +164,7 @@ test('Claude subagent routing substitutes only for a recorded rate limit',()=>{
     assert.equal(resolve(input).roles.general.model,'anthropic/claude-sonnet-5-5','no limit: the supervisor\'s own series');
     save(file,{limits:{'anthropic/':{until:new Date(Date.now()+60000).toISOString()}}});
     const limited=resolve(input).roles.general;
-    assert.equal(limited.model,'anthropic-apikey/claude-sonnet-5-5');assert.equal(limited.basis,'rate-limit-fallback');assert.ok(limited.restoreAfter);
+    assert.equal(limited.status,'unavailable','the mainline moves to Sol first; its later workers use Terra');
     save(file,{limits:{'anthropic/':{until:new Date(Date.now()-1000).toISOString()}}});
     assert.equal(resolve(input).roles.general.model,'anthropic/claude-sonnet-5-5','an expired limit returns to the original series');
   }finally{fs.rmSync(root,{recursive:true,force:true});}

@@ -18,6 +18,21 @@ function delegatedLines(delegated=[]){
     '| 決定的事 | 監督的選擇 | 依據 | 怎麼改回 | 時間 |','|---|---|---|---|---|',
     ...delegated.slice(0,20).map(item=>'| '+cell(item.ask)+' | '+cell(item.choice)+' | '+cell(item.basis)+' | '+cell(item.revert)+' | '+clock(Date.parse(item.at))+' |')];
 }
+// The model order the watcher applies (Jay 2026-11-21), in the words Jay used: how much Claude is kept for the Opus
+// supervisor, whether the API key is out for the month, whether an open-source route is left, and acceptances an
+// interim supervisor wrote that wait for a high-tier review.
+function modelLines(binding,state,now){
+  const lines=[];
+  if(state.claudeQuota)lines.push('- Claude 訂閱額度：'+require('./claude-quota.cjs').describe(state.claudeQuota)+
+    (state.quotaDrain?'；已停派新的 Claude 子代理，在途的做完後執行對話改用 Sol':''));
+  if(state.apiMonth?.until>now)lines.push('- Claude API（監督備用）：本月額度已用完，'+clock(state.apiMonth.until)+' 前所有任務的監督都跳過這一站');
+  let open=null;try{open=require('./openrouter-route.cjs').routes(binding.fourthExecutorModel||null).length;}catch{}
+  if(open===0)lines.push('- 開源備援：目前沒有可用模型（OpenCodex 設定或價格上限未通過）；前面順位都用完時只能等重置');
+  const held=state.heldFinalReviews||[];
+  if(held.length)lines.push('- 暫代監督保留的結案：'+held.length+' 件（'+held.map(item=>item.event?.id||item.id).filter(Boolean).slice(0,3).join('、')+
+    '），等 Sol、Astra、Opus 或 Fable 回到監督後逐條複驗');
+  return lines;
+}
 function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},pushProblem=null,now=Date.now()}){
   const items=snapshot?.acceptance?.items||[],passed=items.filter(item=>item.status==='PASS').length;
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
@@ -36,6 +51,7 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},push
     '- 背景監看：'+(alive?'運作中':'已停止')+'（狀態 '+(state.phase||'—')+(paused?'，使用者暫停中':'')+'）',
     '- 執行對話最後一次交回進度：'+clock(state.lastRealEventAt)+'（'+ago(state.lastRealEventAt,now)+'）',
     '- 等監督處理：'+handling,'- 執行對話權限：'+permission,'- 限速換模型：'+models,'- 平台錯誤：'+failed,pushLine(pushProblem)];
+  lines.push(...modelLines(binding,state,now));
   for(const [id,item] of Object.entries(state.routeWaiting||{}))lines.push('- '+who(id,binding)+' 正在等可用模型，由背景檢查恢復。');
   const response=state.pending&&state.supervisorWake?.[state.pending.id];
   if(response?.completionRecovery)lines.push('- 監督決策：上一回合已結束，這個事件仍未結案；'+

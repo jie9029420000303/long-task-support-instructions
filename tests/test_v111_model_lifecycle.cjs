@@ -32,7 +32,7 @@ async function waitFor(predicate,description) {
   }
   assert.fail(description);
 }
-function sandbox(t,{state={},preferred}={}) {
+function sandbox(t,{state={},preferred,policy}={}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'model-lifecycle-')));
   const proxyHome = path.join(root,'opencodex'), home = path.join(root,'codex'), run = path.join(root,'run');
   const today = new Date();
@@ -42,7 +42,7 @@ function sandbox(t,{state={},preferred}={}) {
   fs.writeFileSync(source,'Run the synthetic route test.\n');
   write(contract,{goal:'Resume isolated work',authorization:'Synthetic fixture only',criteria:[{id:'A1',requirement:'Route work',source:'source.txt:1',verify:'Mock receipt'}],
     sources:[{path:source,sha256:sha(fs.readFileSync(source))}]});
-  write(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId:supervisor,executorId:executor,callerTurnId:'isolated',
+  write(path.join(run,'binding.json'),{platform:'codex',projectRoot:root,allowedRoots:[root,run],supervisorId:supervisor,executorId:executor,callerTurnId:'isolated',...policy,
     createdAt:now(),contractSha256:sha(fs.readFileSync(contract)),...(preferred?{fourthExecutorModel:{model:preferred,effort:'max'}}:{})});
   const stateFile = path.join(run,'daemon-state.json');
   write(stateFile,{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0,
@@ -76,7 +76,7 @@ function sandbox(t,{state={},preferred}={}) {
   const quota = (id,used,{window=10080,reset=Math.floor(Date.now()/1000)+86400,slot='primary',limit='codex'}={}) => line(rollout(id),{
     timestamp:now(),type:'event_msg',payload:{type:'token_count',rate_limits:{limit_id:limit,[slot]:{used_percent:used,window_minutes:window,resets_at:reset}}}
   });
-  return {quota,context,catalog,config:path.join(proxyHome,'config.json'),state:()=>read(stateFile),
+  return {quota,context,catalog,run,env,rollout,config:path.join(proxyHome,'config.json'),state:()=>read(stateFile),
     resolveWorker(input,threadId){
       const file=path.join(root,'worker-input.json');
       write(file,input);
@@ -99,37 +99,34 @@ function initialState() {
     }]))};
 }
 
-test('the current Sol conversation can protect subscription capacity without switching its supervisor at 49% remaining',async t=>{
+// Jay 2026-11-21 ended the rule that moved a Sol executor to open source below 50% weekly: Sol use alone moves nobody.
+test('Sol weekly use alone moves neither the executor nor the supervisor; only a refusal does',async t=>{
   const f=sandbox(t,{state:initialState()});
-  f.quota(supervisor,91);
-  f.context(executor,paid);f.quota(executor,90);f.context(executor,sol);
-  f.quota(executor,95,{window:300});f.quota(executor,99,{reset:Math.floor(Date.now()/1000)-10});
-  f.quota(executor,93,{limit:'different-plan'});
+  f.quota(supervisor,95);f.quota(executor,99);
   await f.start();
-  assert.deepEqual(f.calls().filter(call=>call.model),[],'unrelated, stale, short and missing weekly data do not justify a switch');
-  const oldReads=f.state().reads;
-  f.quota(executor,50);
-  await waitFor(()=>f.state().reads>oldReads+1,'no poll at the 50% boundary');
-  assert.deepEqual(f.calls().filter(call=>call.model),[],'exactly 50% stays on Sol');
-  f.quota(executor,51,{slot:'secondary'});
-  await waitFor(()=>f.calls().some(call=>call.threadId===executor&&fourths.includes(call.model)),'no automatic fourth route at 49%');
-  assert.equal(f.calls().find(call=>fourths.includes(call.model)).model,fourths[0]);
+  const reads=f.state().reads;
+  await waitFor(()=>f.state().reads>reads+2,'no polls after the readings');
+  assert.deepEqual(f.calls().filter(call=>call.model),[]);
+  f.refuse(executor,sol);
+  await waitFor(()=>f.calls().some(call=>call.threadId===executor&&fourths.includes(call.model)),'no open-source route after the refusal');
   assert.equal(f.calls().find(call=>fourths.includes(call.model)).thinking,'max');
-  assert.ok(!f.calls().some(call=>call.threadId===supervisor&&fourths.includes(call.model)));
+  assert.ok(!f.calls().some(call=>call.threadId===supervisor&&call.model),'the executor\'s refusal never moves the supervisor');
 });
 
-test('an existing run with no available model resumes on the first higher route to recover without another failed request',async t=>{
+test('an existing run with no available model resumes each side on its first route to recover; the executor never takes the Claude API key',async t=>{
   const state=initialState(),since=Date.now()-1000,until=Date.now()+60000;
   state.rateLimits['anthropic-apikey/'].until=Date.now()+3000;
   for(const model of fourths)state.rateLimits[model]={since,until};
+  state.rateLimits[fourths[0]].until=Date.now()+3000;
   const f=sandbox(t,{state});
   f.refuse(executor,sol);
   f.refuse(supervisor,sol);
   await f.start();
-  for(const id of [executor,supervisor]){
-    await waitFor(()=>f.calls().some(call=>call.threadId===id&&call.model===paid),'the recovered API route did not resume '+id);
-    assert.equal(f.calls().filter(call=>call.threadId===id&&call.model===paid).length,1,'one resume per conversation');
+  for(const [id,model] of [[executor,fourths[0]],[supervisor,paid]]){
+    await waitFor(()=>f.calls().some(call=>call.threadId===id&&call.model===model),'the recovered route did not resume '+id);
+    assert.equal(f.calls().filter(call=>call.threadId===id&&call.model).length,1,'one resume per conversation');
   }
+  assert.ok(!f.calls().some(call=>call.threadId===executor&&call.model===paid));
 });
 
 test('the approved explicit choice is used at max when the third model refuses a bound executor',async t=>{
@@ -163,7 +160,7 @@ test('unrestricted supplier fallback or changed effort cannot silently consume a
   write(f.config,config);
   f.refuse(executor,sol);
   await f.start();
-  await waitFor(()=>f.state().rateLimits?.[sol]?.since,'the watcher missed the refusal');
+  await waitFor(()=>f.state().rateLimits?.['executor|'+sol]?.since,'the watcher missed the refusal');
   assert.ok(!f.calls().some(call=>fourths.includes(call.model)),'unapproved cost and quality must never be selected');
 });
 
@@ -178,7 +175,7 @@ test('a stale visible catalog cannot reactivate a disabled provider or a model r
       write(f.config,config);
       f.refuse(executor,sol);
       await f.start();
-      await waitFor(()=>f.state().rateLimits?.[sol]?.since,'watcher missed the refusal');
+      await waitFor(()=>f.state().rateLimits?.['executor|'+sol]?.since,'watcher missed the refusal');
       assert.ok(!f.calls().some(call=>fourths.includes(call.model)),mode+' must win over cached catalog data');
     });
   }
@@ -240,4 +237,33 @@ test('workers follow the refreshed supplier list and never select an empty or in
     {order:[ambient,pearl],allowFallbacks:true},
     {order:[ambient,ambient],only:[ambient,ambient],allowFallbacks:true}
   ]) assert.equal(worker(rule).status,'unavailable',JSON.stringify(rule));
+});
+
+test('manual selection leaves recovery enabled; a supervisor exhausts both approved providers before resuming a higher route',async t=>{
+  const state=initialState();
+  // A preference for the executor must not change the order for the supervisor.
+  state.rateLimits['anthropic-apikey/'].until=Date.now()+6000;
+  const f=sandbox(t,{state,preferred:fourths[1],policy:{modelPolicy:'automatic'}});
+  f.refuse(supervisor,sol);
+  await f.start();
+  const models=()=>f.calls().filter(c=>c.threadId===supervisor&&c.model);
+  await waitFor(()=>models().some(c=>c.model===fourths[0]),'no interim supervisor');
+  f.context(supervisor,fourths[0]);f.refuse(supervisor,fourths[0]);
+  await waitFor(()=>models().some(c=>c.model===fourths[1]),'no second interim supervisor');
+  f.context(supervisor,fourths[1]);
+  await waitFor(()=>models().some(c=>c.model===paid),'higher route never reclaimed review');
+  assert.deepEqual(models().map(c=>[c.model,c.thinking]),[[fourths[0],'max'],[fourths[1],'max'],[paid,'high']]);
+});
+
+test('an explicit lock and an unmigrated legacy lock both suppress quota and ordinary delivery restoration',async t=>{
+  for(const policy of [{modelPolicy:'locked'},{modelFallback:false}]){
+    await t.test(JSON.stringify(policy),async t=>{
+      const state=initialState();
+      const f=sandbox(t,{state,policy});
+      f.quota(executor,99);f.refuse(supervisor,sol);
+      await f.start();
+      await waitFor(()=>f.state().reads>=2,'no observation of locked run');
+      assert.equal(f.calls().filter(c=>c.model).length,0);
+    });
+  }
 });

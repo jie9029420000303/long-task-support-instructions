@@ -63,7 +63,6 @@ function migrateFailedCommands(state){
 }
 function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   const payload=row.payload||{},at=row.timestamp||now();
-  require('./model-fallback.cjs').trackSolWindow(state,row);
   // The clue stores only a source locator and command hash, never the command or output itself.
   parallelTest.track(state,row,commandsOf(payload),sourceFile?{path:sourceFile,offset:sourceOffset}:null,boundAt);
   // Keep only the envelope addressed to this executor; payloads belong to the originating backend.
@@ -146,7 +145,7 @@ function readExecutor(state,binding){
   const switched=Boolean(previous&&previous!==file);
   let size;try{size=fs.statSync(file).size;}catch(error){restore();return sourceReadError(state,previous||file,error);}
   const truncated=size<(state.executorOffset||0);
-  if(switched||truncated){delete state.workerMailTurn;delete state.quotaTurnModel;delete state.solWindow;}
+  if(switched||truncated){delete state.workerMailTurn;delete state.quotaTurnModel;}
   if(switched||truncated)parallelTest.markSourceUncertain(state,switched?previous:file);
   if(truncated)state.executorOffset=0;
   if(size===state.executorOffset){

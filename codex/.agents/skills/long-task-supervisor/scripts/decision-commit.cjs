@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const fallback = require('./model-fallback.cjs');
 const { need } = require('./guard.cjs');
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const eventHash = event => digest(JSON.stringify(event));
@@ -12,6 +13,11 @@ function file(run, id) {
 function draft(run, id) {
   need(typeof id === 'string' && /^[a-zA-Z0-9_-]+$/.test(id), 'Invalid event id');
   return path.join(run, 'draft-decision-' + id + '.json');
+}
+// An acceptance by an interim open-source supervisor, kept for a high-tier review.
+function held(run, id) {
+  need(typeof id === 'string' && /^[a-zA-Z0-9_-]+$/.test(id), 'Invalid event id');
+  return path.join(run, 'held-acceptance-' + id + '.json');
 }
 function live(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -50,7 +56,26 @@ function submit(run, binding, contract, event, state, decision, bytes) {
   need(state.pending?.id === event.id && eventHash(state.pending) === eventHash(event), 'Pending event changed during submission');
   need(!state.inflight || state.inflight.key !== 'answer-' + event.id, 'Delivery already in flight; reconcile first');
   need(!(state.messages || []).some(item => item.key === 'answer-' + event.id), 'Delivery already recorded; reconcile first');
-  const entry = {version:1, eventId:event.id, eventSha256:eventHash(event), contractSha256:binding.contractSha256,
+  need(!state.queuedDeliveries?.['answer-' + event.id], 'Delivery already queued; reconcile first');
+  let reviewer;
+  if(decision.disposition==='accept'){
+    const actual=fallback.settingsOf(binding.supervisorId);
+    if(process.env.CODEX_THREAD_ID)need(process.env.CODEX_THREAD_ID===binding.supervisorId,'Only the bound supervisor can accept');
+    need(actual?.turnId,'Final acceptance needs a readable turn of the bound supervisor');
+    if(process.env.CODEX_TURN_ID)need(process.env.CODEX_TURN_ID===actual.turnId,'Final reviewer turn changed');
+    // An interim open-source supervisor reviews a candidate as usual; only its acceptance waits. The watcher keeps the
+    // candidate and sends it again once Sol, Astra, Opus or Fable runs the supervisor (Jay 2026-11-21).
+    if(!fallback.finalReviewer(actual.model)){
+      const marker={version:1,eventId:event.id,eventSha256:eventHash(event),decisionSha256:digest(bytes),model:actual.model||null,turnId:actual.turnId,at:new Date().toISOString()};
+      const temp=held(run,event.id)+'.'+process.pid+'.tmp';
+      fs.writeFileSync(temp,JSON.stringify(marker,null,2)+'\n');fs.renameSync(temp,held(run,event.id));
+      return {submitted:false,held:true,model:actual.model||null,
+        note:'暫代監督的結案已保留；背景程式會在高階監督恢復後送同一候選複驗。本回合可以結束，其他事件照常處理。'};
+    }
+    need(fs.statSync(draft(run,event.id)).mtimeMs+1>=Date.parse(actual.at),'Review the original candidate and write a fresh acceptance draft in this high-tier turn');
+    reviewer={threadId:binding.supervisorId,turnId:actual.turnId,model:actual.model};
+  }
+  const entry = {...(reviewer?{reviewer}:{}),version:1, eventId:event.id, eventSha256:eventHash(event), contractSha256:binding.contractSha256,
     contractStateSha256:contract.contractStateSha256 || null, decisionSha256:digest(bytes), decisionRaw:bytes.toString('utf8'), decision};
   const serialized = JSON.stringify(entry, null, 2) + '\n';
   const snapshotSha256 = digest(serialized);
@@ -111,6 +136,9 @@ function load(run, binding, contract, event) {
   need(entry.contractSha256 === binding.contractSha256 && entry.contractStateSha256 === (contract.contractStateSha256 || null), 'Submitted authorization or contract changed');
   need(typeof entry.decisionRaw === 'string' && digest(Buffer.from(entry.decisionRaw, 'utf8')) === entry.decisionSha256 &&
     JSON.stringify(JSON.parse(entry.decisionRaw)) === JSON.stringify(entry.decision) && entry.decision?.eventId === event.id, 'Invalid submitted decision');
+  // A snapshot written before v1.12.0 has no reviewer and stays valid as recorded.
+  if(entry.decision.disposition==='accept' && entry.reviewer!==undefined)need(entry.reviewer?.threadId===binding.supervisorId && entry.reviewer?.turnId && fallback.finalReviewer(entry.reviewer.model),
+    'Pending final acceptance needs a verified high-tier supervisor review');
   return entry;
 }
-module.exports = {file, draft, readSnapshot, assertNoLegacyWatcher, submit, load};
+module.exports = {file, draft, held, eventHash, readSnapshot, assertNoLegacyWatcher, submit, load};

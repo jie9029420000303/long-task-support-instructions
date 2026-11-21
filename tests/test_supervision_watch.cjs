@@ -8,7 +8,18 @@ const {spawn}=require('node:child_process');
 const scripts=process.env.CODEX_SUPERVISOR_SCRIPTS||path.resolve(__dirname,'../codex/.agents/skills/long-task-supervisor/scripts');
 const sha=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const save=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n');
-function submit(run,decision){const file=path.join(run,'draft-decision-'+decision.eventId+'.json');save(file,decision);return require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',run,file],{encoding:'utf8'});}
+function submit(run,decision,env=process.env){const file=path.join(run,'draft-decision-'+decision.eventId+'.json');save(file,decision);return require('node:child_process').execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'decision',run,file],{encoding:'utf8',env});}
+// Since v1.12.0 a final acceptance is checked against the bound supervisor's own latest turn: give the test its own
+// Codex home with one high-tier supervisor turn, and never inherit the thread id of the chat that runs the tests.
+function supervisorHome(root,supervisorId,model='anthropic/claude-opus-5-5'){
+  const home=path.join(root,'codex-home'),now=new Date();
+  const dir=path.join(home,'sessions',String(now.getFullYear()),String(now.getMonth()+1).padStart(2,'0'),String(now.getDate()).padStart(2,'0'));
+  fs.mkdirSync(dir,{recursive:true});
+  const log=path.join(dir,'rollout-t-'+supervisorId+'.jsonl'),at=new Date(Date.now()-60000).toISOString();
+  fs.writeFileSync(log,[{timestamp:at,type:'session_meta',payload:{id:supervisorId}},{timestamp:at,type:'turn_context',payload:{turn_id:'review-turn',model,effort:'high'}}].map(row=>JSON.stringify(row)).join('\n')+'\n');
+  const env={...process.env,CODEX_HOME:home};delete env.CODEX_THREAD_ID;delete env.CODEX_TURN_ID;
+  return env;
+}
 async function until(check,ms=12000) {
   const end=Date.now()+ms;
   while(Date.now()<end) {if(check()) return;await new Promise(resolve=>setTimeout(resolve,80));}
@@ -30,8 +41,9 @@ test('resident Codex watcher reads exact final, confirms one delivery, and accep
   const final='QA result submitted.\nLONG_TASK_EVENT '+JSON.stringify({kind:'submission',revision:'sha256:'+sha(manifest),manifest});
   const fixture=path.join(root,'mock.json'),sentFile=path.join(root,'sent.json');
   save(fixture,{supervisorId,executorId,final});
+  const env=supervisorHome(root,supervisorId);
   const child=spawn(process.execPath,[path.join(scripts,'native-watch.cjs'),run],{
-    env:{...process.env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sentFile},stdio:['ignore','pipe','pipe']});
+    env:{...env,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:fixture,MOCK_CODEX_SENT:sentFile},stdio:['ignore','pipe','pipe']});
   let stderr='';child.stderr.on('data',chunk=>stderr+=chunk.toString());
   try {
     await until(()=>fs.existsSync(path.join(run,'native-ready.json')));
@@ -43,14 +55,14 @@ test('resident Codex watcher reads exact final, confirms one delivery, and accep
     assert.equal(receipt.confirmed,true);
     assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
     submit(run,{eventId:'executor-turn-1',disposition:'accept',revision:state.pending.revision,
-      results:[{id:'A1',status:'PASS',method:'Read exact bytes',expected:'alpha LF beta LF',actual:'alpha LF beta LF',evidence:[{path:candidate,sha256:sha(candidate)}]}]});
+      results:[{id:'A1',status:'PASS',method:'Read exact bytes',expected:'alpha LF beta LF',actual:'alpha LF beta LF',evidence:[{path:candidate,sha256:sha(candidate)}]}]},env);
     try {
       await until(()=>JSON.parse(fs.readFileSync(path.join(run,'daemon-state.json'))).phase==='accepted');
     } catch (error) {
       throw Error(error.message+'; state='+fs.readFileSync(path.join(run,'daemon-state.json'),'utf8')+'; stderr='+stderr);
     }
     const checked=JSON.parse(require('node:child_process').execFileSync(process.execPath,
-      [path.join(scripts,'supervise.cjs'),'decision',run,path.join(run,'draft-decision-executor-turn-1.json')],{encoding:'utf8'}));
+      [path.join(scripts,'supervise.cjs'),'decision',run,path.join(run,'draft-decision-executor-turn-1.json')],{encoding:'utf8',env}));
     assert.equal(checked.valid,true);
     assert.equal(checked.processed,true);
     assert.equal(JSON.parse(fs.readFileSync(sentFile)).length,1);
