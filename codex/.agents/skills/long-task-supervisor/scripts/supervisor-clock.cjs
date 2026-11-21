@@ -136,6 +136,7 @@ function sourceReadError(state,file,error){
   }
   return {readable:false,reason:'unreadable'};
 }
+const READ_CHUNK=8*1024*1024;
 function readExecutor(state,binding){
   const previous=state.executorLog,previousOffset=state.executorOffset;
   const restore=()=>{if(previous===undefined)delete state.executorLog;else state.executorLog=previous;
@@ -153,20 +154,34 @@ function readExecutor(state,binding){
     finally{if(probe!==undefined)try{fs.closeSync(probe);}catch{}}
     delete state.executorSourceReadError;return {readable:!switched&&!truncated,reason:switched?'segment_changed':truncated?'truncated':null};
   }
-  let fd;const buffer=Buffer.alloc(size-state.executorOffset);
-  try{fd=fs.openSync(file,'r');const n=fs.readSync(fd,buffer,0,buffer.length,state.executorOffset);
-    if(n!==buffer.length){restore();parallelTest.markSourceUncertain(state,previous||file);return {readable:false,reason:'truncated'};}}
-  catch(error){restore();return sourceReadError(state,previous||file,error);}
-  finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}}
-  const complete=buffer.lastIndexOf(10);if(complete<0)return {readable:false,reason:'incomplete'};
-  const start=state.executorOffset;state.executorOffset+=complete+1;
+  // Read in chunks and handle each complete line as it arrives: everything since the offset as one string crashed the
+  // watcher once a long executor rollout passed 512MB (2026-11-21 03:03 WebRPA: a new run bound at offset 0 to a
+  // 1.11GB rollout, "Cannot create a string longer than 0x1fffffe8 characters"). The offset moves only past handled
+  // lines; a read failing after some were handled keeps them, so they are not tracked twice on the next poll.
   const boundAt=Date.parse(binding.createdAt)||0;
-  let offset=0,invalid=false;
-  for(const line of buffer.subarray(0,complete).toString('utf8').split('\n')){
-    if(line.trim())try{trackTools(state,JSON.parse(line),boundAt,file,start+offset);}catch{invalid=true;}
-    offset+=Buffer.byteLength(line)+1;
+  let fd,pos=state.executorOffset,lineStart=pos,rest=[],handled=false,invalid=false;
+  const keep=()=>{if(!handled)restore();};
+  try{
+    fd=fs.openSync(file,'r');
+    while(pos<size){
+      const chunk=Buffer.alloc(Math.min(READ_CHUNK,size-pos)),n=fs.readSync(fd,chunk,0,chunk.length,pos);
+      if(n!==chunk.length){keep();parallelTest.markSourceUncertain(state,previous||file);return {readable:false,reason:'truncated'};}
+      pos+=n;
+      const last=chunk.lastIndexOf(10);
+      if(last<0){rest.push(chunk);continue;}
+      const body=Buffer.concat([...rest,chunk.subarray(0,last)]);rest=last+1<chunk.length?[chunk.subarray(last+1)]:[];
+      for(let i=0;;){
+        const j=body.indexOf(10,i),end=j<0?body.length:j,line=body.subarray(i,end).toString('utf8');
+        if(line.trim())try{trackTools(state,JSON.parse(line),boundAt,file,lineStart);}catch{invalid=true;}
+        lineStart+=end-i+1;if(j<0)break;i=j+1;
+      }
+      handled=true;state.executorOffset=lineStart;
+    }
   }
-  const partial=complete!==buffer.length-1;
+  catch(error){keep();return sourceReadError(state,previous||file,error);}
+  finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{}}
+  if(!handled)return {readable:false,reason:'incomplete'};
+  const partial=rest.length>0;
   if(invalid)parallelTest.markSourceUncertain(state,file);
   delete state.executorSourceReadError;
   return {readable:!switched&&!truncated&&!partial&&!invalid,
