@@ -186,15 +186,22 @@ function completionNow(wait=state.progressWait){
 }
 async function resumeExecution(inspection){
   if(isPaused()||!state.progressWait&&!inspection.ready.length)return false;
-  const wait=state.progressWait||{event:state.executionContinuation?{id:state.executionContinuation.eventId}:{
+  let wait=state.progressWait||{event:state.executionContinuation?{id:state.executionContinuation.eventId}:{
     id:'execution-'+require('node:crypto').createHash('sha256').update(JSON.stringify(inspection.ready.map(item=>item.key))).digest('hex').slice(0,24),
     nextAction:'收回這次已交回的成果與程序結果，核對原始證據，再依目前工作包整合、修正或續派。'}};
-  const key='continue-'+wait.event.id;
   // Read the current owner before sending: a newer question, submission, or an already active main line wins.
   const detail=unpack(await rpc('read_thread',{threadId:binding.executorId,turnLimit:1,includeOutputs:false,maxOutputCharsPerItem:500}));
   need(detail.thread?.id===binding.executorId,'Bound executor missing from execution resume read');
   const latest=detail.turns?.[0];state.executorStatus=detail.thread?.status?.type;
-  if(!latest||latest.status!=='completed'||state.executorStatus==='active'||latest.id!==wait.event.id&&!state.seen.includes(latest.id)){
+  const eligible=inspection.ready.filter(item=>item.kind==='agent' && state.workerHandoff?.workers.includes(item.id));
+  const finishingHandoff=latest?.status==='failed' && latest.id===state.workerHandoff?.turnId && eligible.length;
+  if(finishingHandoff){
+    inspection={...inspection,ready:eligible};
+    wait={event:{id:state.executionContinuation?.eventId||'handoff-'+require('node:crypto').createHash('sha256').update(eligible.map(s=>s.key).sort().join(',')).digest('hex').slice(0,32),
+      nextAction:'用 read_thread 讀指定子代理的原交付及工作包結果檔，核對證據再 collect。'}};
+  }
+  const key='continue-'+wait.event.id;
+  if(!latest||state.executorStatus==='active'||!finishingHandoff&&(latest.status!=='completed'||latest.id!==wait.event.id&&!state.seen.includes(latest.id))){
     state.executionWakeDeferred=latest?.id||'unknown';return false;
   }
   delete state.executionWakeDeferred;
@@ -257,10 +264,16 @@ function deliveryMarker(key) {return 'LONG_TASK_DELIVERY:' + key;}
 function outgoing(target,prompt,key=''){
   if(target!==binding.executorId||isPaused())return prompt;
   let reminder='';
-  try{
-    const found=executionWake.modelReminder(pace.agentRuns(binding),{mainModel:state.executorSettings?.model,reported:state.modelReminded||[]});
-    if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
-  }catch{}
+  const selected=state.inflight?.route?.model||state.executorSettings?.model;
+  if(require('./openrouter-route.cjs').choices.some(route=>route.model===selected)){
+    reminder='\n目前執行路線為 '+selected+'。新派子代理明確指定同一完整模型 ID、max 推論與獨立上下文。既有其他模型的代理從原包讀交付檔與原件，無須再向它發訊核對。';
+  }else{
+    try{
+      const workers=pace.agentRuns(binding).filter(agent=>!require('./openrouter-route.cjs').choices.some(route=>route.model===agent.model&&agent.effort==='max'));
+      const found=executionWake.modelReminder(workers,{mainModel:selected,reported:state.modelReminded||[]});
+      if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
+    }catch{}
+  }
   if(key.startsWith('answer-') && state.pending?.kind==='submission'){
     const decision=require('./decision-commit.cjs').readSnapshot(run,state.pending.id)?.decision;
     if(decision?.packageRulings)prompt+='\n當輪以 dispatch.cjs collect 登記本次裁決，讀回各包剩餘條文後再推進。'+
@@ -925,6 +938,23 @@ async function watch() {
       if(!completion.blocked&&(completion.ready.length||state.progressWait&&(state.progressWait.immediate||Date.now()>=state.progressWait.deadline&&!completion.observable))&&await resumeExecution(completion))continue;
     }
     const audit=inspectDispatch(run,binding,state);
+    // Repair a known follow-up via the same locked writer the executor uses. Unknown owners,
+    // changed package files and work still awaiting integration go through normal review.
+    if(!paused && audit.newIssues.some(issue=>issue.kind==='untracked_agent')){
+      const snapshot=clock.snapshotOf(run,binding);
+      const unlisted=new Set(audit.newIssues.filter(i=>i.kind==='untracked_agent').flatMap(i=>i.affected));
+      const workers=pace.agentRuns(binding);
+      let repaired=false;
+      for(const agent of workers){
+        if(!unlisted.has(agent.path)||!snapshot?.workPackageDirectory || !require('./worker-start.cjs').continuation(snapshot,agent))continue;
+        if(workers.filter(a=>a.path===agent.path).length!==1 && !snapshot.workerOwners?.[agent.id])continue;
+        try{
+          execFileSync(process.execPath,[path.join(__dirname,'dispatch.cjs'),'resume-observed',run,path.dirname(snapshot.workPackageDirectory),agent.id,agent.turnId],{timeout:30000,stdio:'ignore'});
+          repaired=true;
+        }catch{ /* The normal audit retains any unresolved discrepancy. */ }
+      }
+      if(repaired)continue;
+    }
     // The executor learns the run from the binding message; until then, or 15 minutes, a missing snapshot is expected.
     if(!state.executorKnowsRun&&audit.newIssues.some(item=>item.kind==='snapshot_missing')&&Date.now()-(Date.parse(binding.createdAt)||0)<PROGRESS_REVIEW_MS){
       if(Date.now()-lastMentionCheck>=60000){lastMentionCheck=Date.now();state.executorKnowsRun=contains(await rpc('read_thread',{threadId:binding.executorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000}),run);}
@@ -947,6 +977,21 @@ async function watch() {
     observeActivity(state,supervisorPoll,binding,Date.now(),'supervisor');
     const nextCursor = poll.cursor || state.cursor;
     const turn = poll.latestTurn;
+    if(!paused && turn?.status==='failed' && poll.thread?.status?.type==='idle' && !state.pending && !state.eventQueue?.length){
+      clock.readExecutor(state,binding);
+      const receipt=require('./worker-handoff.cjs').workerHandoff(turn,state.workerMailTurn,clock.snapshotOf(run,binding),pace.agentRuns(binding),binding.executorId);
+      if(receipt && state.workerHandoffKey!==receipt.key){
+        const delivered=completionNow().ready.filter(source=>source.kind==='agent' &&
+          receipt.finished.some(row=>row.worker===source.id && row.packageId===source.packageId && row.finishedAt===source.finishedAt));
+        checkSources();if(isPaused()||fs.existsSync(path.join(run,'STOP')))continue;
+        await sendAndRead(binding.executorId,receipt.prompt,receipt.key);
+        for(const source of delivered)(state.executionWakeReceipts||={})[source.key]={
+          eventId:turn.id,packageId:source.packageId,deliveryKey:receipt.key,deliveredAt:now()};
+        state.workerHandoffKey=receipt.key;state.workerHandoff={turnId:turn.id,workers:receipt.workers};
+        if(state.platformError?.since){state.platformErrorHandledSince=state.platformError.since;state.platformError=null;}
+        checkpoint();continue;
+      }
+    }
     if (turn?.status === 'completed' && !state.seen.includes(turn.id) && !(state.eventQueue || []).some(item => item.id === turn.id)) {
       turnEndReads=0;
       await queueSkipped(turn.id);

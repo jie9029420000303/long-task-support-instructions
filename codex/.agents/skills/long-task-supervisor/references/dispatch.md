@@ -43,6 +43,8 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 
 `inFlight` 每筆附 AI 時程基準 `baseline`：`minutes`（基準分鐘）、`startedAt`、`basis`（算法與來源）；代理工作另附 `model`、`estimatedOutputTokens`、`tokensPerSecond`、`toolMinutes`，用 `node "<skill>/scripts/pace.cjs" estimate "<RUN>" --model <模型> [--tokens <預估輸出 token>] [--tool-minutes <已量測工具分鐘>]` 產生。測試、主機程序等非代理工作以本場實測時長填 `minutes`，`basis` 寫明量測來源。不用人類開發經驗估時；沒有基準的在途包會叫醒監督一次，請執行端補上。包一做完就從在途移出；子代理紀錄已做完但仍列在途的包，監督記為快照未更新，不算落後。同一包換新階段或範圍擴大（例如續派同一子代理做下一階段）時，當下用 `pace.cjs estimate` 估新增的工作並寫入新的 `baseline`：`startedAt` 改為重估時間，`basis` 寫明重估原因，不沿用前一階段的基準；重估把某一級的叫醒時點（`startedAt` 加該倍數的基準分鐘）往後延到比先前叫醒過的都晚，監督的超時查核才把已叫醒過的那一級重新起算，基準改小或只是重算數字不會重叫。能獨立的新範圍優先拆成新工作包。
 
+Codex 寫入在途包時沿用該階段的起跑時間與估時，亦可從工作包的單行 `[baseline]` JSON 讀取 minutes（舊欄位 baselineMinutes）、startedAt 和 basis。已收件的原代理續做同包時，監看以確實開始的新回合、原工作包歸屬及未被更新的工作包檔為依據，透過同一寫入器登記在途並保留前次原件。尚未整合的成果或等待裁決的包繼續由執行主線對帳。
+
 各 evidence 欄位至少一筆非空引用，指向可重查的檔案、行號或平台事件位置。`updatedAt` 可記更新時間。`exclusiveResources` 只列**不可並行共享的實際占用**，每筆 `{key,kind}`；kind 為 `worktree`、`browser`、`account`、`database`、`test_environment` 或 `other`。key 使用跨工作包一致的實際識別（例如 `database:localhost:55431/qa`）。一般共享文件的唯讀查閱不列成排他資源；同一工作目錄的修改／整體測試、同一瀏覽器工具與測試帳號等仍依原隔離規則。
 
 ## 監督處理

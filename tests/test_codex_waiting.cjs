@@ -189,3 +189,48 @@ test('STOP after the review delivery suppresses the wake fallback',async()=>{
   }
   assert.doesNotMatch(f.stderr(),/Error:|Delivery uncertain|protocol_error/);
 });
+
+for(const interim of [false,true])test('recover an unreadable '+(interim?'interim':'final')+' worker message without restarting its work',async t=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'switched-worker-'));
+  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+  const sessionDir=path.join(home,'sessions',new Date().toISOString().slice(0,10).replaceAll('-','/'));
+  fs.mkdirSync(sessionDir,{recursive:true});
+  const childId='60b534a1-af02-4834-8f78-a761e6861ef1',worker='/root/assigned';
+  const writeRow=(file,type,payload)=>fs.appendFileSync(file,JSON.stringify({timestamp:new Date().toISOString(),type,payload})+'\n');
+  const session=(id)=>path.join(sessionDir,'rollout-'+new Date().toISOString().slice(0,10)+'T00-00-00-'+id+'.jsonl');
+  const error={message:JSON.stringify({error:{code:'unreadable_encrypted_agent_task'}})};
+  const f=setup('',{CODEX_HOME:home,OPENCODEX_HOME:path.join(home,'proxy')},root=>{
+    const run=path.join(root,'run');
+    writeRow(session('executor-qa'),'session_meta',{id:'executor-qa'});
+    writeRow(session(childId),'session_meta',{id:childId,parent_thread_id:'executor-qa',thread_source:'subagent',agent_path:worker});
+    writeRow(session(childId),'event_msg',{type:'task_started',turn_id:'child-turn'});
+    writeRow(session(childId),'turn_context',{turn_id:'child-turn',model:'gpt-6.2-sol',effort:'high'});
+    if(!interim)writeRow(session(childId),'event_msg',{type:'task_complete',turn_id:'child-turn',last_agent_message:'read the assigned artifact'});
+    writeRow(session('executor-qa'),'event_msg',{type:'task_started',turn_id:'executor-turn-1'});
+    writeRow(session('executor-qa'),'turn_context',{turn_id:'executor-turn-1',model:'openrouter/meta-muse-ember'});
+    writeRow(session('executor-qa'),'response_item',{type:'agent_message',id:'amsg-1',author:worker,recipient:'/root',
+      content:[{type:'encrypted_content',data:'opaque-secret'}]});
+    writeRow(session('executor-qa'),'event_msg',{type:'task_complete',turn_id:'executor-turn-1',error});
+    save(path.join(run,'dispatch.json'),{schemaVersion:1,executorId:'executor-qa',planningRevision:'v1',activity:'working',
+      capacity:{verified:2,evidence:['test']},packages:{ready:[],inFlight:[{id:'WP-A',handle:worker,evidence:[path.join(root,'source.txt')]}],
+        returned:[],blocked:[],completed:[],recurringRework:[]}});
+    return {readTurnStatus:'failed',readTurnError:interim?null:error};
+  });
+  try{
+    await until(()=>Boolean(read(path.join(f.run,'daemon-state.json')).workerHandoffKey));
+    assert.equal(executorCalls(f).length,1);
+    const prompt=executorCalls(f)[0].prompt;
+    for(const expected of [childId,'WP-A','child-turn','read_thread'])assert.ok(prompt.includes(expected));
+    assert.ok(!prompt.includes('opaque-secret'));
+    assert.match(prompt,/openrouter\/meta-muse-ember/);assert.doesNotMatch(prompt,/下次派工改回預設/);
+    if(interim){
+      assert.match(prompt,/執行中/);
+      assert.deepEqual(read(path.join(f.run,'daemon-state.json')).executionWakeReceipts||{},{});
+      writeRow(session(childId),'event_msg',{type:'task_complete',turn_id:'child-turn',last_agent_message:'read the assigned artifact'});
+      await until(()=>Object.keys(read(path.join(f.run,'daemon-state.json')).executionWakeReceipts||{}).length===1);
+      assert.equal(executorCalls(f).length,2,'the actual completion is delivered after the interim notice');
+    }
+    const receipts=read(path.join(f.run,'daemon-state.json')).executionWakeReceipts;
+    assert.equal(Object.values(receipts)[0].packageId,'WP-A','the same completed turn is already included in the recovery delivery');
+  }finally{await stop(f);}
+});

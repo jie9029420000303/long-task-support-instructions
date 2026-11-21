@@ -77,10 +77,10 @@ function sandbox(t,{state={},preferred}={}) {
     timestamp:now(),type:'event_msg',payload:{type:'token_count',rate_limits:{limit_id:limit,[slot]:{used_percent:used,window_minutes:window,resets_at:reset}}}
   });
   return {quota,context,catalog,config:path.join(proxyHome,'config.json'),state:()=>read(stateFile),
-    resolveWorker(input){
+    resolveWorker(input,threadId){
       const file=path.join(root,'worker-input.json');
       write(file,input);
-      return JSON.parse(execFileSync(process.execPath,[path.join(scripts,'model-route.cjs'),file],{env,encoding:'utf8',timeout:3000})).roles.general;
+      return JSON.parse(execFileSync(process.execPath,[path.join(scripts,'model-route.cjs'),file],{env:threadId?{...env,CODEX_THREAD_ID:threadId}:env,encoding:'utf8',timeout:3000})).roles.general;
     },
     async start(){
       processHandle=spawn(process.execPath,[watcher,run],{env,stdio:['ignore','ignore','pipe']});
@@ -194,5 +194,14 @@ test('the dispatch resolver can assign a compatible child at max and rejects an 
     const other=fourths.find(id=>id!==model);
     assert.equal(f.resolveWorker({...input,overrides:{general:{model:other}}}).status,'unavailable');
     assert.equal(f.resolveWorker({...input,catalogs:{subagent:[{id:other,efforts:['max']}]}}).status,'unavailable');
+  }
+});
+
+test('an executor that moved off Sol selects its actual fourth-route model for the next worker',t=>{
+  const f=sandbox(t),catalog=fourths.map(id=>({id,efforts:['max']}));
+  for(const model of fourths){
+    f.context(executor,model);
+    const row=f.resolveWorker({supervisorModel:sol,executorModel:sol,roles:['general'],catalogs:{subagent:catalog}},executor);
+    assert.equal(row.model,model);assert.equal(row.effort,'max');
   }
 });

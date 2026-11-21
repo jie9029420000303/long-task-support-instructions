@@ -339,3 +339,41 @@ test('work area E applies only the delivered ruling for this package and submiss
   assert.equal(fs.readFileSync(file,'utf8'),later,'a repeated old receipt cannot roll the package back after a new handoff');
   assert.deepEqual(read(f.snapshot).packages.returned.map(w=>w.id),['WP-E142']);
 });
+
+test('a Windows package uses its measured baseline, and a rebuild preserves it',t=>{
+  const f=isolated(t);
+  const startedAt=new Date(Date.now()-60000).toISOString();
+  const baseline={baselineMinutes:12,startedAt,basis:'Windows three-case run'};
+  f.makeWP('WP-A',['[baseline] '+JSON.stringify(baseline)],{list:'inFlight',handle:'main'});
+  f.snapshotFromWP();
+  const measured=read(f.snapshot).packages.inFlight[0].baseline;
+  assert.deepEqual(measured,{minutes:12,startedAt,basis:baseline.basis});
+  f.makeWP('WP-A',[],{list:'inFlight',handle:'main'});
+  f.snapshotFromWP();
+  assert.deepEqual(read(f.snapshot).packages.inFlight[0].baseline,measured);
+});
+
+test('a confirmed continuation reopens its own collected package exactly once with its actual start',t=>{
+  const f=isolated(t),id='12345678-1234-4321-9123-123456789abc',agentPath='/root/assigned';
+  const file=f.makeWP('WP-A',[],{list:'inFlight',handle:agentPath});
+  f.snapshotFromWP();
+  ok(f.collect('WP-A',{status:{list:'returned',integrated:true,resultEvidence:[f.source]}}));
+  const past=new Date(Date.now()-20000),start=new Date(Date.now()-10000);
+  fs.utimesSync(file,past,past);
+  const day=start.toISOString().slice(0,10);
+  const dir=path.join(f.root,'sessions',...day.split('-'));
+  fs.mkdirSync(dir,{recursive:true});
+  const session=path.join(dir,'rollout-'+day+'T00-00-00-'+id+'.jsonl');
+  const row=(type,payload)=>JSON.stringify({timestamp:start.toISOString(),type,payload})+'\n';
+  fs.writeFileSync(session,row('session_meta',{id,parent_thread_id:'executor',thread_source:'subagent',agent_path:agentPath})+
+    row('event_msg',{type:'task_started',turn_id:'retry'})+row('turn_context',{model:'gpt-6.2-sol',turn_id:'retry'}));
+  const sync=turn=>f.call('dispatch.cjs','resume-observed',f.run,f.root,id,turn);
+  refused(sync('old-turn'));
+  assert.equal(read(f.snapshot).packages.returned.length,1);
+  ok(sync('retry'));
+  const current=read(f.snapshot).packages.inFlight[0];
+  assert.equal(current.id,'WP-A');assert.equal(current.activeTurnId,'retry');
+  assert.equal(current.baseline.startedAt,start.toISOString());
+  assert.deepEqual(current.resultEvidence,[f.source]);
+  refused(sync('retry'));assert.deepEqual(read(f.snapshot).packages.inFlight[0],current);
+});

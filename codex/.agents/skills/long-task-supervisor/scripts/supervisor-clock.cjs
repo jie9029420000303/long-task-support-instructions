@@ -66,6 +66,14 @@ function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   require('./model-fallback.cjs').trackSolWindow(state,row);
   // The clue stores only a source locator and command hash, never the command or output itself.
   parallelTest.track(state,row,commandsOf(payload),sourceFile?{path:sourceFile,offset:sourceOffset}:null,boundAt);
+  // Keep only the envelope addressed to this executor; payloads belong to the originating backend.
+  if(row.type==='event_msg' && payload.type==='task_started')state.workerMailTurn={id:payload.turn_id,senders:{}};
+  if(row.type==='response_item' && payload.type==='agent_message' && payload.recipient==='/root' &&
+     /^\/root\/[\w.-]+$/.test(payload.author) && typeof payload.id==='string' && state.workerMailTurn){
+    state.workerMailTurn.senders[payload.author]={id:payload.id,at:Date.parse(at)};
+  }
+  if(row.type==='event_msg' && payload.type==='task_complete' && state.workerMailTurn && state.workerMailTurn.id===payload.turn_id &&
+     require('./worker-handoff.cjs').isUnreadable(payload.error))state.workerMailTurn.unreadable=true;
   // A permission mode is context, not evidence that any operation was rejected.
   const applied=row.type==='turn_context'?payload:row.type==='event_msg'&&payload.type==='thread_settings_applied'?payload.thread_settings||{}:null;
   if(applied&&(applied.approval_policy||applied.model))state.executorSettings={approvalPolicy:applied.approval_policy||state.executorSettings?.approvalPolicy||null,
@@ -138,7 +146,7 @@ function readExecutor(state,binding){
   const switched=Boolean(previous&&previous!==file);
   let size;try{size=fs.statSync(file).size;}catch(error){restore();return sourceReadError(state,previous||file,error);}
   const truncated=size<(state.executorOffset||0);
-  if(switched||truncated){delete state.quotaTurnModel;delete state.solWindow;}
+  if(switched||truncated){delete state.workerMailTurn;delete state.quotaTurnModel;delete state.solWindow;}
   if(switched||truncated)parallelTest.markSourceUncertain(state,switched?previous:file);
   if(truncated)state.executorOffset=0;
   if(size===state.executorOffset){

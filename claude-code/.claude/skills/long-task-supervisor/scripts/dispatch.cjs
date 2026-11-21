@@ -7,6 +7,7 @@ const acceptance=require('./acceptance-audit.cjs');
 const formal=require('./formal-case.cjs');
 // Dispatch is shared by both adapters. Only Codex commits version-bound package rulings.
 const review=require('./guard.cjs').packageReview?.();
+const workerStart=review?require('./worker-start.cjs'):null;
 const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
 const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]]] [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [PACKAGE_ID ABSOLUTE_RESULT_JSON ...] [same options]';
 
@@ -74,6 +75,10 @@ function packagesFrom(stateDir,overrides){
     const {list,...extra}=status(raw,file);if(list==='archived')continue;
     const header=tagLine(text,'工作包')||'',ids=listOf(tagLine(text,'驗收條目'));
     const record={id:packageId(text,file),...extra,evidence:[file,...(extra.evidence||[])]};
+    if(workerStart && list==='inFlight' && !record.baseline && !record.activeTurnId){
+      const fromFile=workerStart.declared(tagLine(text,'baseline'));
+      if(fromFile && (!record.startedAt || Date.parse(record.startedAt)===Date.parse(fromFile.startedAt)))record.baseline=fromFile;
+    }
     const components=tagLine(text,'部署元件');
     if(review && components!==null){
       const names=JSON.parse(components);
@@ -152,6 +157,7 @@ function save(run,binding,value){
   const output=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),temporary=output+'.tmp-'+process.pid;
   acquire(run);
   const previous=fs.existsSync(output)?JSON.parse(fs.readFileSync(output,'utf8')):null;
+  if(workerStart){workerStart.fill(value,previous,binding,run);parse(value,binding);}
   review?.validateSnapshot(value,previous,run,binding);
   formal.dispatchCheck(run,value,previous);
   acceptance.record(run,value.acceptance,output);
@@ -169,7 +175,7 @@ const flag=name=>{const at=args.indexOf('--'+name);return at>=0?args[at+1]:undef
 try{
   const absolute=value=>path.isAbsolute(value||'');
   const positional=args.filter((value,at)=>!value.startsWith('--')&&!(at>0&&args[at-1].startsWith('--')));
-  const valid={write:absolute(positional[2]),summary:true,reconcile:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
+  const valid={'resume-observed':workerStart&&absolute(positional[2])&&positional.length===5,write:absolute(positional[2]),summary:true,reconcile:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
     collect:absolute(positional[2])&&positional.length>=5&&positional.length%2===1&&positional.slice(3).every((value,at)=>at%2?absolute(value):Boolean(value))}[command];
   if(!valid||!absolute(runArg)||(flag('base')!==undefined&&!absolute(flag('base'))))throw Error(USAGE);
   const run=path.resolve(runArg),binding=JSON.parse(fs.readFileSync(path.join(run,'binding.json'),'utf8'));
@@ -193,6 +199,25 @@ try{
     if(starting){staggeredMs=machine.staggerWait(run);if(staggeredMs>0)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,staggeredMs);}
     acquire(run);
     const overrides=[],updates=[];
+    if(command==='resume-observed'){
+      const snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));
+      const [threadId,turnId]=positional.slice(3);
+      const agents=require('./pace.cjs').agentRuns(binding);
+      const agent=agents.find(a=>a.id===threadId && a.turnId===turnId);
+      const prior=workerStart.continuation(snapshot,agent);
+      if(!prior || snapshot.workPackageDirectory!==packageDir)throw Error('No matching active continuation');
+      const file=(prior.evidence||[]).find(f=>typeof f==='string'&&path.dirname(f)===packageDir&&f.endsWith('.md')&&
+        fs.existsSync(f)&&path.dirname(fs.realpathSync(f))===packageDir&&packageId(fs.readFileSync(f,'utf8'),f)===prior.id);
+      if(!file || fs.statSync(file).mtimeMs>=agent.turnStartedAt)throw Error('Package was updated after this turn began');
+      const text=fs.readFileSync(file,'utf8'),before=status(tagLine(text,'狀態'),file);
+      if(!((before.list==='completed'||before.list==='returned'&&before.integrated)&&!before.submission))throw Error('Work package already changed');
+      const {integrated,baseline,...history}=before;
+      const state={...history,list:'inFlight',handle:agent.path||agent.id,activeTurnId:turnId,
+        startedAt:new Date(agent.turnStartedAt).toISOString(),model:agent.model};
+      // A fresh stage uses its own measured model and start. Earlier result files remain evidence.
+      state.baseline={...require('./pace.cjs').baseline({model:agent.model},require('./pace.cjs').speed(agents)),startedAt:state.startedAt};
+      overrides.push({file,state,text:text.replace(/^\[狀態\].*$/m,()=>'[狀態] '+JSON.stringify(state))});
+    }
     if(command==='mark'||command==='collect'){
       const pairs=command==='collect'?positional.slice(3):[positional[3],positional[4]],dir=path.join(stateDir,'wp');
       for(let at=0;at<pairs.length;at+=2){
@@ -223,11 +248,20 @@ try{
     const draft=build(run,binding,stateDir,options,overrides,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
     const notes=review && command==='collect'?require('./review-followup.cjs').collectionNotes(run).filter(n=>!draft.readCollectionNotes?.includes(n.eventId)):[];
     if(notes.length)draft.readCollectionNotes=[...(draft.readCollectionNotes||[]),...notes.map(n=>n.eventId)];
-    const value=checked(run,binding,draft);
     const prior=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
     const previous=fs.existsSync(prior)?JSON.parse(fs.readFileSync(prior,'utf8')):null;
+    workerStart?.fill(draft,previous,binding,run);
+    const value=checked(run,binding,draft);
     review?.validateSnapshot(value,previous,run,binding);
     formal.dispatchCheck(run,value,previous);
+    for(const override of overrides){
+      if(override.state.list!=='inFlight'||override.state.baseline)continue;
+      const row=value.packages.inFlight.find(r=>r.evidence[0]===override.file);
+      if(row?.baseline){
+        override.state.baseline=row.baseline;
+        override.text=override.text.replace(/^\[狀態\].*$/m,()=>'[狀態] '+JSON.stringify(override.state));
+      }
+    }
     for(const item of overrides){const temporary=item.file+'.tmp-'+process.pid;fs.writeFileSync(temporary,item.text,{flag:'wx'});fs.renameSync(temporary,item.file);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
     const written=save(run,binding,value);if(starting)machine.recordStart(run);

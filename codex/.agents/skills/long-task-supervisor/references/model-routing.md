@@ -26,7 +26,7 @@ Claude 的 `anthropic/`、`anthropic-apikey/` 代表不同帳號路徑。一般�
 }
 ```
 
-派子代理時改用 `roles:["general"]` 或 `["ui"]`，附目前執行主線完整 ID `executorModel`，`catalogs.subagent` 填執行端可用清單。第 1、2 次失敗用 `errors:1`、`errors:2` 在同一層調高推理。第 2 次失敗先研究與小實驗，再安排正式重試。第 3 次失敗傳入 `errors:3`、`previousModel`、`previousEffort`，採同家高一級模型與下一個支援的推理強度，再研究、實驗並重試。GPT 層級為 Terra → Sol → Astra，Claude 為 Sonnet → Opus → Fable，允許高於主線。若某項已達平台上限，結果分別以 `modelAtCeiling` 與 `effortAtCeiling` 記錄該項沿用最高檔；文字回報只將實際提高的項目記為升級。第 4 次回傳 `takeover`，由執行主線接手。`overrides` 只接已核對的使用者指定，例如 `{"executor":{"model":"完整 ID","effort":"high"}}`；輸入檔本身不證明授權。某角色 unavailable 只表示該角色沒有可派選項，不擋其他已可做的工作，不跨供應商靜默替代。
+派子代理時改用 `roles:["general"]` 或 `["ui"]`，附目前執行主線完整 ID `executorModel`。執行端呼叫 CLI 時會以目前對話的實際模型紀錄校正舊輸入，`catalogs.subagent` 填執行端可用清單。第 1、2 次失敗用 `errors:1`、`errors:2` 在同一層調高推理。第 2 次失敗先研究與小實驗，再安排正式重試。第 3 次失敗傳入 `errors:3`、`previousModel`、`previousEffort`，採同家高一級模型與下一個支援的推理強度，再研究、實驗並重試。GPT 層級為 Terra → Sol → Astra，Claude 為 Sonnet → Opus → Fable，允許高於主線。若某項已達平台上限，結果分別以 `modelAtCeiling` 與 `effortAtCeiling` 記錄該項沿用最高檔；文字回報只將實際提高的項目記為升級。第 4 次回傳 `takeover`，由執行主線接手。`overrides` 只接已核對的使用者指定，例如 `{"executor":{"model":"完整 ID","effort":"high"}}`；輸入檔本身不證明授權。某角色 unavailable 只表示該角色沒有可派選項，不擋其他已可做的工作，不跨供應商靜默替代。
 
 3. 新建執行對話：把結果明確放入 `create_thread({model:結果.model, thinking:結果.effort, ...})`，不能省略後依賴 App 預設。交辦 prompt 附監督實際模型 ID、供應商路徑、來源與角色分工；執行主線再依自己的 spawn_agent 清單解析子代理，不能從監督端假定子代理也可用。
 4. 綁定既有執行對話：已鎖定且符合路線就保留。新啟動需要套用選定模型時，在回合結束後下一則本來就要送的啟動／續接訊息明確傳 `send_message_to_thread({model,thinking,...})`；不為改模型打斷在途回合、額外催促或丟棄成果。使用者明確指定保留的模型不覆寫。背景 watcher 後續傳訊省略模型，沿用該對話目前設定。

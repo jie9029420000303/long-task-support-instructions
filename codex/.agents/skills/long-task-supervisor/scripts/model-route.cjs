@@ -75,6 +75,11 @@ function resolve(input) {
   }
   return result;
 }
-module.exports={resolve};
-if(require.main===module){try{console.log(JSON.stringify(resolve(JSON.parse(fs.readFileSync(process.argv[2],'utf8'))),null,2));}
+function observedInput(input,threadId){
+  if(!threadId || !input.roles?.some(role=>role==='general'||role==='ui'))return input;
+  const observed=require('./model-fallback.cjs').settingsOf(threadId)?.model;
+  return observed?{...input,executorModel:observed}:input;
+}
+module.exports={resolve,observedInput};
+if(require.main===module){try{console.log(JSON.stringify(resolve(observedInput(JSON.parse(fs.readFileSync(process.argv[2],'utf8')),process.env.CODEX_THREAD_ID)),null,2));}
 catch(error){console.error(error.message);process.exitCode=1;}}
