@@ -920,9 +920,13 @@ async function handleRateLimits() {
       await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE_CLEARED：Claude 訂閱額度回到保留值以上，可照常派 Claude 子代理。',drain.noticeKey+'-cleared');
   }
   const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
+  // A mainline left on an open-source route without a switch of this watcher (a model chose it under the rule retired
+  // 2026-11-21) is moved up like a switched one: open source is only for when every route above it is out.
+  const strandedIds=[binding.executorId,binding.supervisorId].filter(id=>!(state.modelSwitch?.[id]&&!state.modelSwitch[id].restored)&&!waiting[id]&&
+    String((id===binding.executorId?state.executorSettings?.model:fallback.settingsOf(id)?.model)||'').startsWith('openrouter/'));
   if(hits.length||refined||back||quotaBack||dirty){fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();}
-  if(!active.length && !Object.keys(waiting).length && !budgetChange)return;
-  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[])]);
+  if(!active.length && !Object.keys(waiting).length && !budgetChange && !strandedIds.length)return;
+  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[]),...strandedIds]);
   for(const id of ids){
     if(state.inflight)return;
     const hit=waiting[id], record=state.modelSwitch?.[id], switched=record&&!record.restored;
@@ -944,7 +948,9 @@ async function handleRateLimits() {
       delete waiting[id];checkpoint();continue;
     }
     const observed=id===binding.executorId?state.executorSettings?.model:fallback.settingsOf(id)?.model;
-    const original=switched?record.original:hit?.model||observed;
+    const stranded=!switched&&!hit&&String(observed||'').startsWith('openrouter/');
+    // A stranded mainline takes the first stop of its role as its original, so it climbs back as the routes free up.
+    const original=switched?record.original:hit?.model||(stranded?fallback.chainFor(observed,role)[0]:observed);
     const current=hit?.model||(switched?record.current:observed);
     const chain=fallback.chainFor(original,role);
     // A manually chosen start stays in the chain; the executor never starts on the Claude API key.
@@ -970,10 +976,11 @@ async function handleRateLimits() {
     }
     const restored=target===original && !original.startsWith('openrouter/');
     const settings=fallback.settingsOf(id)||{};
-    const effort=(switched?record.effort:settings.effort)||null;
+    // Leaving open source (always max) a stranded mainline takes its role's usual effort: the executor High, the supervisor xhigh.
+    const effort=(switched?record.effort:stranded?(role==='supervisor'?'xhigh':'high'):settings.effort)||null;
     const targetEffort=target.startsWith('openrouter/')?'max':effort;
     const until=state.rateLimits?.[fallback.limitKey(role,original)]?.until || time;
-    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：額度已恢復。')+'本對話用 '+target+' 從中斷處接續原工作。':
+    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：開源模型只在前面順位都不能用時使用。本對話改用 '+target+'，從已確認的進度接續。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：額度已恢復。')+'本對話用 '+target+' 從中斷處接續原工作。':
       budget?'Claude 訂閱保留給監督（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
       (hit?.failure?'目前模型連續出錯或沒有回應：':'額度限速：')+'本對話改用 '+target+'，從已確認的進度接續。';
     const familyOf=model=>String(model||'').startsWith('openrouter/')?model:catalog.identity(model)?.family||model;

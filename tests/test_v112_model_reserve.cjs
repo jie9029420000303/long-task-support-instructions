@@ -247,3 +247,26 @@ test('an acceptance from an interim open-source supervisor is kept and sent agai
     assert.deepEqual([snapshot.reviewer.model,snapshot.reviewer.turnId],[opus,'opus-turn']);
   }finally{await f.stop();}
 });
+
+// WebRPA 2026-11-21: its executor sat on Muse, chosen by a model under the retired "Sol below 50%" rule, and the
+// watcher had no switch of its own to undo, so the order was never applied. Open source is the last stop of both roles.
+test('a mainline a model left on an open-source route climbs back by the order: the executor to Sol below the reserve or Sonnet at it, the supervisor to Opus',async()=>{
+  const muse='openrouter/meta-muse-ember';
+  const low=fixture({executorModel:muse,quotaData:reading(Date.now())});
+  const kept=fixture({executorModel:muse,supervisorModel:muse,quotaData:reading(Date.now(),{big:81})});
+  try{
+    low.start();kept.start();
+    await until(()=>low.calls().some(c=>c.threadId==='executor-qa'&&c.model));
+    const moved=low.calls().find(c=>c.threadId==='executor-qa'&&c.model);
+    assert.deepEqual([moved.model,moved.thinking],[sol,'high'],'below the reserve: Sol at the executor High, not the open-source max');
+    assert.match(moved.prompt,/開源模型只在前面順位都不能用時使用/);assert.match(moved.prompt,/最新 Terra/);
+    const record=read(low.statePath).modelSwitch['executor-qa'];
+    assert.deepEqual([record.original,record.current,record.restored],[sonnet,sol,null],'kept as a move away from Sonnet, so it returns when the reserve allows');
+    assert.ok(!low.calls().some(c=>c.threadId==='supervisor-qa'&&c.model),'a supervisor already on Opus is left alone');
+    await until(()=>['executor-qa','supervisor-qa'].every(id=>kept.calls().some(c=>c.threadId===id&&c.model)));
+    const executor=kept.calls().find(c=>c.threadId==='executor-qa'&&c.model),supervisor=kept.calls().find(c=>c.threadId==='supervisor-qa'&&c.model);
+    assert.deepEqual([executor.model,executor.thinking],[sonnet,'high'],'at the reserve the executor goes straight to Sonnet');
+    assert.deepEqual([supervisor.model,supervisor.thinking],[opus,'xhigh'],'an open-source supervisor without its own refusal goes back to Opus');
+    assert.ok(read(kept.statePath).modelSwitch['supervisor-qa'].restored,'back on the first stop: nothing is left to restore');
+  }finally{await low.stop();await kept.stop();}
+});
