@@ -162,12 +162,14 @@ class CodexDispatchContractTests(unittest.TestCase):
         self.assertIn("Goal 續跑／恢復沿用已鎖定模型", skill)
         for row in (
             "| 主線 | | High |",
-            "| A 視覺查核 | | Medium |",
-            "| B 技術實作 | | Medium |",
-            "| C 研究 | | Medium |",
+            "| A 視覺查核 | | Sonnet High／Terra Medium |",
+            "| B 技術實作 | | Sonnet High／Terra Medium |",
+            "| C 研究 | | Sonnet High／Terra Medium |",
             "| 介面操作 | | Low |",
         ):
             self.assertIn(row, template)
+        # Jay 2026-11-23: a Sonnet general worker starts at High; Terra keeps Medium and interface work Low.
+        self.assertIn("一般包 Sonnet 以 high、Terra 以 medium 起跳，介面包以 low 起跳", skill)
 
     def test_pending_decision_does_not_pause_other_authorized_work(self):
         # A single unresolved decision must not idle agents or stop integration work that is

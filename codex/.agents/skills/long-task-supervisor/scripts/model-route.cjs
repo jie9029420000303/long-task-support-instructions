@@ -5,6 +5,11 @@ const fs=require('node:fs');
 const {keyOf}=require('./model-fallback.cjs');
 const {tiers,efforts,identity,available,latest}=require('./model-catalog.cjs');
 const roles={executor:'high',general:'medium',ui:'low'};
+// A Sonnet general worker (A check, B technical, C research) starts at High (Jay 2026-11-23「子代理sonnet 改為high」:
+// AA rates Sonnet High 41.5 overall and 25.7% on coding, Medium 30.8 and 11.0%). GPT workers keep Medium and
+// interface work keeps Low. The failure steps start from this level, so a Sonnet package goes High, xhigh, max.
+const sonnetGeneral='high';
+const baseline=(role,model)=>role==='general'&&identity(model)?.tier==='sonnet'?sonnetGeneral:roles[role];
 function resolve(input) {
   const main=identity(input.supervisorModel);
   if(!input.supervisorModel)throw Error('Provide the observed supervisor model ID');
@@ -70,9 +75,10 @@ function resolve(input) {
     }
     if(!selected){unavailable('The requested enabled role/model is unavailable in this tool inventory');continue;}
     const supported=efforts.filter(e=>selected.efforts.includes(e));
-    let effort=override.effort||roles[role];
+    const base=baseline(role,selected.id);
+    let effort=override.effort||base;
     if(errors && !override.effort){
-      const prior=errors===3?input.previousEffort:roles[role];
+      const prior=errors===3?input.previousEffort:base;
       const higher=supported.filter(e=>efforts.indexOf(e)>efforts.indexOf(prior));
       effort=higher[Math.min(higher.length,errors===3?1:errors)-1]||supported.at(-1);
       if(efforts.indexOf(effort)<efforts.indexOf(prior)){unavailable('Escalation would reduce the previous effort');continue;}
@@ -95,6 +101,6 @@ function observedInput(input,threadId){
   const observed=require('./model-fallback.cjs').settingsOf(threadId)?.model;
   return observed?{...input,executorModel:observed}:input;
 }
-module.exports={resolve,observedInput};
+module.exports={resolve,observedInput,sonnetGeneral};
 if(require.main===module){try{console.log(JSON.stringify(resolve(observedInput(JSON.parse(fs.readFileSync(process.argv[2],'utf8')),process.env.CODEX_THREAD_ID)),null,2));}
 catch(error){console.error(error.message);process.exitCode=1;}}

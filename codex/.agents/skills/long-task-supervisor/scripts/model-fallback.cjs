@@ -1,6 +1,6 @@
 // Rate-limit model fallback (Jay 2026-10-11, revised 2026-11-21): the supervisor goes Claude subscription Opus ->
-// Claude API Opus (monthly; skipped once known used up) -> latest Sol -> DeepSeek -> Muse and moves only when it is
-// refused itself. The executor goes subscription Sonnet -> Sol (Terra workers) -> DeepSeek -> Muse and never uses the
+// Claude API Opus (monthly; skipped once known used up) -> latest Sol -> Muse -> DeepSeek and moves only when it is
+// refused itself. The executor goes subscription Sonnet -> Sol (Terra workers) -> Muse -> DeepSeek and never uses the
 // API key. Workers stay with their current parent. Switch back when the limit resets. opencodex records every request in usage.jsonl with conversationId =
 // sha256(Codex thread id)[:32], so a 429 maps to the exact thread (2026-10-11 05:04: this research chat on
 // anthropic/claude-opus-5-5, "All Anthropic OAuth accounts are temporarily rate-limited").
@@ -81,7 +81,7 @@ function chainFor(original,role,executorModel=original){
   const sol=catalog.latest(items,'gpt','','sol')?.id;
   return sol?[...claude,sol]:claude;
 }
-// After Sol the supervisor always tries DeepSeek then Muse; the executor follows the run's preferred order.
+// After Sol the supervisor always tries Muse then DeepSeek (Jay 2026-11-22); the executor follows the run's preferred order.
 function openRoutes(role,preference=null){
   return require('./openrouter-route.cjs').routes(role==='supervisor'?null:preference);
 }

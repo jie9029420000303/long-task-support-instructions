@@ -22,6 +22,8 @@ const opus='anthropic/claude-opus-5-5',paid='anthropic-apikey/claude-opus-5-5',s
 const catalogFixture=path.join(__dirname,'fixtures/model-routing-catalog.json');
 const MINUTE=60000,HOUR=60*MINUTE,DAY=24*HOUR;
 async function until(check,ms=15000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('Timed out');}
+// The watcher records a sent message before it writes what follows from it, so a file read at once may be missing or half written.
+const peek=file=>{try{return read(file);}catch{return null;}};
 function withEnv(values,fn){
   const old=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
   for(const [key,value] of Object.entries(values))if(value===undefined)delete process.env[key];else process.env[key]=value;
@@ -186,7 +188,9 @@ test('below the reserve the executor first stops new Claude subagents, then move
     const notice=f.calls().find(c=>/LONG_TASK_QUOTA_RESERVE：/.test(c.prompt));
     assert.ok(!notice.model,'the notice leaves the mainline model alone while its Claude worker finishes');
     assert.match(notice.prompt,/19\.8%.*先停派新的 Claude 子代理/);
-    const published=read(path.join(f.run,'model-fallback.json'));
+    const publishedFile=path.join(f.run,'model-fallback.json');
+    await until(()=>peek(publishedFile)?.claudeQuota);
+    const published=read(publishedFile);
     assert.deepEqual([published.claudeQuota.executorMayUseClaude,published.claudeQuota.weeklyRemaining],[false,19.8]);
     assert.ok(!published.chain.executor.some(model=>model.startsWith('anthropic-apikey/')));
     assert.ok(!f.calls().some(c=>c.threadId==='executor-qa'&&c.model));
@@ -267,6 +271,7 @@ test('a mainline a model left on an open-source route climbs back by the order: 
     const executor=kept.calls().find(c=>c.threadId==='executor-qa'&&c.model),supervisor=kept.calls().find(c=>c.threadId==='supervisor-qa'&&c.model);
     assert.deepEqual([executor.model,executor.thinking],[sonnet,'high'],'at the reserve the executor goes straight to Sonnet');
     assert.deepEqual([supervisor.model,supervisor.thinking],[opus,'xhigh'],'an open-source supervisor without its own refusal goes back to Opus');
+    await until(()=>peek(kept.statePath)?.modelSwitch?.['supervisor-qa']?.restored).catch(()=>{});
     assert.ok(read(kept.statePath).modelSwitch['supervisor-qa'].restored,'back on the first stop: nothing is left to restore');
   }finally{await low.stop();await kept.stop();}
 });

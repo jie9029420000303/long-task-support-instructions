@@ -279,7 +279,7 @@ function outgoing(target,prompt,key=''){
   }else{
     try{
       const workers=pace.agentRuns(binding).filter(agent=>!require('./openrouter-route.cjs').choices.some(route=>route.model===agent.model&&agent.effort==='max'));
-      const found=executionWake.modelReminder(workers,{mainModel:selected,reported:state.modelReminded||[]});
+      const found=executionWake.modelReminder(workers,{mainModel:selected,reported:state.modelReminded||[],sonnetEffort:require('./model-route.cjs').sonnetGeneral});
       if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
     }catch{}
   }

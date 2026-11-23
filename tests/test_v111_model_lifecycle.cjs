@@ -11,12 +11,14 @@ const watcher = path.join(scripts,'native-watch.cjs');
 const subscription = 'anthropic/claude-opus-5-5';
 const paid = 'anthropic-apikey/claude-opus-5-5';
 const sol = 'gpt-6.2-sol';
+// Jay 2026-11-22: the open-source stops go Muse first, DeepSeek second, for the supervisor and the executor alike.
 const cheap = new Map([
-  ['deepseek/deepseek-v4.1-flash-1017',['ambient/fp4','pearl-research/fp8']],
-  ['meta/muse-ember',['google-vertex/global','meta']]
+  ['meta/muse-ember',['google-vertex/global','meta']],
+  ['deepseek/deepseek-v4.1-flash-1017',['ambient/fp4','pearl-research/fp8']]
 ]);
 const slug = raw => 'openrouter/'+raw.replace('/','-');
 const fourths = [...cheap.keys()].map(slug);
+const muse = slug('meta/muse-ember'), deepseek = slug('deepseek/deepseek-v4.1-flash-1017');
 const executor = 'executor-qa', supervisor = 'supervisor-qa';
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
 const read = file => JSON.parse(fs.readFileSync(file,'utf8'));
@@ -137,19 +139,18 @@ test('the approved explicit choice is used at max when the third model refuses a
   assert.equal(f.calls().find(call=>call.model===preferred).thinking,'max');
 });
 
-test('an empty DeepSeek price list sends the executor directly to eligible Muse at max',async t=>{
+test('an empty Muse price list sends the executor directly to eligible DeepSeek at max',async t=>{
   const f=sandbox(t,{state:initialState()});
   const config=read(f.config);
-  const [deepseek]=cheap.keys();
-  config.providers.openrouter.modelOpenRouterRouting[deepseek]={
+  config.providers.openrouter.modelOpenRouterRouting['meta/muse-ember']={
     only:['opencodex-price-cap.invalid/no-eligible-endpoint'],allowFallbacks:false
   };
   write(f.config,config);
   f.refuse(executor,sol);
   await f.start();
-  await waitFor(()=>f.calls().some(call=>call.model===fourths[1]),'no continuation on Muse');
+  await waitFor(()=>f.calls().some(call=>call.model===deepseek),'no continuation on DeepSeek');
   const calls=f.calls().filter(call=>fourths.includes(call.model));
-  assert.deepEqual(calls.map(c=>[c.threadId,c.model,c.thinking]),[[executor,fourths[1],'max']]);
+  assert.deepEqual(calls.map(c=>[c.threadId,c.model,c.thinking]),[[executor,deepseek,'max']]);
 });
 
 test('unrestricted supplier fallback or changed effort cannot silently consume a fourth route',async t=>{
@@ -187,6 +188,7 @@ test('a fourth-route 429 continues the same executor on the other eligible model
   await f.start();
   await waitFor(()=>f.calls().some(call=>call.threadId===executor&&fourths.includes(call.model)),'no default fourth model');
   const first=f.calls().find(call=>fourths.includes(call.model)).model;
+  assert.equal(first,muse,'with no preference bound to the run the executor takes Muse before DeepSeek');
   const other=fourths.find(model=>model!==first);
   f.context(executor,first);
   f.refuse(executor,first);
@@ -221,7 +223,7 @@ test('an executor that moved off Sol selects its actual fourth-route model for t
 
 test('workers follow the refreshed supplier list and never select an empty or inconsistent route',t=>{
   const f=sandbox(t),config=read(f.config),rules=config.providers.openrouter.modelOpenRouterRouting;
-  const [raw]=cheap.keys(),model=fourths[0];
+  const raw='deepseek/deepseek-v4.1-flash-1017',model=deepseek;
   const worker=rule=>{
     rules[raw]=rule;write(f.config,config);
     return f.resolveWorker({supervisorModel:sol,executorModel:model,roles:['general'],catalogs:{subagent:[{id:model,efforts:['max']}]}});
@@ -243,16 +245,16 @@ test('manual selection leaves recovery enabled; a supervisor exhausts both appro
   const state=initialState();
   // A preference for the executor must not change the order for the supervisor.
   state.rateLimits['anthropic-apikey/'].until=Date.now()+6000;
-  const f=sandbox(t,{state,preferred:fourths[1],policy:{modelPolicy:'automatic'}});
+  const f=sandbox(t,{state,preferred:deepseek,policy:{modelPolicy:'automatic'}});
   f.refuse(supervisor,sol);
   await f.start();
   const models=()=>f.calls().filter(c=>c.threadId===supervisor&&c.model);
-  await waitFor(()=>models().some(c=>c.model===fourths[0]),'no interim supervisor');
-  f.context(supervisor,fourths[0]);f.refuse(supervisor,fourths[0]);
-  await waitFor(()=>models().some(c=>c.model===fourths[1]),'no second interim supervisor');
-  f.context(supervisor,fourths[1]);
+  await waitFor(()=>models().some(c=>c.model===muse),'no interim supervisor');
+  f.context(supervisor,muse);f.refuse(supervisor,muse);
+  await waitFor(()=>models().some(c=>c.model===deepseek),'no second interim supervisor');
+  f.context(supervisor,deepseek);
   await waitFor(()=>models().some(c=>c.model===paid),'higher route never reclaimed review');
-  assert.deepEqual(models().map(c=>[c.model,c.thinking]),[[fourths[0],'max'],[fourths[1],'max'],[paid,'high']]);
+  assert.deepEqual(models().map(c=>[c.model,c.thinking]),[[muse,'max'],[deepseek,'max'],[paid,'high']],'Muse, then DeepSeek, then back up');
 });
 
 test('an explicit lock and an unmigrated legacy lock both suppress quota and ordinary delivery restoration',async t=>{

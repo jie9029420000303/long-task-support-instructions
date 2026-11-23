@@ -41,9 +41,9 @@
 | 角色 | 具體模型 | 基準推理 | 目前推理 | 鎖定依據／時間 | 差距揭露 |
 |---|---|---|---|---|---|
 | 主線 | | High | | | |
-| A 視覺查核 | | Medium | | | |
-| B 技術實作 | | Medium | | | |
-| C 研究 | | Medium | | | |
+| A 視覺查核 | | Sonnet High／Terra Medium | | | |
+| B 技術實作 | | Sonnet High／Terra Medium | | | |
+| C 研究 | | Sonnet High／Terra Medium | | | |
 | 介面操作 | | Low | | | |
 
 ## C 研究證據（僅 C 任務填寫）

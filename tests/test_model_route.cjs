@@ -8,8 +8,27 @@ function published(t,body){
  const file=path.join(dir,'model-fallback.json');fs.writeFileSync(file,JSON.stringify(body));return file;
 }
 // Jay 2026-11-21: the executor side starts on subscription Sonnet; Opus stays with the supervisor.
+// Jay 2026-11-23「子代理sonnet 改為high」: a Sonnet general worker starts at High; interface work keeps Low.
 test('a Claude supervisor starts the executor and its workers on subscription Sonnet at their baseline efforts',()=>{
- const r=resolve(base());assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.model,v.effort]])),{executor:[sonnet,'high'],general:[sonnet,'medium'],ui:[sonnet,'low']});
+ const r=resolve(base());assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.model,v.effort]])),{executor:[sonnet,'high'],general:[sonnet,'high'],ui:[sonnet,'low']});
+});
+// The failure steps start from the worker's own baseline: Sonnet goes High, xhigh, max; Terra keeps Medium, High, xhigh.
+test('a Sonnet general worker starts at High and a Terra general worker stays at Medium, each stepping up from there',()=>{
+ const wide=id=>({id,efforts:['low','medium','high','xhigh','max','ultra']}),terra='gpt-6.1-terra';
+ const claude=errors=>resolve({supervisorModel:opus,roles:['general','ui'],catalogs:{subagent:[wide(sonnet)]},errors}).roles;
+ assert.deepEqual([0,1,2].map(n=>claude(n).general.effort),['high','xhigh','max']);
+ assert.deepEqual([0,1,2].map(n=>claude(n).ui.effort),['low','medium','high'],'interface work keeps its own baseline');
+ const gpt=errors=>resolve({supervisorModel:opus,executorModel:sol,roles:['general'],catalogs:{subagent:[wide(terra)]},errors}).roles.general;
+ assert.deepEqual([0,1,2].map(n=>[gpt(n).model,gpt(n).effort]),[[terra,'medium'],[terra,'high'],[terra,'xhigh']]);
+ // A catalog that stops at xhigh keeps the second failure there instead of lowering it.
+ assert.equal(resolve({...base(),roles:['general'],errors:2}).roles.general.effort,'xhigh');
+ // The third failure moves from the last actual effort to Opus one level up, as before.
+ const third=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet),wide(opus)]},errors:3,previousModel:sonnet,previousEffort:'max'}).roles.general;
+ assert.deepEqual([third.model,third.effort],[opus,'ultra']);
+ // An explicit user effort still wins, and an explicit Opus worker without an effort keeps the general Medium.
+ assert.equal(resolve({...base(),roles:['general'],overrides:{general:{effort:'medium'}}}).roles.general.effort,'medium');
+ const explicit=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet),wide(opus)]},overrides:{general:{model:opus}}}).roles.general;
+ assert.deepEqual([explicit.model,explicit.effort],[opus,'medium']);
 });
 test('a Sonnet supervisor selects its own model for the executor',()=>{
  const input=base();input.supervisorModel=sonnet;assert.equal(resolve(input).roles.executor.model,sonnet);
@@ -32,7 +51,7 @@ test('separate creation and subagent inventories cannot claim a model supported 
  assert.equal(resolve(input).roles.general.status,'unavailable');
 });
 test('unsupported effort is not reported as applied or silently downgraded',()=>{
- const input=base();input.catalogs.subagent=[{id:sonnet,efforts:['high']}];assert.equal(resolve(input).roles.general.status,'unavailable');assert.equal(resolve(input).roles.ui.status,'unavailable');
+ const input=base();input.catalogs.subagent=[{id:sonnet,efforts:['medium']}];assert.equal(resolve(input).roles.general.status,'unavailable');assert.equal(resolve(input).roles.ui.status,'unavailable');
 });
 test('the executor takes the newest subscription Sonnet and an API-key worker needs an explicit user choice',()=>{
  const input=base();input.catalogs.executor.push(item('anthropic/claude-sonnet-6-0'));assert.equal(resolve(input).roles.executor.model,'anthropic/claude-sonnet-6-0');
@@ -49,7 +68,7 @@ for(const provider of ['anthropic-apikey','anthropic']){
    subagent:[item('anthropic-apikey/claude-sonnet-5-5'),item(sonnet)]}};
   const r=resolve(input);assert.equal(r.provider,provider+'/');
   assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.status,v.model,v.effort]])),{
-   executor:['ready',sonnet,'high'],general:['ready',sonnet,'medium'],ui:['ready',sonnet,'low']});
+   executor:['ready',sonnet,'high'],general:['ready',sonnet,'high'],ui:['ready',sonnet,'low']});
  });
  test(`${provider} supervision never moves executor-side roles to the API key when the subscription models are missing`,()=>{
   const r=resolve({supervisorModel:`${provider}/claude-opus-5-5`,roles:['executor','general','ui'],catalogs:{
