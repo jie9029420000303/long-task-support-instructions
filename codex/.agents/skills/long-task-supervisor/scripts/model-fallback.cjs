@@ -323,7 +323,7 @@ function settingsOf(threadId){
   // A long tool result can put the last context more than one block from EOF.
   const fd=fs.openSync(file,'r');
   try{
-    let end=fs.fstatSync(fd).size, suffix=Buffer.alloc(0);
+    let end=fs.fstatSync(fd).size, suffix=Buffer.alloc(0), applied=null;
     while(end>0){
       const start=Math.max(0,end-1024*1024), chunk=Buffer.alloc(end-start);
       fs.readSync(fd,chunk,0,chunk.length,start);
@@ -333,10 +333,13 @@ function settingsOf(threadId){
       if(start && boundary<0){suffix=data.subarray(0,Math.min(data.length,1024*1024));end=start;continue;}
       const lines=data.subarray(boundary+1).toString('utf8').split('\n');
       for(let i=lines.length-1;i>=0;i--){
-        if(!lines[i].includes('"turn_context"'))continue;
+        if(!lines[i].includes('"turn_context"')&&(applied||!lines[i].includes('"thread_settings_applied"')))continue;
         try{const row=JSON.parse(lines[i]),p=row.payload;
           if(row.type==='turn_context')return {turnId:p.turn_id,model:p.model||null,effort:p.effort||null,approvalPolicy:p.approval_policy||null,
-            reviewer:p.approvals_reviewer||null,sandbox:p.sandbox_policy?.type||null,at:row.timestamp};
+            reviewer:p.approvals_reviewer||null,sandbox:p.sandbox_policy?.type||null,at:row.timestamp,...(applied?{applied}:{})};
+          // What the chat is set to run from its next turn on. The turn in progress keeps the model it started with,
+          // so this can differ from the turn's own model (2026-11-23 工區 E: set to Opus at 13:17, the turn stayed on DeepSeek until 13:37).
+          if(!applied&&row.type==='event_msg'&&p?.type==='thread_settings_applied'&&p.thread_settings?.model)applied={model:p.thread_settings.model,at:row.timestamp};
         }catch{}
       }
       suffix=data.subarray(0,Math.max(0,boundary));end=start;

@@ -920,10 +920,14 @@ async function handleRateLimits() {
       await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE_CLEARED：Claude 訂閱額度回到保留值以上，可照常派 Claude 子代理。',drain.noticeKey+'-cleared');
   }
   const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
+  // The model a mainline is set to run. A turn in progress keeps the model it started with, so a setting applied
+  // since then is what counts; the executor's incremental reader already follows it.
+  const setModel=id=>{if(id===binding.executorId)return state.executorSettings?.model;const seen=fallback.settingsOf(id);return seen?.applied?.model||seen?.model;};
   // A mainline left on an open-source route without a switch of this watcher (a model chose it under the rule retired
   // 2026-11-21) is moved up like a switched one: open source is only for when every route above it is out.
   const strandedIds=[binding.executorId,binding.supervisorId].filter(id=>!(state.modelSwitch?.[id]&&!state.modelSwitch[id].restored)&&!waiting[id]&&
-    String((id===binding.executorId?state.executorSettings?.model:fallback.settingsOf(id)?.model)||'').startsWith('openrouter/'));
+    String(setModel(id)||'').startsWith('openrouter/'));
+  for(const id of Object.keys(state.strandedNotice||{}))if(!strandedIds.includes(id)){delete state.strandedNotice[id];dirty=true;}
   if(hits.length||refined||back||quotaBack||dirty){fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();}
   if(!active.length && !Object.keys(waiting).length && !budgetChange && !strandedIds.length)return;
   const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[]),...strandedIds]);
@@ -947,7 +951,7 @@ async function handleRateLimits() {
     if(hit && switched && record.current!==hit.model && fallback.settingsOf(id)?.model!==hit.model){
       delete waiting[id];checkpoint();continue;
     }
-    const observed=id===binding.executorId?state.executorSettings?.model:fallback.settingsOf(id)?.model;
+    const observed=setModel(id);
     const stranded=!switched&&!hit&&String(observed||'').startsWith('openrouter/');
     // A stranded mainline takes the first stop of its role as its original, so it climbs back as the routes free up.
     const original=switched?record.original:hit?.model||(stranded?fallback.chainFor(observed,role)[0]:observed);
@@ -970,6 +974,12 @@ async function handleRateLimits() {
     if(!hit && target===current)continue;
     const budget=budgetChange && id===binding.executorId && !hit;
     if(!hit && !budget && switched && current!==target && await targetBusy(id))continue;
+    // A stranded mainline is told while it is idle and once per turn: a notice cannot move the turn in progress
+    // (2026-11-23 工區 E: 72 identical notices in 19 minutes into one supervisor turn). A notice sent again says why
+    // (Jay 2026-11-23:「印出來的訊息要讓我知道重送原因，不然我會以為是死迴圈不斷傳訊息」).
+    const told=stranded?state.strandedNotice?.[id]||null:null;
+    const turnId=stranded?(id===binding.executorId?state.executorSettings?.turnId:fallback.settingsOf(id)?.turnId)||null:null;
+    if(stranded && (told&&told.turnId===turnId || await targetBusy(id)))continue;
     // Prevent old refusal data from pulling a healthy manually selected model into the chain.
     if(!hit && switched && target===original && !original.startsWith('openrouter/') && (()=>{const actual=fallback.settingsOf(id);return actual?.model===original && Date.parse(actual.at)>=record.since;})() && !record.delivery){
       record.restored=now();record.restoredBy='already-on-original';checkpoint();continue;
@@ -989,10 +999,12 @@ async function handleRateLimits() {
       prompt+=' 換到不同家模型：在途的舊模型子代理改從工作包交付檔與原件收件，不再向它發訊；新派子代理用'+worker+'。';
     }
     if(role==='supervisor' && !isPaused() && target.startsWith('openrouter/'))prompt+=' 暫代監督依原契約照常收件、查證與派工；要結案的候選照常審查並提交，背景程式會保留原件，交恢復的高階監督逐條複驗結案。';
+    if(stranded && told)prompt+='（第 '+(told.count+1)+' 次通知。重送原因：上一則在 '+clockText(Date.parse(told.at))+' 送出，之後開始的新回合仍設定為 '+observed+'。）';
     state.modelSwitches=(state.modelSwitches||0)+1;
     const key='model-switch-'+id.slice(0,8)+'-'+state.modelSwitches;
     (state.modelSwitch||={})[id]={role,original,current:target,effort,since:time,until,restored:null,
       ...(budget||switched&&record.budgetOrigin&&!hit?{budgetOrigin:true}:{}),delivery:{key,prompt,effort:targetEffort}};
+    if(stranded)(state.strandedNotice||={})[id]={turnId,at:now(),count:(told?.count||0)+1};
     delete waiting[id];
     if(budget)delete state.quotaDrain;
     if(state.rateLimitedAll?.threadId===id)delete state.rateLimitedAll;

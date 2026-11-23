@@ -275,3 +275,45 @@ test('a mainline a model left on an open-source route climbs back by the order: 
     assert.ok(read(kept.statePath).modelSwitch['supervisor-qa'].restored,'back on the first stop: nothing is left to restore');
   }finally{await low.stop();await kept.stop();}
 });
+
+// 2026-11-23 工區 E: the supervisor was set back to Opus at 13:17 while a turn begun at 12:56 kept running on DeepSeek.
+// The watcher read the running turn's model, took the chat for still left on open source, and sent the same notice 72
+// times in 19 minutes until that turn ended. Jay: 「印出來的訊息要讓我知道重送原因，不然我會以為是死迴圈不斷傳訊息」.
+test('a supervisor on an open-source route is told to move only when idle and once per turn, never when it is already set to move; a notice sent again says why',async()=>{
+  const deepseek='openrouter/deepseek-deepseek-v4.1-flash-1017';
+  const f=fixture({executorModel:sol,supervisorModel:deepseek,quotaData:reading(Date.now(),{big:81})});
+  const turnEnded=path.join(f.root,'supervisor-turn-ended');
+  save(f.mockFile,{...read(f.mockFile),supervisorCompletedGate:turnEnded});
+  const notices=()=>f.calls().filter(c=>c.threadId==='supervisor-qa'&&c.model);
+  const quiet=(ms=1500)=>new Promise(resolve=>setTimeout(resolve,ms));
+  // A new turn writes its context and, right after it, what the chat is set to; both land in one write as in a real rollout.
+  const turn=(n,model,set=model)=>fs.appendFileSync(f.log('supervisor-qa'),[{timestamp:iso(Date.now()),type:'turn_context',payload:{turn_id:'supervisor-turn-'+n,model,effort:'max'}},
+    {timestamp:iso(Date.now()),type:'event_msg',payload:{type:'thread_settings_applied',thread_id:'supervisor-qa',thread_settings:{model:set}}}].map(row=>JSON.stringify(row)+'\n').join(''));
+  try{
+    f.start();
+    await until(()=>peek(path.join(f.run,'model-fallback.json')));
+    await quiet();
+    assert.equal(notices().length,0,'the turn in progress keeps its model: nothing is sent into it');
+    turn(1,deepseek,opus);
+    await quiet();
+    fs.writeFileSync(turnEnded,'');
+    await quiet();
+    assert.equal(notices().length,0,'already set to Opus from the next turn on: there is nothing to tell, during the turn or after it');
+    turn(2,deepseek);
+    await until(()=>notices().length===1);
+    const first=notices()[0];
+    assert.deepEqual([first.model,first.thinking],[opus,'xhigh']);
+    assert.match(first.prompt,/開源模型只在前面順位都不能用時使用/);assert.doesNotMatch(first.prompt,/重送原因/);
+    await quiet();
+    assert.equal(notices().length,1,'told once: the same turn is not told again');
+    turn(3,deepseek);
+    await until(()=>notices().length===2);
+    assert.match(notices()[1].prompt,/（第 2 次通知。重送原因：上一則在 \d\d\/\d\d \d\d:\d\d 送出，之後開始的新回合仍設定為 openrouter\/deepseek-deepseek-v4\.1-flash-1017。）$/);
+    await quiet();
+    assert.equal(notices().length,2,'a new turn still on open source is told once more, with the reason');
+    turn(4,opus);
+    await until(()=>!peek(f.statePath)?.strandedNotice?.['supervisor-qa']);
+    await quiet(800);
+    assert.equal(notices().length,2,'on Opus: nothing more to send');
+  }finally{await f.stop();}
+});
