@@ -137,6 +137,47 @@ test('a run of three non-quota failures over at least a minute moves a route; ca
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
+// 2026-11-23 15:30:43～15:34: Anthropic and OpenRouter failed together. 工區 E's supervisor got one 429 that OpenCodex
+// wrote itself for a dropped connection and was taken off Opus on the 5-hour quota default; WebRPA's supervisor had six
+// 502s, was paused for 30 minutes and ran a turn on Muse at 15:54 although Opus answered again from 15:34:04. At noon
+// both supervisors had worked on DeepSeek for 28 and 37 minutes the same way. Jay's Q67 ruling (B): keep the move on
+// consecutive failures, end the pause early by the existing route-recovery rule, and do not read that 429 as a refusal.
+test('for the supervisor a 429 that OpenCodex writes for a dropped connection counts as a failure, not a refusal; the executor still moves on it',()=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'connection-reset-')),usage=path.join(root,'usage.jsonl'),reset='upstream_reset_replay_refused';
+  const threads=[{role:'supervisor',threadId:'supervisor-qa'},{role:'executor',threadId:'executor-qa'}],t0=Date.now()-2*MINUTE;
+  const row=(thread,at,status,errorCode,model=opus)=>line(usage,{conversationId:fallback.hashId(thread),timestamp:at,requestedModel:model,status,
+    ...(errorCode?{errorCode}:{}),...(errorCode===reset?{terminalSource:'synthetic'}:{})});
+  const seen=hits=>hits.map(hit=>[hit.role,hit.failure,hit.status]);
+  try{
+    fs.writeFileSync(usage,'');
+    withEnv({OPENCODEX_USAGE_FILE:usage},()=>{
+      const state={};fallback.scan(state,threads);
+      row('supervisor-qa',t0,429,reset);
+      assert.deepEqual(fallback.scan(state,threads),[],'one dropped connection does not move the supervisor');
+      assert.equal(state.routeFailed['anthropic/'],t0,'it is kept as the time the route last failed');
+      row('supervisor-qa',t0+20000,502);row('supervisor-qa',t0+70000,502);
+      assert.deepEqual(seen(fallback.scan(state,threads)),[['supervisor',true,502]],'with two more failures over a minute it is a run of failures');
+      row('executor-qa',t0+80000,429,reset,sol);
+      assert.deepEqual(seen(fallback.scan(state,threads)),[['executor',undefined,429]],'the executor still takes it as a refusal and moves on');
+      row('supervisor-qa',t0+90000,429,'usage_limit_reached');
+      assert.deepEqual(seen(fallback.scan(state,threads)),[['supervisor',undefined,429]],'a real quota refusal still moves the supervisor at once');
+    });
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('a supervisor failure pause ends once its route has been quiet for 10 minutes and has answered since; the executor pause and the silent-switch pause keep their 30 minutes',()=>{
+  const t0=Date.now()-20*MINUTE,pause=basis=>({since:t0,until:t0+30*MINUTE,basis});
+  const own='supervisor|anthropic/',executorKey=fallback.limitKey('executor',sol),paidKey=fallback.limitKey('supervisor',paid);
+  const state={rateLimits:{[own]:pause(fallback.FAILURE_BASIS),[executorKey]:pause(fallback.FAILURE_BASIS),[paidKey]:pause(fallback.SILENT_BASIS)},
+    routeFailed:{'anthropic/':t0+2*MINUTE,[sol]:t0,'anthropic-apikey/':t0},routeOk:{'anthropic/':t0+MINUTE,[sol]:t0+3*MINUTE,'anthropic-apikey/':t0+3*MINUTE}};
+  assert.equal(fallback.recovered(state,t0+15*MINUTE),false,'its last success came before the route last failed');
+  state.routeOk['anthropic/']=t0+3*MINUTE;
+  assert.equal(fallback.recovered(state,t0+11*MINUTE),false,'answering again, but the route has not been quiet for 10 minutes');
+  assert.equal(fallback.recovered(state,t0+12*MINUTE),true);
+  assert.deepEqual(state.rateLimits[own],{since:t0,until:t0+12*MINUTE,basis:'同一路線之後已有成功請求'});
+  assert.deepEqual([state.rateLimits[executorKey],state.rateLimits[paidKey]],[pause(fallback.FAILURE_BASIS),pause(fallback.SILENT_BASIS)]);
+});
+
 function fixture({executorModel=sonnet,supervisorModel=opus,quotaData=null,env:extra={}}={}){
   const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'codex-v112-')));
   const home=path.join(root,'codex-home'),source=path.join(root,'source.txt');fs.writeFileSync(source,'Keep the work moving\n');
@@ -315,5 +356,26 @@ test('a supervisor on an open-source route is told to move only when idle and on
     await until(()=>!peek(f.statePath)?.strandedNotice?.['supervisor-qa']);
     await quiet(800);
     assert.equal(notices().length,2,'on Opus: nothing more to send');
+  }finally{await f.stop();}
+});
+
+test('the watcher puts a supervisor moved for consecutive failures back on Opus once the connection answers again, without waiting out the 30 minutes',async()=>{
+  const f=fixture({executorModel:sol,quotaData:reading(Date.now())});
+  const usage=f.env.OPENCODEX_USAGE_FILE,own=fallback.hashId('supervisor-qa'),t0=Date.now()-14*MINUTE;
+  const row=(at,status,conversationId=own)=>line(usage,{conversationId,timestamp:at,requestedModel:opus,status,...(status===200?{usage:{outputTokens:5}}:{})});
+  const moves=()=>f.calls().filter(c=>c.threadId==='supervisor-qa'&&c.model);
+  row(t0,502);row(t0+30000,502);row(t0+90000,502);
+  try{
+    f.start();
+    await until(()=>moves().length===1);
+    assert.equal(moves()[0].model,paid,'three failures over a minute: the supervisor moves to its next stop');
+    const paused=read(f.statePath).rateLimits['supervisor|anthropic/'];
+    assert.deepEqual([paused.basis,paused.until],[fallback.FAILURE_BASIS,t0+90000+30*MINUTE]);
+    await new Promise(resolve=>setTimeout(resolve,1500));
+    assert.equal(moves().length,1,'while Opus has not answered again the supervisor stays where it was moved');
+    row(Date.now(),200,'another-chat');
+    await until(()=>moves().length===2);
+    assert.equal(moves()[1].model,opus,'the route last failed 12 minutes ago and has answered since: back to Opus 17 minutes before the pause would have ended');
+    assert.equal(read(f.statePath).rateLimits['supervisor|anthropic/'].basis,'同一路線之後已有成功請求');
   }finally{await f.stop();}
 });

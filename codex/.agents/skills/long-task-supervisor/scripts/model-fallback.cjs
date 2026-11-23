@@ -179,12 +179,19 @@ function refine(state,now=Date.now()){
 // named reset, never on another conversation's success, because the supervisor shares those accounts.
 const ROUTE_QUIET_MS=10*60000;
 function recovered(state,now=Date.now()){
-  const back=key=>{const ok=state.routeOk?.[key],refused=state.routeRefused?.[key]||0;return ok>refused&&now-refused>=ROUTE_QUIET_MS?ok:null;};
+  const quiet=(key,bad)=>{const ok=state.routeOk?.[key];return ok>bad&&now-bad>=ROUTE_QUIET_MS?ok:null;};
+  const back=key=>quiet(key,state.routeRefused?.[key]||0);
+  // A supervisor paused for consecutive failures comes back the same way, once the route has been quiet of failures
+  // as well as refusals (Jay 2026-11-23 Q67: after two outages that hit every route at once, both supervisors stayed
+  // on open-source models for up to 37 minutes although Opus was answering again). The executor's failure pauses and
+  // the silent-switch pause keep their 30 minutes.
+  const backFromFailure=key=>quiet(key,Math.max(state.routeRefused?.[key]||0,state.routeFailed?.[key]||0));
   const quotaOnly=key=>key==='executor|anthropic/';
   let changed=false;
   for(const [key,item] of Object.entries(state.rateLimits||{})){
-    if(quotaOnly(key)||item.basis===FAILURE_BASIS||item.basis===SILENT_BASIS)continue;
-    const at=back(plainKey(key));
+    const failed=item.basis===FAILURE_BASIS;
+    if(quotaOnly(key)||item.basis===SILENT_BASIS||failed&&!key.startsWith('supervisor|'))continue;
+    const at=failed?backFromFailure(plainKey(key)):back(plainKey(key));
     if(at>item.since&&item.until>now){item.until=now;item.basis=ROUTE_BASIS;changed=true;}
   }
   for(const record of Object.values(state.modelSwitch||{})){
@@ -196,6 +203,12 @@ function recovered(state,now=Date.now()){
   return changed;
 }
 function isLimit(row){return row.status===429||row.status===402||row.failureCause==='rate-limit'||['rate_limit_exceeded','insufficient_quota'].includes(row.errorCode);}
+// OpenCodex answers 429 itself when the upstream connection drops and it will not replay the request. For the
+// supervisor that is a broken connection counted with its other failures, not a quota refusal (Jay 2026-11-23 Q67:
+// one such answer at 15:31 took 工區 E's supervisor off Opus on the 5-hour default with quota left). The executor
+// keeps the move to its next route, which is how it retries.
+function connectionReset(row){return row.status===429&&row.errorCode==='upstream_reset_replay_refused';}
+function supervisorReset(row,role){return role==='supervisor'&&connectionReset(row);}
 // Any other refusal that a retry of the same route will not fix. A cancelled request (499) is not a failure; an API-key
 // HTTP 400 goes through the monthly-cap check instead.
 function isFailure(row){
@@ -260,7 +273,7 @@ function scan(state,threads){
     const complete=buffer.lastIndexOf(10);if(complete<0)return [];
     state.usageOffset+=complete+1;text=buffer.subarray(0,complete).toString('utf8');
   }
-  const latest=new Map(),ok=state.routeOk||={},refused=state.routeRefused||={},failures=state.routeFailures||={};
+  const latest=new Map(),ok=state.routeOk||={},refused=state.routeRefused||={},failed=state.routeFailed||={},failures=state.routeFailures||={};
   for(const line of text.split('\n')){
     if(!line.includes('"conversationId"'))continue;
     let row;try{row=JSON.parse(line);}catch{continue;}
@@ -268,6 +281,8 @@ function scan(state,threads){
     const model=row.requestedModel||row.model,at=Number(row.timestamp)||0;
     if(model&&row.status>=200&&row.status<300&&!(ok[keyOf(model)]>=at))ok[keyOf(model)]=at;
     if(model&&isLimit(row)&&!(refused[keyOf(model)]>=at))refused[keyOf(model)]=at;
+    // When each route last failed for any conversation: a supervisor's failure pause ends only after it has been quiet.
+    if(model&&(isFailure(row)||connectionReset(row))&&!(failed[keyOf(model)]>=at))failed[keyOf(model)]=at;
     if(owners.has(row.conversationId)){
       latest.set(row.conversationId,row);
       const owner=owners.get(row.conversationId),switched=state.modelSwitch?.[owner.threadId];
@@ -275,7 +290,7 @@ function scan(state,threads){
       // Consecutive non-quota failures of one mainline on one model; any success of that thread clears them.
       if(owner.role!=='subagent'){
         if(row.status>=200&&row.status<300)delete failures[owner.threadId];
-        else if(isFailure(row)){
+        else if(isFailure(row)||supervisorReset(row,owner.role)){
           const known=failures[owner.threadId];
           failures[owner.threadId]=known&&known.model===model?{...known,count:known.count+1,lastAt:at,status:row.status}:{model,count:1,firstAt:at,lastAt:at,status:row.status};
         }
@@ -295,7 +310,7 @@ function scan(state,threads){
     delete checks[id];
     if(first&&Date.now()-Number(row.timestamp)>=FALLBACK_MS)continue;
     const owner=owners.get(id);
-    if(isLimit(row))hits.push(hitOf(owner,row));
+    if(isLimit(row)&&!supervisorReset(row,owner.role))hits.push(hitOf(owner,row));
     else if(row.status===400&&keyOf(row.requestedModel||row.model)==='anthropic-apikey/'){
       checks[id]={model:row.requestedModel||row.model,at:Number(row.timestamp)};
     }
