@@ -1,6 +1,6 @@
 ---
 name: lt-visual-checker-high
-description: 長任務 A 線視覺查核子代理（sonnet／effort high，錯 1 後重派檔）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：客觀查核真實畫面的裁切、遮擋、溢出、可讀性、對齊、響應式與已鎖定規格，不改成品、不判定風格。
+description: 長任務 A 線視覺查核子代理（sonnet／effort high，不合格後升檔用）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：客觀查核真實畫面的裁切、遮擋、溢出、可讀性、對齊、響應式與已鎖定規格，不改成品、不判定風格。
 model: sonnet
 effort: high
 tools: Read, Glob, Grep, Bash, Skill, mcp__Claude_Browser

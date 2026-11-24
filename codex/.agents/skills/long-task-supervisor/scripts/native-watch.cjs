@@ -14,6 +14,8 @@ const dashboard = require('./dashboard.cjs');
 const pace = require('./pace.cjs');
 const executionWake = require('./execution-wake.cjs');
 const questions = require('./pending-decisions.cjs');
+const rework = require('./rework.cjs');
+const notify = require('./notify.cjs');
 const { inspect:inspectDispatch, eventFor:dispatchEvent, markAnnounced, releaseAnnounced, stillCurrent, hold:holdDispatch } = require('./dispatch-audit.cjs');
 const { activityMarker, supervisorPollFromThread, observeActivity, due:progressDue, eventFor:progressEvent } = require('./progress-review.cjs');
 const run = path.resolve(process.argv[2] || '');
@@ -772,6 +774,25 @@ async function pushQuestions(){
   }catch(error){state.questionPush={ok:false,error:error.message,at:now()};}
 }
 const clockText = ms => new Date(ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+// The same criterion studied twice (then every two studies more) tells Jay like an important mail (Jay 2026-11-24): at
+// once in Veda對接對話, held from 00:00 to 08:00 Taipei, and as an open item that Veda's thrice-daily summary repeats
+// until he answers. The executor keeps working; nothing waits for the reply.
+let cycleCheckAt=0;
+async function cycleAlerts(){
+  if(state.inflight||Date.now()<cycleCheckAt)return;
+  cycleCheckAt=Date.now()+60000;
+  try{rework.raiseAlerts(run,binding,{title:state.threadTitles?.supervisor});}
+  catch(error){state.cycleAlert={ok:false,error:error.message,at:now()};return;}
+  const target=notify.cycleAlertThread();
+  if(!target)return;
+  for(const item of rework.vedaDue(questions.load(run).items,{sent:key=>notify.sent(run,key)})){
+    const key='veda-'+item.key;
+    const prompt='LONG_TASK_REWORK_CYCLE：長任務通知（比照重要郵件，執行端照常繼續，不等回覆）。\n'+item.ask+
+      '\n題目 key：'+item.key+'；監督對話：'+binding.supervisorId+'。Jay 回覆後，請把他的原話與題目 key 轉到監督對話，註明是 Jay 透過 Veda 回覆，由監督登記；沒回覆就列進每天三次的待決彙整，直到他回覆。';
+    try{await rpc('send_message_to_thread',{threadId:target,prompt},20000);notify.mark(run,key,{target});state.cycleAlert={ok:true,key:item.key,at:now()};}
+    catch(error){state.cycleAlert={ok:false,key:item.key,error:error.message,at:now()};return;}
+  }
+}
 // supervise.cjs amend, run while this watcher is alive, leaves Jay's authorization in amend-request.json. The watcher records
 // it at a safe point (no event waiting for a ruling, no unconfirmed delivery) under its own lock and keeps watching. The
 // requester reads amend-results/<id>.json; when it has already returned, the supervisor gets one message instead.
@@ -831,6 +852,8 @@ async function handleAmendRequest(){
 // leaves the Claude subscription while the weighted weekly remainder is below the 35% kept for the supervisor or every
 // usable account has used 80% of its five-hour window, and returns on the next turn once the reading allows it. A
 // refused subagent is re-dispatched in the current executor's family.
+// The notice names what actually happened (2026-11-23: ten notices said 額度限速 while no provider had refused for
+// quota): model-fallback.cjs switchReason / restoreReason.
 async function handleRateLimits() {
   if (fallback.modelPolicy(binding)==='locked') return;
   let dirty=fallback.migrateLimits(state);
@@ -849,7 +872,9 @@ async function handleRateLimits() {
     if (after && actual.model!==record.current) continue;
     // Only a fresh switch is judged: a record older than an hour (saved before this check, or whose answer fell
     // outside the first usage read) is left alone.
-    const waited=Date.now()-(after?Date.parse(actual.at):record.since);
+    // Only awake time counts: a Mac asleep through the window gives the new route no chance to answer (2026-11-23
+    // 12:18 switch judged silent at 12:42 after 1,389 seconds of sleep and under a minute awake).
+    const waited=clock.awakeSince(state,after?Date.parse(actual.at):record.since);
     if (waited < SILENT_SWITCH_MS || waited >= 4*SILENT_SWITCH_MS || !after && await targetBusy(id)) continue;
     record.silentAt=Date.now();
     hits.push({role:record.role,threadId:id,model:record.current,at:Date.now(),failure:true,silent:true,error:'切換後 '+Math.round(SILENT_SWITCH_MS/60000)+' 分鐘沒有成功回應'});
@@ -967,11 +992,15 @@ async function handleRateLimits() {
     // Without its own refusal the supervisor is never moved down to an open-source route.
     if(role==='supervisor' && !hit && !current?.startsWith('openrouter/') && target?.startsWith('openrouter/'))continue;
     if(!target){
-      if(!waiting[id])waiting[id]={threadId:id,model:current,role,at:time,error:'等待可用順位'};
+      if(!waiting[id])waiting[id]={threadId:id,model:current,role,at:time,error:'等待可用順位',waitingOnly:true};
       delete state.rateLimitedAll;
       continue;
     }
     if(!hit && target===current)continue;
+    // A chat waiting for a free route that is already set to that route and still working needs no notice (2026-11-23
+    // WebRPA -22: set to DeepSeek since 16:24, its turn running, told at 16:36 to use DeepSeek). A real refusal always
+    // gets its continuation: the turn it stopped does not resume by itself.
+    if(hit?.waitingOnly && target===observed && await targetBusy(id)){delete waiting[id];checkpoint();continue;}
     const budget=budgetChange && id===binding.executorId && !hit;
     if(!hit && !budget && switched && current!==target && await targetBusy(id))continue;
     // A stranded mainline is told while it is idle and once per turn: a notice cannot move the turn in progress
@@ -990,9 +1019,9 @@ async function handleRateLimits() {
     const effort=(switched?record.effort:stranded?(role==='supervisor'?'xhigh':'high'):settings.effort)||null;
     const targetEffort=target.startsWith('openrouter/')?'max':effort;
     const until=state.rateLimits?.[fallback.limitKey(role,original)]?.until || time;
-    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：開源模型只在前面順位都不能用時使用。本對話改用 '+target+'，從已確認的進度接續。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：額度已恢復。')+'本對話用 '+target+' 從中斷處接續原工作。':
+    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：開源模型只在前面順位都不能用時使用。本對話改用 '+target+'，從已確認的進度接續。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：'+fallback.restoreReason(state.rateLimits?.[fallback.limitKey(role,original)]))+'本對話用 '+target+' 從中斷處接續原工作。':
       budget?'Claude 訂閱保留給監督（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
-      (hit?.failure?'目前模型連續出錯或沒有回應：':'額度限速：')+'本對話改用 '+target+'，從已確認的進度接續。';
+      fallback.switchReason(hit,target,SILENT_SWITCH_MS)+'本對話改用 '+target+'，從已確認的進度接續。';
     const familyOf=model=>String(model||'').startsWith('openrouter/')?model:catalog.identity(model)?.family||model;
     if(role==='executor' && !isPaused() && familyOf(current)!==familyOf(target)){
       const worker=familyOf(target)==='claude'?'同一家的 Sonnet（anthropic/，不用 Claude API）':familyOf(target)==='gpt'?'最新 Terra':'同一完整模型 ID、max 推論';
@@ -1056,6 +1085,7 @@ async function watch() {
     if (await handleAmendRequest()) continue;
     writeDashboard();
     await pushQuestions();
+    await cycleAlerts();
     // The supervisor saw an outage warning: one short note once reads work again, so it does not act on a stale alarm.
     if (state.appHealth?.recoveryNotice && !state.inflight && !state.pending) {
       const since = state.appHealth.recoveryNotice;

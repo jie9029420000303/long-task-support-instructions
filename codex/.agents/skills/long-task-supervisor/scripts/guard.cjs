@@ -112,12 +112,15 @@ function validateDecision(config, contract, event, decision, queue = []) {
       ids.every(id=>event.overdue?.includes(id)||event.nearOverdue?.includes(id)), 'Cover only the overdue packages checked in this reply');
   }
   if(decision.packageRulings!==undefined){
+    // Each submitted criterion is accepted (採認), failed this time (這次未過) or remaining (還沒做完); a failed one
+    // counts toward its rework limit (rework.cjs).
     const rows=decision.packageRulings;
+    const named=r=>[...r.accepted,...(r.failed||[]),...r.remaining];
     need(event.kind==='submission' && ['reply','reject'].includes(decision.disposition) && Array.isArray(rows) && rows.length &&
       new Set(rows.map(r=>r?.id)).size===rows.length && rows.every(r=>typeof r?.id==='string' &&
-      Array.isArray(r.accepted)&&Array.isArray(r.remaining)&&[...r.accepted,...r.remaining].length &&
-      new Set([...r.accepted,...r.remaining]).size===r.accepted.length+r.remaining.length &&
-      [...r.accepted,...r.remaining].every(id=>contract.criteria.some(c=>c.id===id))), 'Each package ruling needs distinct scoped criteria');
+      Array.isArray(r.accepted)&&Array.isArray(r.remaining)&&(r.failed===undefined||Array.isArray(r.failed))&&named(r).length &&
+      new Set(named(r)).size===named(r).length && named(r).every(id=>contract.criteria.some(c=>c.id===id))),
+      '逐包裁決每筆是 {id, accepted, failed, remaining}：三欄放現行契約的驗收條文 ID，同一條只放一欄（採認、這次未過、還沒做完）');
   }
   if(decision.wait){need(decision.disposition==='observe','Only observe can establish a checked wait');validateWait(config,decision.wait);}
   if (decision.disposition === 'accept') {

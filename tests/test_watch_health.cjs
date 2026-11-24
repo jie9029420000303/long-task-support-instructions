@@ -141,6 +141,11 @@ for(const [platform,dir] of [['codex',codex],['claude',claude]]){
       const row=(key,ask)=>({key,kind:'acceptance',ask,recommend:'A',why:'改驗收要你同意',options:[],status:'open',raisedAt:'2026-11-09T00:00:00.000Z',
         updatedAt:'2026-11-09T00:00:00.000Z',presentedAt:null,answer:null,withdrawn:null,history:[]});
       save(path.join(root,'pending-decisions.json'),{schema:1,items:[row('k1','第一題'),row('k2','第二題')]});
+      // Jay 2026-11-23: Veda asks the open items three times a day; without his questionPush setting nothing is pushed
+      // and nothing is reported as a failed push.
+      const off=await pending.pushShown(root,{shown:['k2','k1'],at:'w'},'區分 Debug 與新功能需求');
+      assert.equal(off.push.reason,'disabled');assert.equal(api.messages.length,0);assert.equal(pending.pushProblem(root),null);
+      const config=read(process.env.LONG_TASK_NOTIFY_CONFIG);save(process.env.LONG_TASK_NOTIFY_CONFIG,{...config,questionPush:true});
       const first=await pending.pushShown(root,{shown:['k2','k1'],at:'x'},'區分 Debug 與新功能需求');
       assert.equal(first.push.ok,true);
       assert.match(api.messages[0].text,/^【開發任務需要你決定】『區分 Debug 與新功能需求』有 2 題要你回答：\n\n1\. 第一題\n建議：A\n原因／影響：改驗收要你同意/);

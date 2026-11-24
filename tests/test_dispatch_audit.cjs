@@ -121,13 +121,16 @@ test('collect takes a package back with its evidence and acceptance results in o
   try{
     run(['from-wp',f.run,state,'--base',base,'--revision','p1']);
     const result=path.join(f.root,'result.json');
-    save(result,{status:{list:'completed',handle:'agent:abc',evidence:[report]},acceptance:[{id:criteria[0],status:'PASS',evidence:[report]},{id:'NOPE',status:'PASS',evidence:[report]}]});
+    save(result,{verdict:{kind:'adopt'},status:{list:'completed',handle:'agent:abc',evidence:[report]},acceptance:[{id:criteria[0],status:'PASS',evidence:[report]},{id:'NOPE',status:'PASS',evidence:[report]}]});
     const snapBefore=fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'),wpBefore=fs.readFileSync(path.join(wp,'B1.md'),'utf8');
     assert.throws(()=>run(['collect',f.run,state,'B1',result]),error=>/NOPE/.test(error.stderr));
-    save(result,{status:{list:'completed',handle:'agent:abc',evidence:[path.join(f.root,'missing.md')]},acceptance:[]});
+    save(result,{verdict:{kind:'adopt'},status:{list:'completed',handle:'agent:abc',evidence:[path.join(f.root,'missing.md')]},acceptance:[]});
     assert.throws(()=>run(['collect',f.run,state,'B1',result]),error=>/does not exist/.test(error.stderr));
     assert.equal(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'),snapBefore);assert.equal(fs.readFileSync(path.join(wp,'B1.md'),'utf8'),wpBefore);
+    // A delivery taken back is judged one of three (Jay 2026-11-23): without a verdict the package stays out.
     save(result,{status:{list:'completed',handle:'agent:abc',evidence:[report]},acceptance:[{id:criteria[0],status:'PASS',evidence:[report]}]});
+    assert.throws(()=>run(['collect',f.run,state,'B1',result]),error=>/adopt\|fail\|external/.test(error.stderr));
+    save(result,{verdict:{kind:'adopt'},status:{list:'completed',handle:'agent:abc',evidence:[report]},acceptance:[{id:criteria[0],status:'PASS',evidence:[report]}]});
     const out=JSON.parse(run(['collect',f.run,state,'B1',result]));
     assert.deepEqual(out.acceptance,[{id:criteria[0],status:'PASS'}]);assert.equal(out.packages.completed,1);
     const snap=JSON.parse(fs.readFileSync(path.join(f.run,'dispatch.json'),'utf8'));
@@ -205,7 +208,7 @@ test('preflight of resolved issue A does not consume unrelated new issue B',()=>
   try{
     save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{packages:{ready:[{id:'A',independent:true,safe:true,dependencies:[],exclusiveResources:[],evidence:['plan:A']}]}}));
     const eventA=helper.eventFor(helper.inspect(f.run,f.binding,state));helper.markAnnounced(state,eventA);
-    save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{packages:{recurringRework:[{id:'B',count:2,evidence:['attempts:B']}]}}));
+    save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{activity:'waiting',packages:{returned:[{id:'B',integrated:false,resultEvidence:['result:B']}]}}));
     assert.equal(helper.stillCurrent(f.run,f.binding,state,eventA).current,false);
     const eventB=helper.eventFor(helper.inspect(f.run,f.binding,state));assert.ok(eventB);assert.deepEqual(eventB.issues.map(item=>item.affected),[['B']]);
   }finally{fs.rmSync(f.root,{recursive:true,force:true});}
@@ -234,7 +237,7 @@ test('Claude watcher routes missing attached snapshot and preflight cancels obso
   try{
     await until(()=>JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending?.kind==='dispatch_review');
     let state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));assert.equal(state.pending.issues[0].kind,'snapshot_missing');assert.deepEqual(state.pending.preflightArgv.slice(-3),['dispatch-preflight',f.run,state.pending.id]);
-    save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{packages:{recurringRework:[{id:'B',count:2,evidence:['attempts:B']}]}}));
+    save(path.join(f.run,'dispatch.json'),snapshot(f.executorId,{activity:'waiting',packages:{returned:[{id:'B',integrated:false,resultEvidence:['result:B']}]}}));
     const checked=JSON.parse(execFileSync(process.execPath,[path.join(claude,'supervise.cjs'),'dispatch-preflight',f.run,state.pending.id],{encoding:'utf8'}));
     assert.equal(checked.current,false);state=JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json')));assert.equal(state.pending,null);assert.equal(state.resolved[checked.eventId].obsolete,true);
     await new Promise(resolve=>child.exitCode!==null?resolve():child.once('exit',resolve));

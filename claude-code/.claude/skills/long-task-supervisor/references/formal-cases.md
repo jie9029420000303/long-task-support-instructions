@@ -17,16 +17,17 @@
 
 ## 連續兩次未過
 
-執行主線立即派研究子代理，自行安排小實驗並選定解法。正式驗收與子代理本身的交付品質分開計數。實驗仍遵守本案授權、禁令與原驗收條文。監督在送驗時查核證據，或在研究交回後逾期未見後續工作包或進展時督促執行端。
+正式實測 FAIL 由 `formal-case.cjs` 自動計入該案例的驗收條文（`rework.cjs`，和子代理交付的不合格算同一個計數，同一份交付不重複計；INCONCLUSIVE、BLOCKED 不計）。同一條文累計 2 次，`select` 把它的案例列進 `held`（reason `research`），`run` 不發下一次許可；其他條文的案例照常。執行主線派研究子代理（推理 xhigh），自行安排小實驗並選定解法；實驗仍遵守本案授權、禁令與原驗收條文。監督在送驗時查核證據，或在研究交回後逾期未見後續工作包或進展時督促執行端。
 
-以 `node scripts/formal-case.cjs research RUN RESEARCH.json` 登記以下內容。研究須對應最新失敗嘗試。查不到可用解法，保留該案受阻原因，繼續其他工作。
+以 `node scripts/rework.cjs research RUN RESEARCH.json` 登記以下內容，登記後計數歸零。查不到可用解法也照實登記，保留該案受阻原因，繼續其他工作。錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證時，改用 `node scripts/rework.cjs waive RUN WAIVE.json`，寫 criterionId、directCauses 與 reason。
 
 | 欄位 | 填寫內容 |
 |---|---|
-| caseId、afterId | 正式案例 ID 及最新失敗嘗試 ID |
-| failure、excluded | 失敗證據與已排除的原因 |
+| criterionId | 驗收條文 ID |
+| directCauses、commonCause | 每次不合格的直接原因（每次一句）與共同的上游原因 |
+| excluded | 已排除的原因 |
 | sources | 每筆含外部來源 url 與具時區的查閱時間 checkedAt |
 | experiment、experimentPassed | 小實驗結果檔的絕對路徑及實際通過結果 |
-| solution、workPackage | 執行主線選定的解法及已登記的後續工作包 ID |
+| solution、workPackage | 執行主線選定的解法及已登記在派工表的後續工作包 ID |
 
-程式核對紀錄、欄位與檔案。證據是否支持解法，由執行主線在整合時及監督在送驗時查核。
+程式核對紀錄、欄位與檔案，由執行主線登記（Codex 的子代理呼叫會被程式擋下；Claude 的子代理沒有可辨識的對話代號，由主線自己守住）。證據是否支持解法，由執行主線在整合時及監督在送驗時查核。

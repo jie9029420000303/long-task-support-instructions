@@ -116,20 +116,12 @@ function summarize(run,progress,details=false){
 function issues(run,progress){
   const summary=summarize(run,progress,true);if(!summary)return [];
   const result=[];
-  // Formal retry policy follows the case across revisions. Independent product verdicts still use summarize().
-  const formal = require('./formal-case.cjs');
-  const rows = history(run, true);
-  const state = formal.loadState(run);
-  const caseIds = new Set(rows.filter(r => r.kind === 'attempt').map(r => r.caseId));
-  for (const caseId of caseIds) {
-    const item = {caseId};
-    if (!formal.needsResearch(rows, state, item)) continue;
-    const failed = formal.failures(rows, item);
-    const studied = state.research.filter(r => r.caseId === caseId && failed.some(a => a.id === r.afterId));
-    const episode = [failed[0].id, studied.at(-1)?.afterId || null];
-    result.push({kind:'acceptance_rework', affected:[...new Set(failed.map(a => a.criterionId))].sort(), cases:[caseId], episode,
-      detail:{finding:'同一驗收案例連續兩次未通過。核對執行主線已開始研究並登記後續工作包；小實驗由執行端安排。',
-        caseId, evidence:failed.flatMap(a => a.evidence)}});
+  // A criterion held at its second unsuccessful delivery (rework.cjs) shows once per cycle; the executor's research
+  // registration resets it. The supervisor only checks that research is under way, it does not choose the approach.
+  for (const row of require('./rework.cjs').status(run).filter(row=>row.held)) {
+    result.push({kind:'acceptance_rework', affected:[row.criterionId], episode:[row.criterionId, row.cycles],
+      detail:{finding:'同一驗收條文累計兩次不合格，工具已擋下這條的下一次派工與送審。核對執行主線已派研究子代理（或登記不需研究的理由）；做法由執行端決定。',
+        criterionId:row.criterionId, failures:row.current}});
   }
   for(const item of summary.items){
     if(item.wasPass&&item.status!=='PASS')result.push({kind:'acceptance_withdrawn',affected:[item.id],episode:item.passGeneration,detail:{finding:'先前通過證據已撤回；核對變更影響與必要重測',evidence:item.evidence}});

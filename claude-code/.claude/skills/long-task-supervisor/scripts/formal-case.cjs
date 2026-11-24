@@ -8,6 +8,7 @@ const {spawn} = require('node:child_process');
 const {isDeepStrictEqual} = require('node:util');
 const audit = require('./acceptance-audit.cjs');
 const contract = require('./contract-state.cjs');
+const rework = require('./rework.cjs');
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
 const required = (value, label) => { if (!value) throw Error(label); };
 const string = v => typeof v === 'string' && v.trim().length > 0;
@@ -18,33 +19,10 @@ function write(file, value) {
   try { fs.renameSync(tmp, file); } finally { fs.rmSync(tmp, {force:true}); }
 }
 function sameCase(a,b) { return a.caseId === b.caseId; }
-function failures(history, item) {
-  const unique = new Map();
-  let validPassRevisions;
-  for (const row of history) {
-    if (row.kind === 'change') {
-      if ([...row.affectedCaseIds, ...row.requiredRegressionCaseIds].includes(item.caseId)) validPassRevisions = new Set([row.toRevision]);
-      else validPassRevisions?.add(row.toRevision);
-      continue;
-    }
-    if (row.kind !== 'attempt' || !sameCase(row,item)) continue;
-    if (row.outcome === 'PASS' && validPassRevisions && !validPassRevisions.has(row.revision)) continue;
-    const prior = unique.get(row.id);
-    if (!prior || (prior.outcome === 'PASS' && row.outcome !== 'PASS')) unique.set(row.id, row);
-  }
-  // Stable sort preserves journal order when two distinct attempts have the same start.
-  const rows = [...unique.values()].sort((a,b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
-  const last = rows.findLastIndex(r => r.outcome === 'PASS');
-  return rows.slice(last + 1);
-}
-function needsResearch(history, state, item) {
-  const failed = failures(history,item);
-  if (failed.length < 2) return false;
-  const latest = failed.at(-1);
-  return !state.research.some(r => sameCase(r,item) && r.afterId === latest.id);
-}
-function eligible(history,state,item) {
-  required(!needsResearch(history,state,item), 'This case needs external research and a verified small experiment before its next formal attempt: '+item.caseId);
+// The second-failure stop counts per acceptance criterion in rework.cjs, for every kind of package; a formal case
+// whose criterion is held waits there too.
+function eligible(history,criterionId) {
+  required(!rework.held(history,[criterionId]).length, '驗收條文 '+criterionId+' 已累計 '+rework.LIMIT+' 次不合格：先派研究並用 rework.cjs research 登記（或 waive 登記不需研究的理由），再發下一次正式實測許可');
 }
 function checkPreflight(pkg) {
   if (!pkg.scarceMachine && !pkg.target) return;
@@ -85,23 +63,14 @@ function validatePackage(pkg, criteria) {
 }
 function loadState(run) {
   const file = path.join(run,'formal-cases.json');
-  return fs.existsSync(file) ? read(file) : {permits:[], research:[]};
+  return fs.existsSync(file) ? read(file) : {permits:[]};
 }
 function dispatchCheck(run, snapshot, previous) {
   require('./worker-ownership.cjs').check(run,snapshot,previous);
   const current = snapshot.packages.inFlight.filter(p => p.testKind === 'formal');
   if (!current.length) return;
   for (const pkg of current) validatePackage(pkg,snapshot.acceptance?.items || []);
-  const state = loadState(run);
-  checkMappings(current,state);
-  const entering = current.filter(pkg => !previous?.packages?.inFlight?.some(old => old.id===pkg.id && old.testKind==='formal' &&
-    isDeepStrictEqual(old.caseIds,pkg.caseIds) && isDeepStrictEqual(old.acceptanceIds,pkg.acceptanceIds) &&
-    isDeepStrictEqual(old.caseMap,pkg.caseMap) && old.suite === pkg.suite));
-  const rows = fs.existsSync(path.join(run,'acceptance-history.jsonl')) ? readHistory(run) : [];
-  for (const pkg of entering) {
-    const held = pkg.caseIds.filter(caseId => needsResearch(rows,state,{caseId}));
-    required(held.length < pkg.caseIds.length, 'Research required before dispatching formal cases: '+held.join(', '));
-  }
+  checkMappings(current,loadState(run));
 }
 function readHistory(run) {
   return fs.readFileSync(path.join(run,'acceptance-history.jsonl'),'utf8').split(/\r?\n/).filter(Boolean).map(line=>JSON.parse(line));
@@ -122,10 +91,10 @@ function main(command, run, inputFile, output) {
       required(pkg && input.revision===progress.revision,'Select an in-flight formal package at its current revision');
       validatePackage(pkg, progress.items);
       checkMappings([pkg], state);
-      const allowed=[], held=[];
+      const allowed=[], held=[], stopped=rework.held(rows,pkg.acceptanceIds).length>0;
       for (const caseId of pkg.caseIds) {
         const awaiting=state.permits.some(r=>!r.finished && r.permit.caseId===caseId);
-        const heldFor=awaiting?'awaitingReceipt':needsResearch(rows,state,{caseId})?'research':null;
+        const heldFor=awaiting?'awaitingReceipt':stopped?'research':null;
         const record={caseId,receiptCase:nativeCase(pkg,caseId)};
         if (heldFor) held.push({...record,reason:heldFor}); else allowed.push(record);
       }
@@ -146,7 +115,7 @@ function main(command, run, inputFile, output) {
         ['workPackage','criterionId','caseId','revision','purpose'].every(k=>input[k]===entry.permit[k]),'Attempt ID already used');
       required(!rows.some(r=>r.kind==='attempt' && r.id===input.id),'Attempt ID already recorded');
       required(!state.permits.some(r=>!r.finished && r!==entry && sameCase(r.permit,input)), 'A previous launch for this case is awaiting its receipt');
-      eligible(rows,state,input);
+      eligible(rows,input.criterionId);
       const permit=entry?.permit || {id:input.id,workPackage:input.workPackage,criterionId:input.criterionId,caseId:input.caseId,
         revision:input.revision,receiptCase,suite:pkg.suite||'default',purpose:'formal',nonce:crypto.randomUUID(),runId:binding.executorId,
         ...(pkg.target?{target:pkg.target,preflight:pkg.preflight}:{})};
@@ -155,18 +124,7 @@ function main(command, run, inputFile, output) {
       if (!fs.existsSync(output)) preserve(output,permit);
       return {issued:permit.id};
     }
-    if (command==='research') {
-      required(string(input.caseId) && string(input.afterId) && ['failure','excluded','experiment','solution','workPackage'].every(k=>string(input[k])) &&
-        Array.isArray(input.sources) && input.sources.length && input.sources.every(x=>/^https?:\/\//.test(x.url) && contract.exactTime(x.checkedAt)!==null) &&
-        input.experimentPassed===true && fs.statSync(input.experiment).isFile(), 'Register failure evidence, excluded causes, dated sources, successful experiment evidence, selected solution and follow-up package');
-      const latest=failures(rows,input).at(-1);
-      required(latest && latest.id===input.afterId,'Research must address the latest failed attempt');
-      required(Object.values(snapshot.packages).some(list=>Array.isArray(list)&&list.some(p=>p.id===input.workPackage)), 'Follow-up work package is not registered');
-      const record={...input,afterCriterion:latest.criterionId};
-      if (!state.research.some(r=>JSON.stringify(r)===JSON.stringify(record))) {state.research.push(record);write(stateFile,state);}
-      return {registered:input.afterId};
-    }
-    required(command==='finish' && output && path.isAbsolute(output),'Expected reserve, research, or finish RUN PERMIT RECEIPT');
+    required(command==='finish' && output && path.isAbsolute(output),'Expected select, reserve or finish RUN PERMIT RECEIPT（研究登記改用 rework.cjs research）');
     required(entry && entry.permit.nonce===input.nonce,'Unknown formal permit');
     const p=entry.permit, receipt=read(output), result=receipt.result;
     required(receipt.id===p.id && receipt.nonce===p.nonce && receipt.caseId===p.caseId && receipt.revision===p.revision &&
@@ -194,6 +152,7 @@ function main(command, run, inputFile, output) {
     audit.record(run,progress,file);
     if(previousAttempt && Date.parse(previousAttempt.finishedAt)>stop) item.lastAttempt=previousAttempt;
     write(file,snapshot);
+    rework.formalFailure(run,p,attempt);
     entry.finished=hash;entry.evidence=attempt.evidence[0];write(stateFile,state);
     return {recorded:p.id,outcome};
   } finally {fs.unlinkSync(lock);}
@@ -228,7 +187,7 @@ async function runTransport(args) {
   required(fs.existsSync(receipt),'No per-case receipt returned; reconcile the same attempt before retrying this case');
   return main('finish',run,permit,receipt);
 }
-module.exports={eligible,failures,needsResearch,loadState,validatePackage,dispatchCheck};
+module.exports={eligible,loadState,validatePackage,dispatchCheck};
 if (require.main===module) {
   const [command,...args]=process.argv.slice(2);
   Promise.resolve().then(()=>command==='run'?runTransport(args):main(command,...args))

@@ -54,7 +54,7 @@ test('each supervisor fixes the version itself, decides a recommended out-of-sco
     assert.ok(authorization.indexOf('**超出契約目標或範圍的方向選擇有明確推薦**')<authorization.indexOf('仍要停下來問使用者'),p.name+': a recommended choice is on the do-it list');
     assert.ok(!authorization.includes('**執行端提問 30 分鐘沒人答**'),p.name);
     // What still waits for Jay is unchanged.
-    for(const kept of ['**推薦減少工作**','**推薦加限制或開例外**','**推薦人手而有自動選項**','**刪除或永久改動既有資料**','**開工時沒授權或超出授權上限的帳號密碼、付費、正式部署**','**會讓歷史回不去的 Git 操作**','**寄信與不是測試的正式對外發送**','**推翻使用者明示的禁令**','**使用者在契約自設的核准關卡**','**要使用者本人到場或操作，或只有他知道的事實**'])
+    for(const kept of ['**驗收條文已寫到的事推薦減少工作**','**監督非加不可的限制或開例外**','**推薦人手而有自動選項**','**刪除或永久改動既有資料**','**開工時沒授權或超出授權上限的帳號密碼、付費、正式部署**','**會讓歷史回不去的 Git 操作**','**寄信與不是測試的正式對外發送**','**推翻使用者明示的禁令**','**使用者在契約自設的核准關卡**','**要使用者本人到場或操作，或只有他知道的事實**'])
       assert.ok(authorization.includes(kept),p.name+': still asked: '+kept);
     const review=read(p.supervisor+'references/event-review.md');
     for(const marker of ['用 `delegate`（kind `major_change`）登記後回覆、不等使用者','同一則回覆點名執行端接著做的','dependsOn:[{id:未通過條文 ID','由監督用 reply 通知執行端定版'])
@@ -196,17 +196,19 @@ test('collect takes several packages in one validated write and mark --estimate 
       cli(['from-wp',run,state,'--base',base,'--revision','p1']);
       const report=path.join(root,'report.md');fs.writeFileSync(report,'passed\n');
       const r1=path.join(root,'r1.json'),r2=path.join(root,'r2.json'),files=[path.join(run,'dispatch.json'),path.join(wp,'B1.md'),path.join(wp,'B2.md')];
-      save(r1,{status:{list:'completed',handle:'agent:B1',evidence:[report]},acceptance:[{id:'A1',status:'PASS',evidence:[report]}]});
-      save(r2,{status:{list:'completed',handle:'agent:B2',evidence:[path.join(root,'missing.md')]},acceptance:[]});
+      save(r1,{verdict:{kind:'adopt'},status:{list:'completed',handle:'agent:B1',evidence:[report]},acceptance:[{id:'A1',status:'PASS',evidence:[report]}]});
+      save(r2,{verdict:{kind:'adopt'},status:{list:'completed',handle:'agent:B2',evidence:[path.join(root,'missing.md')]},acceptance:[]});
       const before=files.map(file=>fs.readFileSync(file,'utf8'));
       // One bad result leaves every package and the snapshot as they were.
       assert.throws(()=>cli(['collect',run,state,'B1',r1,'B2',r2]),error=>/does not exist/.test(error.stderr),p.name);
       assert.deepEqual(files.map(file=>fs.readFileSync(file,'utf8')),before,p.name);
       assert.throws(()=>cli(['collect',run,state,'B1',r1,'B1',r1]),error=>/named twice/.test(error.stderr),p.name);
       assert.throws(()=>cli(['collect',run,state,'B1',r1,'B2']),error=>/Usage/.test(error.stderr),p.name+': an id without its result file');
-      save(r2,{status:{list:'completed',handle:'agent:B2',evidence:[report]},acceptance:[{id:'A2',status:'FAIL',evidence:[report]}]});
+      save(r2,{verdict:{kind:'fail',reason:'A2 measured below target'},status:{list:'completed',handle:'agent:B2',evidence:[report]},acceptance:[{id:'A2',status:'FAIL',evidence:[report]}]});
       const out=JSON.parse(cli(['collect',run,state,'B1',r1,'B2',r2]));
       assert.deepEqual(out.acceptance,[{id:'A1',status:'PASS'},{id:'A2',status:'FAIL'}],p.name);assert.equal(out.packages.completed,2,p.name);assert.equal(out.packages.inFlight,0,p.name);
+      // The failed delivery counts once against its criterion; the next step is a two-step raise, not research yet.
+      assert.deepEqual(out.rework.map(r=>[r.criterionId,r.failures,r.held]),[['A2',1,false]],p.name);
       for(const id of ['B1','B2'])assert.match(fs.readFileSync(path.join(wp,id+'.md'),'utf8'),/^\[狀態\] \{"list":"completed"/m,p.name);
       const marked=JSON.parse(cli(['mark',run,state,'B3','{"list":"inFlight","handle":"agent:B3"}','--estimate','sonnet:30000:4']));
       assert.equal(marked.packages.inFlight,1,p.name);

@@ -8,7 +8,7 @@
 .claude/
 ├── skills/long-task-supervisor/     研究對話承接、執行 session 建立、事件監看及獨立驗收
 ├── skills/long-task-orchestrator/
-│   ├── SKILL.md                    技能本體：觸發、A／B／C 分工、路徑枚舉閘、C 研究線、模型／effort 鎖定、驗收與四次品質錯誤規則
+│   ├── SKILL.md                    技能本體：觸發、A／B／C 分工、路徑枚舉閘、C 研究線、模型／effort 鎖定、驗收與不合格升檔、研究循環規則
 │   ├── references/spec.md          共用規格逐字複本（不得在此改共同語意）
 │   ├── references/execution.md     Claude Code 執行協定：狀態檔、派工、前台案例、續接／壓縮／cloud
 │   ├── references/behavioral-cases.md  共同行為案例 + Claude Code 驗證對照

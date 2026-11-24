@@ -235,9 +235,11 @@ function decision() {
   const proposed = validateDecision(binding, contract, event, resolved ? current : input, resolved ? [] : state.eventQueue);
   if (resolved) return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: true, queued: 0, status: watchNow() };
   need(path.resolve(other) === require('./decision-commit.cjs').draft(run,event.id), 'Use the new isolated draft path from context; reconcile old drafts before copying them');
-  require('./package-review.cjs').requireScope(run,binding,event,proposed);
+  const rework=require('./rework.cjs');
+  rework.scope(run,binding,event,proposed);
   require('./review-followup.cjs').validateUnblock(run,binding,event,proposed);
   const submitted = require('./decision-commit.cjs').submit(run,binding,contract,event,state,input,bytes);
+  rework.recordRuling(run,event,proposed);
   return { eventId: proposed.eventId, disposition: proposed.disposition, valid: true, processed: false, queued:(state.eventQueue || []).length, ...submitted, status: watchNow() };
 }
 function stop() {

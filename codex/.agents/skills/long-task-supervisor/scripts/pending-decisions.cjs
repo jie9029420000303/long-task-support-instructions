@@ -13,8 +13,12 @@ const FILE='pending-decisions.json';
 // spec; only these floors still wait on him, named by these labels on his dashboard. Of 139 questions he answered
 // across four runs, 66 of 92 decisions took the recommendation and 13 more chose the option that asked less of him.
 const KINDS={defer_scope:'推薦延後、不做或少做',restrict:'推薦新增、保留限制或在使用者規則上開例外',manual_alternative:'推薦人手處理且另有自動選項',irreversible:'不可逆（改寫 Git 歷史、未授權的正式部署等）',paid:'付費（開工時沒授權或超出上限的）',delete:'刪除或永久改動既有資料（開發過程產物除外）',credential:'帳號或憑證（開工時沒授權的）',external:'正式對外發送（寄信、對客戶或公開發布；非測試）',
-  prohibition:'推翻你的禁令',acceptance:'改驗收條文（縮窄、列例外、換證據）',user_action:'要你本人操作，或只有你知道的事實',major_change:'超出契約目標或範圍、沒有明確推薦的變更',gate:'你在契約自設的核准關卡'};
-const FIELDS=['kind','ask','recommend','why','options'],OPS=['raise','reopen','withdraw','answer','delegate'];
+  prohibition:'推翻你的禁令',acceptance:'改驗收條文（新增或加嚴驗收細節、縮窄、列例外、換證據）',user_action:'要你本人操作，或只有你知道的事實',major_change:'超出契約目標或範圍、沒有明確推薦的變更',gate:'你在契約自設的核准關卡',
+  rework_cycle:'同一驗收條文循環兩次仍未通過（通知，執行端照常繼續）'};
+// Kinds the supervisor may never decide in his place. acceptance: adding acceptance detail asks Jay first (Jay
+// 2026-11-24「可以要求要增加驗收的細節，但前提是要先問過我」); rework_cycle is his notice, closed only by his answer.
+const MUST_ASK=['defer_scope','restrict','manual_alternative','external','paid','delete','prohibition','user_action','credential','irreversible','gate','acceptance','rework_cycle'];
+const FIELDS=['kind','ask','recommend','why','options','criteria'],OPS=['raise','reopen','withdraw','answer','delegate'];
 const KEY=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const need=(ok,message)=>{if(!ok)throw Error(message);};
 const text=value=>typeof value==='string'&&value.trim();
@@ -30,12 +34,19 @@ function load(run){
   catch(error){throw Error(FILE+' is unreadable ('+error.message+'); restore it before changing the ledger');}
 }
 function store(run,ledger){const file=path.join(run,FILE);fs.writeFileSync(file+'.tmp',JSON.stringify(ledger,null,2)+'\n');fs.renameSync(file+'.tmp',file);}
-function check(value,key){
+// An acceptance question names the criterion (or the contract goal, which has no ID) the problem blocks; the IDs must
+// be in the effective contract (Jay 2026-11-24 子題丙: two checks, no new required fields on a delegation).
+function check(value,key,active){
   need(Object.hasOwn(KINDS,value.kind),key+': kind must be one of '+Object.keys(KINDS).join(', ')+'; the supervisor decides anything else itself');
   for(const field of ['ask','recommend','why'])need(text(value[field]),key+': a pending item needs '+field);
   const options=value.options===undefined?[]:value.options;
   need(Array.isArray(options)&&options.every(text),key+': options must be a list of choices');
-  return {kind:value.kind,ask:value.ask.trim(),recommend:value.recommend.trim(),why:value.why.trim(),options:options.map(option=>option.trim())};
+  const out={kind:value.kind,ask:value.ask.trim(),recommend:value.recommend.trim(),why:value.why.trim(),options:options.map(option=>option.trim())};
+  if(value.kind!=='acceptance')return out;
+  const ids=active();
+  need(Array.isArray(value.criteria)&&value.criteria.length&&value.criteria.every(id=>id==='goal'||ids.has(id)),
+    key+': 改驗收的題目要寫 "criteria":[...]，列出問題卡在哪一條現行驗收條文（契約目標寫 "goal"）；現行條文有 '+[...ids].join('、'));
+  return {...out,criteria:[...new Set(value.criteria)]};
 }
 // Code catches the same key and the same wording; the model catches rewordings from the full list in its context.
 function twin(ledger,key,ask){
@@ -65,7 +76,8 @@ function view(run,state={},ledger=null){
       withdrawn:item.withdrawn?.reason||null})),
     unpresented:ledger.items.filter(unpresented).map(item=>item.key)};
 }
-// What the supervisor decided in Jay's place, newest first, with the way back (Jay 2026-11-09: listed on the next push).
+// What the supervisor decided in Jay's place, newest first, with the way back: on the dashboard, in the closing report
+// and whenever Jay asks (Jay 2026-11-24「只要留在他的專案裡面的結案報告，或者是當我詢問的時候」).
 function delegatedOf(ledger){
   return ledger.items.filter(item=>item.status==='delegated').map(item=>({key:item.key,kind:item.kind||null,ask:item.ask,...item.delegated}))
     .sort((a,b)=>String(b.at).localeCompare(String(a.at)));
@@ -79,11 +91,12 @@ function apply(run,change,{binding,checkQuote,at=new Date().toISOString()}={}){
   need(change&&typeof change==='object'&&!Array.isArray(change)&&Object.keys(change).length&&Object.keys(change).every(name=>OPS.includes(name)&&Array.isArray(change[name])),
     'A pending change holds only raise, reopen, withdraw, answer or delegate lists');
   const ledger=load(run),byKey=new Map(ledger.items.map(item=>[item.key,item])),touched=new Set();
+  let ids;const active=()=>ids||=new Set(contractState.effective(run,binding).criteria.map(item=>item.id));
   // delegatedKeys: the keys this change decided for Jay; view's delegated lists every such decision in full.
   const result={raised:[],updated:[],unchanged:[],reopened:[],withdrawn:[],answered:[],delegatedKeys:[]};
   const once=key=>{need(typeof key==='string'&&KEY.test(key)&&!touched.has(key),'Each item needs one stable key (letters, digits, - or _), once per change: '+key);touched.add(key);return key;};
   for(const item of change.raise||[]){
-    const key=once(item?.key),old=byKey.get(key),value=check(item,key);
+    const key=once(item?.key),old=byKey.get(key),value=check(item,key,active);
     need(!old||isOpen(old),key+' is already '+old?.status+'; if a new fact changes the question, reopen it');
     twin(ledger,key,value.ask);
     if(!old){const added={key,...value,status:'open',raisedAt:at,updatedAt:at,presentedAt:null,answer:null,withdrawn:null,history:[]};
@@ -96,7 +109,7 @@ function apply(run,change,{binding,checkQuote,at=new Date().toISOString()}={}){
     const key=once(item?.key),old=byKey.get(key);
     need(old&&!isOpen(old),key+(old?' is still open; update it with raise':' is not in the ledger; raise it'));
     need(text(item.fact),key+': reopen needs the new fact that changes the question');
-    const value=check(Object.fromEntries(FIELDS.map(field=>[field,item[field]===undefined?old[field]:item[field]])),key);
+    const value=check(Object.fromEntries(FIELDS.map(field=>[field,item[field]===undefined?old[field]:item[field]])),key,active);
     twin(ledger,key,value.ask);
     (old.history||=[]).push({at,...pick(old),status:old.status,answer:old.answer,withdrawn:old.withdrawn,fact:item.fact.trim()});
     Object.assign(old,value,{status:'open',updatedAt:at,answer:null,withdrawn:null});result.reopened.push(key);
@@ -135,8 +148,7 @@ function apply(run,change,{binding,checkQuote,at=new Date().toISOString()}={}){
     need(!old||isOpen(old)||old.status==='delegated',key+' is already '+old?.status+'; a delegated decision needs an open or delegated item, or a new key');
     for(const field of ['ask','choice','basis','revert'])need(text(item[field]),key+': a delegated decision needs '+field+' (revert says how Jay can undo it)');
     need(item.kind==null||Object.hasOwn(KINDS,item.kind),key+': kind must be one of '+Object.keys(KINDS).join(', '));
-    const mustAsk = ['defer_scope','restrict','manual_alternative','external','paid','delete','prohibition','user_action','credential','irreversible','gate'];
-    need(!mustAsk.includes(item.kind) && !mustAsk.includes(old?.kind),key+': this recommendation needs Jay’s answer; record it with raise or answer');
+    need(!MUST_ASK.includes(item.kind) && !MUST_ASK.includes(old?.kind),key+': this recommendation needs Jay’s answer; record it with raise or answer');
     const delegated={choice:item.choice.trim(),basis:item.basis.trim(),revert:item.revert.trim(),at};
     if(old){(old.history||=[]).push({at,...pick(old),status:old.status,...(old.delegated?{delegated:old.delegated}:{})});
       Object.assign(old,{status:'delegated',ask:item.ask.trim(),...(item.kind?{kind:item.kind}:{}),delegated,updatedAt:at});}
@@ -196,17 +208,18 @@ function shown(run,keys,{binding,at=new Date().toISOString()}={}){
   store(run,ledger);
   return {shown:open,at};
 }
-// The questions themselves reach Jay's phone (Jay 2026-11-09, 推播一定送到、主線停下就推題目): each open item with the
-// recommendation, why it waits on him and the choices, plus what the supervisor decided in his place since the last
-// push. Before, a push said only 「有 5 題」; Jay asked twice (11/07 18:53, 02:11) to have the questions listed again.
+// The questions can reach Jay's phone (Jay 2026-11-09): each open item with the recommendation, why it waits on him
+// and the choices. Off unless notify.json sets "questionPush":true (Jay 2026-11-23「統一讓Veda來問我，但不要直接傳進
+// 對話就發給我」): Veda asks the open items at 09:00, 12:00 and 19:00 from the read-only supervise.cjs ask. Delegated
+// decisions are no longer pushed; they stay on the dashboard and in the closing report (Jay 2026-11-24).
 const PUSH_LIMIT=3800,clip=(value,size)=>{const flat=String(value??'').replace(/\s+/g,' ').trim();return flat.length>size?flat.slice(0,size-1)+'…':flat;};
 const hash=value=>require('node:crypto').createHash('sha256').update(String(value)).digest('hex');
 const retryMs=()=>Number(process.env.LONG_TASK_PUSH_RETRY_MS)||10*60000;
 // Pushed is kept per version: a question changed after its last push goes out again, an unchanged one does not, and
 // answering one question does not re-push the rest.
-const itemMark=item=>'item-'+item.key+'-'+hash(item.updatedAt).slice(0,12),delegatedMark=item=>'delegated-'+item.key+'-'+hash(item.delegated?.at).slice(0,12);
-function pushText(title,open,delegated){
-  const name='『'+(title||'監督對話')+'』',blocks=[],used=[];
+const itemMark=item=>'item-'+item.key+'-'+hash(item.updatedAt).slice(0,12);
+function pushText(title,open){
+  const name='『'+(title||'監督對話')+'』',blocks=[];
   let size=0;const fits=block=>size+block.length+2<=PUSH_LIMIT-160;
   const head='【開發任務需要你決定】'+name+'有 '+open.length+' 題要你回答：';size+=head.length;
   let shown=0;
@@ -217,23 +230,17 @@ function pushText(title,open,delegated){
   }
   if(shown<open.length)blocks.push('另有 '+(open.length-shown)+' 題，請打開監督對話'+name+'查看。');
   blocks.push('直接在監督對話回覆，例如「1 照建議、2 選 B」。');
-  if(delegated.length){
-    const lines=['監督已依規格代決（不用回；要改回直接跟監督說）：'];
-    for(const item of delegated){const line='- '+clip(item.ask,90)+'：'+clip(item.delegated.choice,90)+'（改回：'+clip(item.delegated.revert,70)+'）';
-      if(size+lines.join('\n').length+line.length+2>PUSH_LIMIT)break;lines.push(line);used.push(item);}
-    if(used.length<delegated.length)lines.push('另有 '+(delegated.length-used.length)+' 項代決，見監督儀表板。');
-    if(used.length)blocks.push(lines.join('\n'));
-  }
-  return {text:[head,...blocks].join('\n\n'),delegated:used};
+  return [head,...blocks].join('\n\n');
 }
 // One push per new or changed question, whoever notices first: the watcher once the supervisor has finished the event
 // that raised it, or the supervisor's own card (shown). Each push lists every open item, so Jay never pieces the list
 // together. A failed push is retried every 10 minutes, at most 3 more times, and stays visible (pushProblem).
 async function pushOpen(run,{title,now=Date.now()}={}){
+  const notify=require('./notify.cjs');
+  if(!notify.questionPush())return {ok:true,skipped:true,reason:'disabled'};
   let ledger;try{ledger=load(run);}catch(error){return {ok:false,skipped:true,error:error.message};}
   const open=ledger.items.filter(isOpen);
   if(!open.length)return {ok:true,skipped:true,reason:'nothing_open'};
-  const notify=require('./notify.cjs');
   if(open.every(item=>notify.sent(run,itemMark(item))))return {ok:true,skipped:true,reason:'already_pushed'};
   const base='questions-'+hash(open.map(item=>item.key+'@'+item.updatedAt).sort().join(',')).slice(0,16);
   const keys=[base,base+'-r1',base+'-r2',base+'-r3'],records=keys.map(key=>notify.sent(run,key));
@@ -241,15 +248,15 @@ async function pushOpen(run,{title,now=Date.now()}={}){
   const slot=records.findIndex(record=>!record),last=records.filter(Boolean).at(-1);
   if(slot<0)return {ok:false,skipped:true,key:base,error:last?.error||'retries used up'};
   if(last&&now-(Date.parse(last.at||last.claimedAt)||0)<retryMs())return {ok:false,skipped:true,key:base,error:last.error||'push in progress'};
-  const fresh=ledger.items.filter(item=>item.status==='delegated'&&!notify.sent(run,delegatedMark(item)));
-  const {text:body,delegated}=pushText(title,open,fresh);
-  const sent=await notify.sendOnce(run,keys[slot],body);
-  if(sent.ok)for(const key of [...open.map(itemMark),...delegated.map(delegatedMark)])notify.mark(run,key,{includedIn:keys[slot]});
-  return {ok:sent.ok===true,skipped:Boolean(sent.skipped),key:keys[slot],count:open.length,delegated:delegated.length,error:sent.error||null,at:sent.at||null};
+  const sent=await notify.sendOnce(run,keys[slot],pushText(title,open));
+  if(sent.ok)for(const key of open.map(itemMark))notify.mark(run,key,{includedIn:keys[slot]});
+  return {ok:sent.ok===true,skipped:Boolean(sent.skipped),key:keys[slot],count:open.length,error:sent.error||null,at:sent.at||null};
 }
 // The latest question push that did not get through, or null: the dashboard shows it at the top and the supervisor
 // names it first when it next writes to Jay (Jay 2026-11-09). GDB 2026-11-06/08: 6 pushes never left, no one saw it.
+// With question pushes off nothing is expected to leave, so nothing is reported.
 function pushProblem(run){
+  if(!require('./notify.cjs').questionPush())return null;
   const dir=path.join(run,'notifications');let names;
   try{names=fs.readdirSync(dir).filter(name=>name.startsWith('questions-')&&name.endsWith('.json'));}catch{return null;}
   const records=names.map(name=>{try{return JSON.parse(fs.readFileSync(path.join(dir,name),'utf8'));}catch{return null;}}).filter(record=>record?.at)
@@ -261,6 +268,6 @@ function pushProblem(run){
 // have pushed the same list already, and the same list is never pushed twice.
 async function pushShown(run,result,title){
   const push=await pushOpen(run,{title});
-  return {...result,push:{ok:push.ok===true,skipped:Boolean(push.skipped),error:push.error||null}};
+  return {...result,push:{ok:push.ok===true,skipped:Boolean(push.skipped),...(push.reason?{reason:push.reason}:{}),error:push.error||null}};
 }
 module.exports={FILE,KINDS,load,view,apply,amend,ask,shown,pushShown,pushOpen,pushText,pushProblem};

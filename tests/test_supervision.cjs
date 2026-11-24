@@ -96,14 +96,11 @@ for (const [platform,dir] of versions) {
     assert.throws(()=>guard.validateContract(f.contract),/changed/);
     fs.rmSync(f.root,{recursive:true,force:true});
   });
-  test(platform+' generates a complete submission marker from actual files',()=>{
+  // The two-argument form wrote a submission no package carried; it is refused and leaves no manifest behind.
+  test(platform+' refuses a submission that does not name its work packages',()=>{
     const f=fixture(),newManifest=path.join(f.root,'generated.json');
-    const output=execFileSync(process.execPath,[path.join(dir,'candidate.cjs'),newManifest,f.candidate],{encoding:'utf8'}).trim();
-    const event=JSON.parse(output.slice('LONG_TASK_EVENT '.length));
-    assert.equal(output.startsWith('LONG_TASK_EVENT '),true);
-    assert.equal(event.revision,'sha256:'+sha(newManifest));
-    assert.equal(event.manifest,newManifest);
-    assert.throws(()=>execFileSync(process.execPath,[path.join(dir,'candidate.cjs'),newManifest,f.candidate],{stdio:'pipe'}),/Command failed/);
+    assert.throws(()=>execFileSync(process.execPath,[path.join(dir,'candidate.cjs'),newManifest,f.candidate],{stdio:'pipe'}),error=>/PACKAGE_ID/.test(error.stderr));
+    assert.equal(fs.existsSync(newManifest),false);
     fs.rmSync(f.root,{recursive:true,force:true});
   });
 }

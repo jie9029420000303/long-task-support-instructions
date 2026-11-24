@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 ROW = re.compile(r"^\|(?!\s*:?-{3})")
+# 「主線接手」是 v1.14.0 以前狀態檔的判定字樣，讀舊紀錄時照樣算已關閉。
 CLOSED = re.compile(r"PASS|FAIL|主線接手|關閉")
 DONE = {"PASS", "核准不做"}
 CLAIM = re.compile(r"PASS|完成|達成|全部通過|全數通過")

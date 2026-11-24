@@ -35,7 +35,6 @@ node "<skill>/scripts/dispatch.cjs" write "<RUN>" "<完整快照輸入 JSON 絕�
 | `returned` | `integrated`、`resultEvidence` | 已回報成果及主線是否已核對收回 |
 | `blocked` | `kind`、`exclusiveResources`、`evidence` | 具體阻塞，只限四種原因（見[受阻只限四種](#受阻只限四種)）；排他資源衝突用 `resource_conflict` |
 | `completed` | `acceptanceIds`、`evidence` | 已核對工作與所支援的驗收條目；不是監督已接受 |
-| `recurringRework` | `count`、`evidence` | 同一項已重做至少兩次，交監督判斷是否有效重驗 |
 
 子代理的 `handle` 填平台的代理路徑（例如 `/root/technical_poc`）或子代理對話 ID，監督據此找到它在 `CODEX_HOME/sessions` 的紀錄、算輸出速度與是否已做完；測試、主機程序等非代理工作經資源帳本啟動者填 `resource:<資源 id>`，evidence 列 `resources/` 下的紀錄檔，監督可查程序是否還活著。主線自己做的工作包（例如在平台瀏覽器走真實操作）填 `main`：監督把執行對話自己紀錄裡最後一次實際工作（輪詢不算）與 evidence 的修改時間都算成這包的活動，不會因為新存檔點還沒列進 evidence 就判成程序停住；主線真的停下，由「執行端與子代理都停了 5 分鐘」那條叫醒。
 
@@ -65,7 +64,7 @@ Codex 寫入在途包時沿用該階段的起跑時間與估時，亦可從工�
 
 - ready、inFlight、blocked、returned 的工作包可附 `acceptanceIds:["條件ID"]`，標明它推進哪幾條驗收條件。快照的 `acceptance.items` 中，FAIL／PENDING／INCONCLUSIVE 的條件若沒有任何工作包標到它，且持續 30 分鐘（扣掉電腦睡眠）、執行端閒置時，背景程式的監督時鐘發 `unplanned_criteria` 進度查核原因，附空著的子代理席位數；同一組條件只發一次，暫停中不發；等使用者核准時比照閒置提醒，監督已逐條寫明每個未通過條文依賴哪個待決事項才不發。只能等使用者核准或外部結果的條件，列進 blocked 並標上 acceptanceIds。
 - 開工拆包時，跨版本可重用的準備工作（部署與回退腳本、測試腳本、唯讀查核工具、規格草稿）一開始就列為 ready，和測試並行，不留到最後。帶版本內容的文件（手冊、發版說明、證據索引、授權依據清單、執行單與數值卡）等定版後依最終結果一次寫，開發中只記事實紀錄，不拿來填空席；空席依序給測試、查核與下一批實作（使用者 2026-11-12 定案；A WebRPA 五天 552 個工作包有 194 個是文件類，手冊改到 V30）。
-- 同一包重做 2 次仍沒送驗，監督督促執行主線啟動外研。監督不自己做技術研究。執行主線核對子代理交付當下計數，毋須等整批送驗。主線自行安排研究和小實驗，選定解法並登記後續工作包。監督只在送驗時核對四項證據，逾期沒有工作包或進展時催執行端。小實驗遵守原有授權、禁令及驗收條文。 送驗查核失敗證據、已排除原因、外部來源連結與查閱時間、小實驗結果。正式派工與回執見[正式案例](formal-cases.md)。
+- 不合格交付按驗收條文計數，流程見執行技能 goal-orchestrator 的「不合格交付與研究」：第 2 次時 `dispatch.cjs`、`candidate.cjs` 與 `formal-case.cjs` 擋下該條文的下一次派工、送審與正式實測，研究用 `rework.cjs research` 登記後歸零；`rework.cjs status RUN` 讀目前計數。監督不指定做法、不自己做技術研究：送驗時核對研究登記（各次直接原因與共同上游原因、已排除原因、外部來源與查閱時間、小實驗結果、選定解法與工作包），研究交回後逾期沒有對應工作包或沒有進展時催執行端。正式派工與回執見[正式案例](formal-cases.md)。
 
 ## 受阻只限四種
 
@@ -90,7 +89,7 @@ Codex 寫入在途包時沿用該階段的起跑時間與估時，亦可從工�
 
 ## 由工作包檔產生快照（2026-10-15 定案）
 
-派工狀態的唯一紀錄是每個工作包檔 `wp/<id>.md` 裡的一行 `[狀態] {JSON}`（`list` 為 ready、inFlight、returned、blocked、completed、recurringRework 或 archived，其餘欄位照上表）。狀態一變就用一個指令同時改該行並重產整份快照，不手寫快照 JSON：
+派工狀態的唯一紀錄是每個工作包檔 `wp/<id>.md` 裡的一行 `[狀態] {JSON}`（`list` 為 ready、inFlight、returned、blocked、completed 或 archived，其餘欄位照上表）。`dispatch.cjs` 除 summary、reconcile 以外的指令只由執行主線呼叫：子代理呼叫時程式比對 `CODEX_THREAD_ID` 與 `CODEX_SESSION_ID` 擋下，說明要把成果與證據交回主線；`dispatch-history.jsonl` 每筆記寫入者（`writer`）（2026-11-21～22 有 8 個子代理在壓縮後自認主線，其中 4 個寫了派工狀態）。狀態一變就用一個指令同時改該行並重產整份快照，不手寫快照 JSON：
 
 ```text
 node "<skill>/scripts/dispatch.cjs" mark "<RUN>" "<狀態目錄絕對路徑>" <工作包 id> '<狀態 JSON>' [--activity <activity>] [--revision <計畫版號>] [--base "<JSON 絕對路徑>"]

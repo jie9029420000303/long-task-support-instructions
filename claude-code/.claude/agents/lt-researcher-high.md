@@ -1,6 +1,6 @@
 ---
 name: lt-researcher-high
-description: 長任務 C 線研究子代理（sonnet／effort high，錯 1 後重派檔）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：就主線指定的單一議題蒐集原始來源、反證、比較與待確認事項，逐項附來源與適用範圍；不做系統決策、不寫正式規劃文件。
+description: 長任務 C 線研究子代理（sonnet／effort high，不合格後升檔用）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：就主線指定的單一議題蒐集原始來源、反證、比較與待確認事項，逐項附來源與適用範圍；不做系統決策、不寫正式規劃文件。
 model: sonnet
 effort: high
 tools: Read, Glob, Grep, Bash, WebFetch, WebSearch, Skill, mcp__Claude_Browser

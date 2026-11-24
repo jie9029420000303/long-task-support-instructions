@@ -2,8 +2,8 @@
 
 每個測試對應一個「為什麼重要」：壓縮後沒重載技能，主線會照摘要亂派工（v0.2 重跑 125 分鐘、41 包從
 high 起跳）；長任務裡用提問框等人，主線會整條停住（2026-09-25 UAT 卡 74＋176＋380 分鐘）；工作包缺隔離欄位
-會讓並行閘無從判斷；從高檔起跳或錯 3 還重派，會燒掉升檔與主線接手的品質紀律。閘誤擋一般對話同樣有害，
-所以每道閘都同時測「該擋」與「不該擋」。
+會讓並行閘無從判斷；從高檔起跳、或同一輪第 2 次不合格不先研究就重派，會把失敗換成更貴的重試而不是找出原因。
+閘誤擋一般對話同樣有害，所以每道閘都同時測「該擋」與「不該擋」。
 """
 import json
 from pathlib import Path
@@ -140,31 +140,45 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(0, self.dispatch("lt-ui-tester-low", WP.format(errors=0)).returncode)
         self.assertEqual(2, self.dispatch("lt-ui-tester-medium", WP.format(errors=0)).returncode)
 
-    def test_one_step_per_quality_error_and_main_thread_takes_over_at_four(self):
-        self.assertEqual(0, self.dispatch("lt-tech-worker-high", WP.format(errors=1), rows=(("WP-1", 1),)).returncode)
-        self.assertEqual(2, self.dispatch("lt-tech-worker-xhigh", WP.format(errors=1), rows=(("WP-1", 1),)).returncode)
-        result = self.dispatch("lt-tech-worker-xhigh", WP.format(errors=3), rows=(("WP-1", 3),))
+    def test_first_failure_climbs_two_steps_and_second_failure_requires_research(self):
+        # 2026-11-23 定案：第 1 次不合格升兩檔重做；第 2 次不合格先研究原因，不能再升檔硬試。
+        once = (("WP-1", 1),)
+        self.assertEqual(0, self.dispatch("lt-tech-worker-high", WP.format(errors=1), rows=once).returncode)
+        self.assertEqual(0, self.dispatch("lt-tech-worker-xhigh", WP.format(errors=1), rows=once).returncode)
+        result = self.dispatch("lt-tech-worker-max", WP.format(errors=1), rows=once)
         self.assertEqual(2, result.returncode)
-        self.assertIn("lt-tech-worker-opus-max", result.stderr)
-        self.assertEqual(0, self.dispatch("lt-tech-worker-opus-max", WP.format(errors=3), rows=(("WP-1", 3),)).returncode)
-        self.assertEqual(0, self.dispatch("lt-tech-worker-fable-max", WP.format(errors=3) + "\n[上次模型] opus", rows=(("WP-1", 3),)).returncode)
-        self.assertEqual(2, self.dispatch("lt-tech-worker-opus-max", WP.format(errors=4), rows=(("WP-1", 4),)).returncode)
+        self.assertIn("最高派 lt-tech-worker-xhigh", result.stderr)
+        result = self.dispatch("lt-tech-worker-max", WP.format(errors=2), rows=(("WP-1", 2),))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("lt-researcher-xhigh", result.stderr)
 
-    def test_escalated_research_uses_the_failing_parent_and_rejects_model_downgrade(self):
+    def test_research_reset_keeps_the_effort_the_package_already_reached(self):
+        # 研究交回後計數歸零，但推論不退回基準檔：退回 medium 會重演已經失敗過的條件。
+        reset = WP.format(errors=0) + "\n[上次推論] xhigh\n"
+        self.assertEqual(0, self.dispatch("lt-tech-worker-xhigh", reset, rows=(("WP-1", 0),)).returncode)
+        self.assertEqual(0, self.dispatch("lt-tech-worker-max", reset, rows=(("WP-1", 1),)).returncode)
+        self.assertEqual(2, self.dispatch("lt-tech-worker-max", reset, rows=(("WP-1", 0),)).returncode)
+
+    def test_research_package_runs_at_xhigh_only_after_the_second_failure(self):
         package = WP.format(errors=0).replace("WP-1", "RESEARCH")
-        prompt = package + "\n[研究來源工作包] WP-1\n[上次模型] sonnet"
-        rows = (("WP-1", 3), ("RESEARCH", 0))
-        self.assertEqual(0, self.dispatch("lt-researcher-opus-max", prompt, rows=rows).returncode)
-        self.assertEqual(2, self.dispatch("lt-researcher-opus-max", prompt, rows=(("WP-1", 1),)).returncode)
-        tool = {"subagent_type": "lt-researcher-opus-max", "model": "sonnet", "prompt": prompt}
+        prompt = package + "\n[研究來源工作包] WP-1"
+        rows = (("WP-1", 2), ("RESEARCH", 0))
+        self.assertEqual(0, self.dispatch("lt-researcher-xhigh", prompt, rows=rows).returncode)
+        # 研究推論固定 xhigh：低了找不到原因，max 的花費留給升檔重做。
+        self.assertEqual(2, self.dispatch("lt-researcher-high", prompt, rows=rows).returncode)
+        self.assertEqual(2, self.dispatch("lt-researcher-max", prompt, rows=rows).returncode)
+        # 第 1 次不合格還輪不到研究，先升兩檔重做。
+        self.assertEqual(2, self.dispatch("lt-researcher-xhigh", prompt, rows=(("WP-1", 1),)).returncode)
+        tool = {"subagent_type": "lt-researcher-xhigh", "model": "haiku", "prompt": prompt}
         gate = Gate([user(SKILL_ROW)], state(rows=rows))
         self.addCleanup(gate.close)
-        result = gate.run(hook_event_name="PreToolUse", tool_name="Agent", tool_input=tool)
-        self.assertEqual(2, result.returncode)
+        self.assertEqual(2, gate.run(hook_event_name="PreToolUse", tool_name="Agent", tool_input=tool).returncode)
 
     def test_state_table_is_authoritative_over_the_prompt_header(self):
-        # 主線在派工表頭少寫錯誤次數時，以狀態檔為準，避免藉表頭把錯 2 的包當新包重派。
-        self.assertEqual(0, self.dispatch("lt-tech-worker-xhigh", WP.format(errors=0), rows=(("WP-1", 2),)).returncode)
+        # 主線在派工表頭少寫錯誤次數時，以狀態檔為準，避免藉表頭把第 2 次不合格的包當新包、跳過研究重派。
+        result = self.dispatch("lt-tech-worker-xhigh", WP.format(errors=0), rows=(("WP-1", 2),))
+        self.assertEqual(2, result.returncode)
+        self.assertIn("lt-researcher-xhigh", result.stderr)
 
     def test_unknown_error_count_passes_with_a_note_instead_of_guessing(self):
         result = self.dispatch("lt-tech-worker-high", WP.format(errors=0).replace("目前錯誤次數=0；", ""), rows=None)
@@ -232,14 +246,14 @@ class StateLocationTests(unittest.TestCase):
         self.assertIn("[共用資源]", result.stderr)
 
     def test_error_count_comes_from_the_task_that_owns_the_work_package_file(self):
-        # 表頭說 0、狀態檔說 1：以 wp 檔所屬任務的狀態檔為準——升到 high 合規，跳到 xhigh 是越級。
+        # 表頭說 0、狀態檔說 1：以 wp 檔所屬任務的狀態檔為準——升兩檔到 xhigh 合規，跳到 max 是越級。
         self.write(errors=1)
-        self.assertEqual(0, self.dispatch("lt-tech-worker-high").returncode)
-        result = self.dispatch("lt-tech-worker-xhigh")
+        self.assertEqual(0, self.dispatch("lt-tech-worker-xhigh").returncode)
+        result = self.dispatch("lt-tech-worker-max")
         self.assertEqual(2, result.returncode)
-        self.assertIn("應派 lt-tech-worker-high", result.stderr)
-        self.write(errors=3)
-        self.assertIn("主線接手", self.dispatch("lt-tech-worker-xhigh").stderr)
+        self.assertIn("最高派 lt-tech-worker-xhigh", result.stderr)
+        self.write(errors=2)
+        self.assertIn("lt-researcher-xhigh", self.dispatch("lt-tech-worker-xhigh").stderr)
 
     def test_question_gate_reads_the_state_file_this_session_works_on(self):
         # 任務已 PASS 的對話要能正常問使用者；找不到狀態檔就會把它當進行中而擋下。
@@ -287,9 +301,9 @@ class RunFindingsTests(unittest.TestCase):
     def test_a_tier_block_names_both_counts_when_header_and_state_disagree(self):
         prompt = WP.format(errors=0)
         result = self.gate([user(SKILL_ROW)]).run(hook_event_name="PreToolUse", tool_name="Agent",
-                                                  tool_input={"subagent_type": "lt-tech-worker-xhigh", "prompt": prompt, "description": "wp"})
+                                                  tool_input={"subagent_type": "lt-tech-worker-max", "prompt": prompt, "description": "wp"})
         self.assertEqual(2, result.returncode)
         self.assertIn("狀態檔工作包表", result.stderr)
-        self.assertIn("記錯誤 1 次", result.stderr)
+        self.assertIn("記本輪不合格 1 次", result.stderr)
         self.assertIn("表頭寫 0 次", result.stderr)
-        self.assertIn("應派 lt-tech-worker-high", result.stderr)
+        self.assertIn("最高派 lt-tech-worker-xhigh", result.stderr)

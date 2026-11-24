@@ -10,13 +10,16 @@ const who=(id,binding)=>id===binding.executorId?'執行對話':id===binding.supe
 const cell=value=>String(value??'').replace(/\|/g,'／').replace(/\s+/g,' ').slice(0,160);
 // A question push that did not get through is on the page until one does (Jay 2026-11-09: GDB's 6 never left unseen).
 const pushLine=problem=>'- 題目推播到你手機：'+(problem?clock(Date.parse(problem.at))+' 沒送出（'+cell(problem.error).slice(0,100)+'）；每 10 分鐘自動重試，最多 3 次，監督下一則回覆會說明':'沒有失敗');
-// What the supervisor decided in Jay's place, newest first, each with the way back (Jay 2026-11-09).
-function delegatedLines(delegated=[]){
-  const lines=['','## 監督已代決（'+delegated.length+' 項）',''];
-  if(!delegated.length)return [...lines,'目前沒有。'];
-  return [...lines,'監督依規格先決定、不等你；要改回直接跟監督說。'+(delegated.length>20?'這裡列最近 20 項，完整清單在 run 目錄的 pending-decisions.json。':''),'',
+// What the supervisor decided in Jay's place, newest first, each with the way back (Jay 2026-11-09). Delegations are
+// not pushed: they stay in the task's closing report, which lists every one once the run is accepted (Jay 2026-11-24
+// 「只要留在他的專案裡面的結案報告，或者是當我詢問的時候」).
+function delegatedLines(delegated=[],closing=false){
+  const lines=['',closing?'## 結案報告：監督代決的全部事項（'+delegated.length+' 項）':'## 監督已代決（'+delegated.length+' 項）',''];
+  if(!delegated.length)return [...lines,closing?'這個任務沒有代決。':'目前沒有。'];
+  const shown=closing?delegated:delegated.slice(0,20);
+  return [...lines,'監督依規格先決定、不等你；要改回直接跟監督說。'+(shown.length<delegated.length?'這裡列最近 20 項，完整清單在 run 目錄的 pending-decisions.json。':''),'',
     '| 決定的事 | 監督的選擇 | 依據 | 怎麼改回 | 時間 |','|---|---|---|---|---|',
-    ...delegated.slice(0,20).map(item=>'| '+cell(item.ask)+' | '+cell(item.choice)+' | '+cell(item.basis)+' | '+cell(item.revert)+' | '+clock(Date.parse(item.at))+' |')];
+    ...shown.map(item=>'| '+cell(item.ask)+' | '+cell(item.choice)+' | '+cell(item.basis)+' | '+cell(item.revert)+' | '+clock(Date.parse(item.at))+' |')];
 }
 // The model order the watcher applies (Jay 2026-11-21), in the words Jay used: how much Claude is kept for the Opus
 // supervisor, whether the API key is out for the month, whether an open-source route is left, and acceptances an
@@ -67,7 +70,7 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},push
   else lines.push('目前沒有要你決定的事。');
   // A run started before the ledger: its free-text approvals until the supervisor registers what is still open.
   if(ledger.legacy)lines.push('','舊版決策記下、監督還沒重新登記的待核准：',...ledger.legacy.pendingApprovals.map(item=>'- '+cell(item)));
-  lines.push(...delegatedLines(ledger.delegated));
+  lines.push(...delegatedLines(ledger.delegated,state.phase==='accepted'));
   lines.push('','## 驗收條件（共 '+items.length+' 條，通過 '+passed+'，未通過 '+open.length+'）','');
   if(items.length)lines.push('| 條件 | 狀態 |','|---|---|',...items.map(item=>'| '+item.id+' | '+item.status+' |'));
   else lines.push('派工快照還沒有逐條驗收狀態。');

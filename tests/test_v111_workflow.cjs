@@ -357,7 +357,7 @@ test('a confirmed continuation reopens its own collected package exactly once wi
   const f=isolated(t),id='12345678-1234-4321-9123-123456789abc',agentPath='/root/assigned';
   const file=f.makeWP('WP-A',[],{list:'inFlight',handle:agentPath});
   f.snapshotFromWP();
-  ok(f.collect('WP-A',{status:{list:'returned',integrated:true,resultEvidence:[f.source]}}));
+  ok(f.collect('WP-A',{verdict:{kind:'adopt'},status:{list:'returned',integrated:true,resultEvidence:[f.source]}}));
   const past=new Date(Date.now()-20000),start=new Date(Date.now()-10000);
   fs.utimesSync(file,past,past);
   const day=start.toISOString().slice(0,10);
@@ -376,4 +376,22 @@ test('a confirmed continuation reopens its own collected package exactly once wi
   assert.equal(current.baseline.startedAt,start.toISOString());
   assert.deepEqual(current.resultEvidence,[f.source]);
   refused(sync('retry'));assert.deepEqual(read(f.snapshot).packages.inFlight[0],current);
+});
+
+// 送審 in one step (Jay 2026-11-23「2A」): 25 of 85 rulings met a submission no package carried, because registering the
+// version on its packages was a separate hand step. The tool writes the manifest and the registration together, and
+// prints the event only when both worked.
+test('a submission registers its version on the named packages in the same step, or leaves nothing behind',t=>{
+  const f=isolated(t),file=f.makeWP('WP-S',[],{list:'inFlight',handle:'/root/worker'});
+  f.makeWP('WP-DONE',[],{list:'completed',evidence:[f.source]});
+  f.snapshotFromWP();
+  const manifest=path.join(f.root,'submit-1.json'),result=f.call('candidate.cjs',f.run,f.root,'WP-S',manifest,f.source);ok(result);
+  const event=JSON.parse(result.stdout.trim().slice('LONG_TASK_EVENT '.length));
+  assert.equal(event.kind,'submission');assert.equal(event.revision,'sha256:'+sha(manifest));assert.equal(event.manifest,manifest);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file,'utf8').match(/^\[狀態\] (.*)$/m)[1]).submission,{revision:event.revision,manifest});
+  assert.equal(read(f.snapshot).packages.inFlight.find(p=>p.id==='WP-S').submission.revision,event.revision);
+  const second=path.join(f.root,'submit-2.json'),late=f.call('candidate.cjs',f.run,f.root,'WP-DONE',second,f.source);
+  refused(late);assert.match(late.stderr,/已是 completed/);assert.equal(fs.existsSync(second),false,'no manifest is left for a submission that was not registered');
+  assert.equal(late.stdout.trim(),'','no event is printed');
+  refused(f.call('candidate.cjs',second,f.source));
 });

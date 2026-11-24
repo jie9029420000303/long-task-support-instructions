@@ -19,7 +19,12 @@ function fixture(scripts){
   const input=path.join(run,'input.json');
   const write=()=>{save(input,snapshot);return execFileSync(process.execPath,[path.join(scripts,'dispatch.cjs'),'write',run,input],{stdio:'pipe'});};
   const attempt=(id,outcome='INCONCLUSIVE',caseId='Q09')=>{snapshot.acceptance.items[0].lastAttempt={id,caseId,revision:snapshot.acceptance.revision,outcome,reason:'measured result',evidence:['result:'+id],startedAt:'2026-10-03T10:00:00Z',finishedAt:'2026-10-03T10:02:00Z'};write();};
-  return {run,binding,snapshot,write,attempt,close:()=>fs.rmSync(run,{recursive:true,force:true})};
+  // Unsuccessful deliveries are counted per criterion in the same journal (rework.cjs): the executor's quality failure
+  // and the supervisor's "not passed this time" both land as verdict rows; research registration lands as a reset row.
+  const journal=row=>fs.appendFileSync(path.join(run,'acceptance-history.jsonl'),JSON.stringify(row)+'\n');
+  const fail=(packageId,source='executor')=>journal({kind:'verdict',criterionId:'A1',outcome:'FAIL',source,packageId,reason:'measured shortfall',at:new Date().toISOString()});
+  const reset=()=>journal({kind:'reset',criterionId:'A1',mode:'research',cycle:1,directCauses:['a','b'],commonCause:'c',at:new Date().toISOString()});
+  return {run,binding,snapshot,write,attempt,fail,reset,close:()=>fs.rmSync(run,{recursive:true,force:true})};
 }
 test('both adapters ship the same deterministic acceptance audit',()=>assert.deepEqual(fs.readFileSync(path.join(roots[0],'acceptance-audit.cjs')),fs.readFileSync(path.join(roots[1],'acceptance-audit.cjs'))));
 for(const scripts of roots){
@@ -30,13 +35,15 @@ for(const scripts of roots){
       f.snapshot.acceptance.items[0].lastAttempt.outcome='PASS';assert.throws(f.write,/Command failed/);assert.equal(a.summarize(f.run,JSON.parse(fs.readFileSync(path.join(f.run,'dispatch.json'))).acceptance).items[0].cases[0].passAttempts,0);
     }finally{f.close();}
   });
-  test(label+': changing plan wording and package IDs cannot conceal recurring failures; different cases stay separate',()=>{
+  // The retry is always a new package (2,792 live packages, every retry renamed): the count must follow the criterion.
+  test(label+': renamed packages and mixed executor/supervisor failures cannot conceal a criterion failing twice; research starts a new count',()=>{
     const f=fixture(scripts),audit=require(path.join(scripts,'dispatch-audit.cjs')),state={};
-    try{f.attempt('t1');f.attempt('t2','FAIL','Q10');assert.equal(audit.inspect(f.run,f.binding,state).issues.filter(i=>i.kind.startsWith('acceptance_')).length,0);
-      f.snapshot.planningRevision='renamed';f.attempt('t3');const result=audit.inspect(f.run,f.binding,state);const rework=result.newIssues.find(i=>i.kind==='acceptance_rework');assert.ok(rework);assert.equal(rework.detail.caseId,'Q09');
-      audit.markAnnounced(state,audit.eventFor(result));f.attempt('t4');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0);
-      f.attempt('t5','PASS');assert.equal(audit.inspect(f.run,f.binding,state).issues.filter(i=>i.kind.startsWith('acceptance_')).length,0);
-      f.attempt('t6');f.attempt('t7');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,1);
+    const rework=()=>audit.inspect(f.run,f.binding,state).issues.filter(i=>i.kind==='acceptance_rework');
+    try{f.write();f.fail('pkg-a');assert.equal(rework().length,0,'one failure is not yet a pattern');
+      f.fail('pkg-a-retry-renamed','supervisor');const result=audit.inspect(f.run,f.binding,state);const issue=result.newIssues.find(i=>i.kind==='acceptance_rework');assert.ok(issue);assert.deepEqual(issue.affected,['A1']);assert.equal(issue.detail.failures.length,2);
+      audit.markAnnounced(state,audit.eventFor(result));f.fail('pkg-a-third');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0,'one cycle is announced once');
+      f.reset();assert.equal(rework().length,0,'registered research resets the count');
+      f.fail('pkg-b');f.fail('pkg-c');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,1,'the next cycle is a new episode');
     }finally{f.close();}
   });
   test(label+': withdrawing PASS is actionable and stale advice is cancelled after evidence is restored',()=>{
@@ -76,7 +83,7 @@ for(const scripts of roots){
       fs.unlinkSync(journal);assert.throws(()=>a.summarize(f.run,f.snapshot.acceptance),/history is missing/);assert.equal(audit.inspect(f.run,f.binding,{}).issues[0].kind,'snapshot_invalid');assert.throws(f.write,/Command failed/);assert.equal(fs.existsSync(journal),false);assert.deepEqual(fs.readFileSync(path.join(f.run,'dispatch.json')),snapshot);
       const progress=f.snapshot.acceptance;delete f.snapshot.acceptance;assert.throws(f.write,/Command failed/);f.snapshot.acceptance=progress;
       fs.writeFileSync(journal,saved.toString().split('\n').slice(0,2).join('\n')+'\n');assert.throws(()=>a.summarize(f.run,f.snapshot.acceptance),/does not cover saved attempt/);assert.throws(f.write,/Command failed/);
-      fs.writeFileSync(journal,saved);f.write();assert.equal(a.summarize(f.run,f.snapshot.acceptance).items[0].cases[0].attempts,2);assert.ok(audit.inspect(f.run,f.binding,{}).issues.some(i=>i.kind==='acceptance_rework'));
+      fs.writeFileSync(journal,saved);f.write();assert.equal(a.summarize(f.run,f.snapshot.acceptance).items[0].cases[0].attempts,2);assert.ok(!audit.inspect(f.run,f.binding,{}).issues.some(i=>i.kind==='snapshot_invalid'));
     }finally{f.close();}
   });
   test(label+': custom snapshot paths enforce the same impact mapping and recovery checks',()=>{
@@ -86,9 +93,9 @@ for(const scripts of roots){
   });
   test(label+': recovery and a new rework episode remain actionable even when no poll sees the intermediate PASS',()=>{
     const f=fixture(scripts),audit=require(path.join(scripts,'dispatch-audit.cjs')),state={};
-    try{f.attempt('t1');f.attempt('t2');const first=audit.eventFor(audit.inspect(f.run,f.binding,state));audit.markAnnounced(state,first);
-      f.snapshot.acceptance.items[0].status='PASS';f.attempt('t3','PASS');f.snapshot.acceptance.items[0].status='INCONCLUSIVE';f.attempt('t4');f.attempt('t5');const second=audit.eventFor(audit.inspect(f.run,f.binding,state));assert.ok(second);assert.notEqual(first.id,second.id);assert.ok(second.issues.some(i=>i.kind==='acceptance_rework'));audit.markAnnounced(state,second);
-      f.attempt('t6');assert.equal(audit.eventFor(audit.inspect(f.run,f.binding,state)),null);
+    try{f.write();f.fail('p1');f.fail('p2');const first=audit.eventFor(audit.inspect(f.run,f.binding,state));audit.markAnnounced(state,first);
+      f.reset();f.fail('p3');f.fail('p4');const second=audit.eventFor(audit.inspect(f.run,f.binding,state));assert.ok(second);assert.notEqual(first.id,second.id);assert.ok(second.issues.some(i=>i.kind==='acceptance_rework'));audit.markAnnounced(state,second);
+      f.fail('p5');assert.equal(audit.eventFor(audit.inspect(f.run,f.binding,state)),null);
       f.snapshot.acceptance.items[0].status='PASS';f.attempt('t7','PASS');f.snapshot.acceptance.items[0].status='PENDING';f.write();assert.ok(audit.inspect(f.run,f.binding,state).newIssues.some(i=>i.kind==='acceptance_withdrawn'));
     }finally{f.close();}
   });
@@ -109,7 +116,7 @@ for(const scripts of roots){
 }
 test('real Claude watcher emits a review for journal-derived rework with an empty self-reported rework array',async()=>{
   const f=fixture(roots[0]),log=path.join(f.run,'executor.jsonl');fs.writeFileSync(log,'');f.binding.executorLog=log;save(path.join(f.run,'binding.json'),f.binding);save(path.join(f.run,'daemon-state.json'),{phase:'idle',executorOffset:0,seen:[],pending:null,reads:0});
-  f.attempt('t1');f.attempt('t2');
+  f.write();f.fail('p1');f.fail('p2','supervisor');
   const child=spawn(process.execPath,[path.join(roots[0],'claude-watch.cjs'),f.run],{stdio:['ignore','pipe','pipe']});let output='',errors='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>errors+=b);
   try{await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill();reject(Error('watcher timeout'));},10000);child.once('exit',code=>{clearTimeout(timer);code===0?resolve():reject(Error('watcher failed '+code+': '+errors));});});assert.match(output,/LONG_TASK_WAKE/);assert.ok(JSON.parse(fs.readFileSync(path.join(f.run,'daemon-state.json'))).pending.issues.some(i=>i.kind==='acceptance_rework'));}
   finally{child.kill();f.close();}

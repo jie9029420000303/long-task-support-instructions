@@ -1,6 +1,6 @@
 ---
 name: lt-tech-worker-xhigh
-description: 長任務 B 線技術實作子代理（sonnet／effort xhigh，錯 2 後重派檔）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：在授權範圍內實作前端邏輯、後端、資料整合、修復與必要測試，回報候選版與驗證輸出；主線驗收。
+description: 長任務 B 線技術實作子代理（sonnet／effort xhigh，不合格後升檔用）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：在授權範圍內實作前端邏輯、後端、資料整合、修復與必要測試，回報候選版與驗證輸出；主線驗收。
 model: sonnet
 effort: xhigh
 tools: Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, WebFetch, WebSearch, Skill, mcp__Claude_Browser

@@ -3,13 +3,18 @@
 // determine the role, model and supported reasoning level.
 const fs=require('node:fs');
 const {keyOf}=require('./model-fallback.cjs');
-const {tiers,efforts,identity,available,latest}=require('./model-catalog.cjs');
+const {efforts,identity,available,latest}=require('./model-catalog.cjs');
 const roles={executor:'high',general:'medium',ui:'low'};
 // A Sonnet general worker (A check, B technical, C research) starts at High (Jay 2026-11-23「子代理sonnet 改為high」:
 // AA rates Sonnet High 41.5 overall and 25.7% on coding, Medium 30.8 and 11.0%). GPT workers keep Medium and
-// interface work keeps Low. The failure steps start from this level, so a Sonnet package goes High, xhigh, max.
+// interface work keeps Low. The failure step starts from this level, so a Sonnet package goes High, then max.
 const sonnetGeneral='high';
 const baseline=(role,model)=>role==='general'&&identity(model)?.tier==='sonnet'?sonnetGeneral:roles[role];
+// After an unsuccessful delivery (Jay 2026-11-23 21:50, 23:03): the first raises the same model two reasoning steps,
+// at most max, in a new subagent (followup_task cannot change the effort); the second goes to research at xhigh and
+// the research returns to the second attempt's subagent with the count reset. A reset never lowers the effort. There
+// is no model change and no mainline takeover: the cycle repeats until the criterion passes. rework.cjs keeps the count.
+const CEILING='max',RESEARCH='xhigh';
 function resolve(input) {
   const main=identity(input.supervisorModel);
   if(!input.supervisorModel)throw Error('Provide the observed supervisor model ID');
@@ -28,9 +33,11 @@ function resolve(input) {
     const worker=role!=='executor', owner=worker?identity(input.executorModel||input.supervisorModel):main;
     const catalog=available(input.catalogs?.[worker?'subagent':'executor']||[]);
     const override=input.overrides?.[role]||{}, errors=worker?(input.errors||0):0;
-    if(!Number.isInteger(errors)||errors<0)throw Error('errors must be a nonnegative integer for this work package');
+    if(!Number.isInteger(errors)||errors<0||errors>1)throw Error('errors is the unsuccessful deliveries since the last reset of this criterion: 0 or 1 (the second goes to research)');
+    const research=worker&&input.research===true;
+    if(research&&errors)throw Error('A research worker starts its own count: omit errors');
+    if(input.previousEffort!==undefined&&!efforts.includes(input.previousEffort))throw Error('previousEffort must be one of '+efforts.join(', '));
     const unavailable=reason=>{result.roles[role]={status:'unavailable',reason};};
-    if(errors>=4){result.roles[role]={status:'takeover',reason:'Fourth unsuccessful delivery; execution mainline takes over'};continue;}
     const executorModel=input.executorModel||input.supervisorModel;
     if(worker && require('./openrouter-route.cjs').choices.some(r=>r.model===executorModel)){
       const requested=override.model||executorModel;
@@ -38,22 +45,17 @@ function resolve(input) {
       if(requested!==executorModel || !permitted || limited(requested) || (override.effort && override.effort!=='max')){
         unavailable('The approved upstream must be available in the actual worker inventory');continue;
       }
-      result.roles[role]={status:'ready',model:requested,effort:'max',basis:'execution-mainline',...(errors===3?{modelAtCeiling:true,effortAtCeiling:true}:{})};
+      // OpenCodex pins the open-source routes at max: a raise or a research worker stays there.
+      result.roles[role]={status:'ready',model:requested,effort:'max',basis:'execution-mainline',...(errors||research?{effortAtCeiling:true}:{}),...(errors?{newAgent:true}:{})};
       continue;
     }
     if(!owner){unavailable('Unknown execution mainline model family');continue;}
-    let tier=owner.family==='claude'?'sonnet':'terra';
+    const tier=owner.family==='claude'?'sonnet':'terra';
     // Every Claude role on the executor side uses the subscription path; the API key is kept for the supervisor
     // (Jay 2026-11-21), even when the supervisor itself runs on it.
     const provider=owner.family==='claude'?'anthropic/':owner.provider;
     if(worker&&owner.family==='claude'&&!claudeOk&&!override.model){
       unavailable('Claude 訂閱保留給監督：先不派新的 Claude 子代理，背景程式會把執行主線改用 Sol，之後子代理用 Terra');continue;
-    }
-    const previous=input.previousModel && identity(input.previousModel);
-    if(errors===3){
-      if(!previous || previous.family!==owner.family || !efforts.includes(input.previousEffort)){unavailable('Provide the last actual worker model and effort for escalation');continue;}
-      const ladder=tiers[owner.family], level=ladder.indexOf(previous.tier);
-      tier=ladder[Math.min(level+1,ladder.length-1)];
     }
     let basis=Object.keys(override).length?'explicit-user-override':'role-policy', restoreAfter;
     // The executor starts on subscription Sonnet under a Claude supervisor, or on Sol while the reserve holds.
@@ -76,23 +78,18 @@ function resolve(input) {
     if(!selected){unavailable('The requested enabled role/model is unavailable in this tool inventory');continue;}
     const supported=efforts.filter(e=>selected.efforts.includes(e));
     const base=baseline(role,selected.id);
-    let effort=override.effort||base;
+    const rank=e=>efforts.indexOf(e);
+    // The level the package last ran at; a reset keeps it.
+    const prior=worker&&input.previousEffort&&rank(input.previousEffort)>rank(base)?input.previousEffort:base;
+    const usable=supported.filter(e=>rank(e)<=rank(CEILING));
+    let effort=override.effort||(research?RESEARCH:prior), ceiling={};
     if(errors && !override.effort){
-      const prior=errors===3?input.previousEffort:base;
-      const higher=supported.filter(e=>efforts.indexOf(e)>efforts.indexOf(prior));
-      effort=higher[Math.min(higher.length,errors===3?1:errors)-1]||supported.at(-1);
-      if(efforts.indexOf(effort)<efforts.indexOf(prior)){unavailable('Escalation would reduce the previous effort');continue;}
+      const want=Math.min(rank(prior)+2,rank(CEILING));
+      effort=usable.filter(e=>rank(e)<=want).at(-1)||prior;
+      ceiling={newAgent:true,...(rank(effort)<=rank(prior)?{effortAtCeiling:true}:{})};
     }
     if(!supported.includes(effort)){unavailable('The selected model does not support '+effort);continue;}
-    let ceiling={};
-    if(errors===3){
-      if(identity(selected.id)?.tier!==tier){unavailable('The explicit model cannot satisfy this research escalation');continue;}
-      const effortStep=efforts.indexOf(effort)-efforts.indexOf(input.previousEffort);
-      const effortAtCeiling=effortStep===0 && effort===supported.at(-1);
-      if(effortStep<0 || (effortStep===0&&!effortAtCeiling)){unavailable('This research retry requires higher reasoning');continue;}
-      ceiling={modelAtCeiling:previous.tier===tier,effortAtCeiling};
-    }
-    result.roles[role]={status:'ready',model:selected.id,effort,basis,...ceiling,...(restoreAfter?{restoreAfter}:{})};
+    result.roles[role]={status:'ready',model:selected.id,effort,basis,...ceiling,...(research?{research:true}:{}),...(restoreAfter?{restoreAfter}:{})};
   }
   return result;
 }

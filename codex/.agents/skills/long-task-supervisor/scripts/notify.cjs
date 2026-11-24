@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Push a short notice to Jay's phone through his Telegram bot 「Jay的小秘書」 (Jay 2026-10-29: a stalled watch and a
-// batch of questions waiting on him both reach him there, not only inside a chat he may not have open).
+// Push a short notice to Jay's phone through his Telegram bot 「Jay的小秘書」 (Jay 2026-10-29: a stalled watch reaches
+// him there, not only inside a chat he may not have open). Question pushes are off unless notify.json sets
+// "questionPush":true: since 2026-11-23 Veda asks him the open items three times a day.
 // Model-free: the watcher, its parent and the system guard call it. A claim file per notice key makes each push
 // happen at most once even when two processes notice the same thing. The bot token stays in the macOS keychain and
 // the recipient in the user-level config (LONG_TASK_HOME/notify.json), never in a run or this repository. Messages
@@ -13,14 +14,20 @@ const retryMs=()=>Number(process.env.LONG_TASK_NOTIFY_RETRY_MS)||5000;
 const readJson=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
 const hide=text=>String(text||'').replace(/bot\d+:[\w-]+/g,'bot<token>');
 function settings(){const telegram=readJson(configFile())?.telegram;return telegram?.chatId&&telegram.keychainService?telegram:null;}
+// User-level switches that survive upgrades (Jay 2026-11-23): questionPush, default off; cycleAlertThread, the chat a
+// repeated-failure notice goes to, default Veda對接對話.
+const VEDA_THREAD='01a20825-2c0c-7283-9c42-9fed54e30683';
+const questionPush=()=>readJson(configFile())?.questionPush===true;
+const cycleAlertThread=()=>{const value=readJson(configFile())?.cycleAlertThread;return value===false?null:typeof value==='string'&&value.trim()?value.trim():VEDA_THREAD;};
 function token(telegram){
   if(process.env.LONG_TASK_TELEGRAM_TOKEN)return process.env.LONG_TASK_TELEGRAM_TOKEN; // tests only
   return execFileSync('security',['find-generic-password','-s',telegram.keychainService,'-a',telegram.keychainAccount||'','-w'],
     {encoding:'utf8',stdio:['ignore','pipe','ignore'],timeout:10000}).trim();
 }
 // One try and one retry (Jay 2026-10-29); the caller records a failure where Jay will see it. A push to Jay himself is
-// not an outside send, so no task ban or switch turns it off for a real run (Jay 2026-11-09: GDB started its watcher
-// with LONG_TASK_NOTIFY_DISABLE=1 and none of its 6 question pushes left); the switch only quiets test runs below.
+// not an outside send, so no task ban or environment switch turns it off for a real run (Jay 2026-11-09: GDB started
+// its watcher with LONG_TASK_NOTIFY_DISABLE=1 and none of its 6 pushes left); the switch only quiets test runs below.
+// Only Jay's own questionPush setting turns question pushes off.
 async function post(text){
   const telegram=settings();
   if(!telegram)return {ok:false,attempts:0,error:'not_configured: '+configFile()};
@@ -74,12 +81,12 @@ function configure(service,account,source){
     configuredAt:new Date().toISOString()}},null,2)+'\n',{mode:0o600});
   return {configured:true,file:configFile()};
 }
-module.exports={post,sendOnce,sent,mark,settings,configFile,home};
+module.exports={post,sendOnce,sent,mark,settings,configFile,home,questionPush,cycleAlertThread,VEDA_THREAD};
 if(require.main===module){
   const [command,...args]=process.argv.slice(2);
   (async()=>{
     const result=command==='configure'?configure(...args)
-      :command==='status'?{configured:Boolean(settings()),file:configFile()}
+      :command==='status'?{configured:Boolean(settings()),file:configFile(),questionPush:questionPush(),cycleAlertThread:cycleAlertThread()}
       :command==='test'?await post(args.join(' ')||'【測試】長任務監督推播測試，不用處理。')
       :(()=>{throw Error('Commands: status, test [TEXT], configure KEYCHAIN_SERVICE KEYCHAIN_ACCOUNT SOURCE_JSON');})();
     console.log(JSON.stringify(result));

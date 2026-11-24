@@ -42,8 +42,8 @@ function validateSnapshot(value, previous, run, binding) {
     for(const row of newRulings){
       const verified=delivered(run,binding,item.id,row);
       need(old?.submission?.revision===row.revision && old.submission.manifest===verified.event.manifest &&
-        JSON.stringify(row.accepted)===JSON.stringify(verified.row.accepted) && JSON.stringify(row.remaining)===JSON.stringify(verified.row.remaining),'Unverified or superseded package ruling: '+item.id);
-      need(!row.remaining.length || list!=='completed','Partial acceptance cannot close the package');
+        ['accepted','failed','remaining'].every(k=>JSON.stringify(row[k]||[])===JSON.stringify(verified.row[k]||[])),'Unverified or superseded package ruling: '+item.id);
+      need(!open(row) || list!=='completed','Partial acceptance cannot close the package');
     }
     if(item.submission && JSON.stringify(old?.submission)!==JSON.stringify(item.submission)){
       const {revision,manifest}=item.submission;
@@ -55,16 +55,8 @@ function validateSnapshot(value, previous, run, binding) {
   }
   for(const item of before.values())need(!item.submission && !item.answers?.some(r=>r.gap),'Resolve open evidence or submission before removing '+item.id);
 }
-function requireScope(run,binding,event,decision){
-  if(event.kind!=='submission'||!['reply','reject'].includes(decision.disposition))return;
-  const file=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
-  if(!fs.existsSync(file))return;
-  const scoped=entries(read(file)).filter(({item})=>item.submission?.revision===event.revision && item.submission.manifest===event.manifest);
-  const supplied=decision.packageRulings||[];
-  if(scoped.length || supplied.length){
-    need(scoped.length===supplied.length && scoped.every(({item})=>supplied.some(r=>r.id===item.id)), 'Match each ruling to its submitted package and revision');
-  }
-}
+// A ruling with failed or remaining criteria leaves the package open.
+const open=row=>Boolean(row.remaining.length||(row.failed||[]).length);
 function delivered(run,binding,id,{eventId,revision}){
   const entry=commits.readSnapshot(run,eventId);
   need(entry && entry.contractSha256===binding.contractSha256, 'No committed ruling for this contract');
@@ -75,7 +67,8 @@ function delivered(run,binding,id,{eventId,revision}){
     receipt.target===binding.executorId && receipt.confirmed===true && receipt.promptSha256===digest(entry.decision.reply),'Ruling delivery or revision mismatch');
   const rows=entry.decision.packageRulings;
   const row=Array.isArray(rows) && rows.find(r=>r.id===id);
-  need(row && strings(row.accepted) && strings(row.remaining) && !row.accepted.some(k=>row.remaining.includes(k)), 'No matching package ruling');
+  need(row && strings(row.accepted) && strings(row.remaining) && strings(row.failed||[]) && new Set([...row.accepted,...row.remaining,...(row.failed||[])]).size===
+    row.accepted.length+row.remaining.length+(row.failed||[]).length, '監督這筆裁決沒有 '+id+' 的逐包裁決：照裁決回覆的內容另起工作或重新送審，不要用 collect 套用這筆裁決');
   return {row,event};
 }
 function apply(run,binding,id,before,result){
@@ -91,9 +84,9 @@ function apply(run,binding,id,before,result){
     return;
   }
   need(before.submission?.revision===revision && before.submission.manifest===event.manifest, 'Ruling is for a different package submission');
-  need(!row.remaining.length || !['completed','archived'].includes(result.state.list), 'Partial acceptance cannot close the package');
+  need(!open(row) || !['completed','archived'].includes(result.state.list), 'Partial acceptance cannot close the package');
   need(!result.updates.some(update=>update.status==='PASS' && !row.accepted.includes(update.id)), 'Only accepted criteria can pass');
   delete result.state.submission;
-  result.state.appliedRulings=[...(before.appliedRulings||[]),{eventId,revision,accepted:row.accepted,remaining:row.remaining}];
+  result.state.appliedRulings=[...(before.appliedRulings||[]),{eventId,revision,accepted:row.accepted,...(row.failed?.length?{failed:row.failed}:{}),remaining:row.remaining}];
 }
-module.exports={checkAnswers,validateSnapshot,requireScope,apply,entries};
+module.exports={checkAnswers,validateSnapshot,apply,entries};

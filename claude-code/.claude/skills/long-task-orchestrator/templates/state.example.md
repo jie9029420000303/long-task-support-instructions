@@ -37,7 +37,7 @@
 | 介面操作 | lt-ui-tester-low | claude-sonnet-5（transcript 13/13 則） | low（transcript 13/13 則） | 2026-09-14 23:55 | 已核對 |
 
 ## 工作包
-| id | 類型 | 負責定義 | 依賴 | 候選版 | 狀態 | 錯誤次數 | 目前檔 | 成果／證據位置 |
+| id | 類型 | 負責定義 | 依賴 | 候選版 | 狀態 | 本輪錯誤次數（研究登記後歸零） | 目前檔 | 成果／證據位置 |
 |---|---|---|---|---|---|---|---|---|
 | B-1 | B 技術 | lt-tech-worker-medium | — | e260982 | DONE→主線 PASS | 0 | medium | index.html；curl／node --check 輸出在回報 |
 | G-1 | B 技術（守門測試） | lt-tech-worker-medium | — | e260982 | PASS | 0 | medium | commit／tag 皆被 hook exit 2 擋下；git log 顯示 HEAD 不變、tag 數 0 |
@@ -51,7 +51,7 @@
 |---|---|---|---|
 
 ## 判定紀錄
-| 時間 | 工作包 | 判定（PASS／FAIL／品質錯誤 n／主線接手） | 依據證據（檔名＋候選版） |
+| 時間 | 工作包 | 判定（PASS／FAIL／品質錯誤 n／研究登記後歸零） | 依據證據（檔名＋候選版） |
 |---|---|---|---|
 | 2026-09-14 23:56 | B-1 | PASS | curl 取回三個判準字串、node --check OK（回報原文）、e260982 |
 | 2026-09-14 23:57 | G-1 | PASS | hook 訊息原文 ×2、git log 原文（HEAD e260982、無 tag） |

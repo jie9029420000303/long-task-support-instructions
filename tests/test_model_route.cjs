@@ -12,19 +12,21 @@ function published(t,body){
 test('a Claude supervisor starts the executor and its workers on subscription Sonnet at their baseline efforts',()=>{
  const r=resolve(base());assert.deepEqual(Object.fromEntries(Object.entries(r.roles).map(([k,v])=>[k,[v.model,v.effort]])),{executor:[sonnet,'high'],general:[sonnet,'high'],ui:[sonnet,'low']});
 });
-// The failure steps start from the worker's own baseline: Sonnet goes High, xhigh, max; Terra keeps Medium, High, xhigh.
-test('a Sonnet general worker starts at High and a Terra general worker stays at Medium, each stepping up from there',()=>{
+// Jay 2026-11-23 21:50: the first unsuccessful delivery raises the same model two steps (at most max) in a new
+// subagent, because followup_task cannot change the effort. Sonnet High goes max, Terra Medium xhigh, interface Low high.
+test('a first failure raises the same model two reasoning steps, capped at max, in a new subagent',()=>{
  const wide=id=>({id,efforts:['low','medium','high','xhigh','max','ultra']}),terra='gpt-6.1-terra';
  const claude=errors=>resolve({supervisorModel:opus,roles:['general','ui'],catalogs:{subagent:[wide(sonnet)]},errors}).roles;
- assert.deepEqual([0,1,2].map(n=>claude(n).general.effort),['high','xhigh','max']);
- assert.deepEqual([0,1,2].map(n=>claude(n).ui.effort),['low','medium','high'],'interface work keeps its own baseline');
+ assert.deepEqual([0,1].map(n=>claude(n).general.effort),['high','max']);
+ assert.deepEqual([0,1].map(n=>claude(n).ui.effort),['low','high'],'interface work keeps its own baseline');
+ assert.equal(claude(1).general.newAgent,true,'the raise needs a new subagent');assert.equal(claude(0).general.newAgent,undefined);
+ assert.equal(claude(1).general.model,sonnet,'no model change');
  const gpt=errors=>resolve({supervisorModel:opus,executorModel:sol,roles:['general'],catalogs:{subagent:[wide(terra)]},errors}).roles.general;
- assert.deepEqual([0,1,2].map(n=>[gpt(n).model,gpt(n).effort]),[[terra,'medium'],[terra,'high'],[terra,'xhigh']]);
- // A catalog that stops at xhigh keeps the second failure there instead of lowering it.
- assert.equal(resolve({...base(),roles:['general'],errors:2}).roles.general.effort,'xhigh');
- // The third failure moves from the last actual effort to Opus one level up, as before.
- const third=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet),wide(opus)]},errors:3,previousModel:sonnet,previousEffort:'max'}).roles.general;
- assert.deepEqual([third.model,third.effort],[opus,'ultra']);
+ assert.deepEqual([0,1].map(n=>[gpt(n).model,gpt(n).effort]),[[terra,'medium'],[terra,'xhigh']]);
+ // A catalog that stops at xhigh raises as far as it goes; ultra is never chosen.
+ assert.equal(resolve({...base(),roles:['general'],errors:1}).roles.general.effort,'xhigh');
+ const top=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet)]},errors:1,previousEffort:'max'}).roles.general;
+ assert.deepEqual([top.effort,top.effortAtCeiling],['max',true]);
  // An explicit user effort still wins, and an explicit Opus worker without an effort keeps the general Medium.
  assert.equal(resolve({...base(),roles:['general'],overrides:{general:{effort:'medium'}}}).roles.general.effort,'medium');
  const explicit=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet),wide(opus)]},overrides:{general:{model:opus}}}).roles.general;
@@ -92,25 +94,19 @@ test('an executor-side Sonnet limit starts the executor on Sol',t=>{
  assert.deepEqual([r.roles.executor.model,r.roles.executor.basis,r.roles.executor.restoreAfter],[sol,'rate-limit-fallback',until]);
 });
 
-for(const [first,second,highest] of [
- ['gpt-6.1-terra','gpt-6.2-sol','gpt-6.2-astra'],
- ['anthropic/claude-sonnet-5-5','anthropic/claude-opus-5-5','anthropic/claude-fable-5-2']
-]){
- test('third failure raises model and reasoning, fourth assigns mainline: '+first,()=>{
-  const subagent=[first,second,highest].map(id=>({id,efforts:['low','medium','high','xhigh','max']}));
-  const input={supervisorModel:second,roles:['general'],catalogs:{subagent},errors:3,previousEffort:'xhigh'};
-  for(const [previousModel,target] of [[first,second],[second,highest],[highest,highest]]){
-    const row=resolve({...input,previousModel}).roles.general;
-    assert.equal(row.status,'ready');assert.equal(row.model,target);assert.equal(row.effort,'max');
-  }
-  const capped=resolve({...input,previousModel:highest,previousEffort:'max'}).roles.general;
-  assert.equal(capped.effort,'max');assert.equal(capped.modelAtCeiling,true);assert.equal(capped.effortAtCeiling,true);
-  const promoted=resolve({...input,previousModel:first}).roles.general;
-  assert.equal(promoted.modelAtCeiling,false);assert.equal(promoted.effortAtCeiling,false);
-  assert.equal(resolve({...input,previousModel:first,overrides:{general:{effort:'xhigh'}}}).roles.general.status,'unavailable');
-  assert.equal(resolve({...input,errors:4}).roles.general.status,'takeover');
- });
-}
+// The second failure goes to research at xhigh; the research returns to the second attempt's subagent and the count
+// resets without lowering its effort. There is no third-failure model change and no fourth-failure takeover.
+test('research runs at xhigh, a reset keeps the raised effort, and no count reaches a model change or takeover',()=>{
+ const wide=id=>({id,efforts:['low','medium','high','xhigh','max','ultra']}),terra='gpt-6.1-terra';
+ const research=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet)]},research:true}).roles.general;
+ assert.deepEqual([research.model,research.effort,research.research],[sonnet,'xhigh',true]);
+ assert.throws(()=>resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[wide(sonnet)]},research:true,errors:1}),/own count/);
+ for(const errors of [2,3,4])assert.throws(()=>resolve({...base(),roles:['general'],errors}),/0 or 1/);
+ // After the reset Terra's subagent ran at xhigh: it continues there, and its next failure raises to max.
+ const gpt=input=>resolve({supervisorModel:opus,executorModel:sol,roles:['general'],catalogs:{subagent:[wide(terra)]},previousEffort:'xhigh',...input}).roles.general;
+ assert.equal(gpt({}).effort,'xhigh');assert.equal(gpt({errors:1}).effort,'max');
+ assert.throws(()=>gpt({previousEffort:'turbo'}),/previousEffort/);
+});
 test('worker catalog uses visible numerically latest release of actual executor family',()=>{
  const catalog=[item('gpt-6.9-terra'),item('gpt-6.10-terra'),{...item('gpt-7.0-terra'),visibility:'hide'},item(sonnet)];
  const input={supervisorModel:opus,executorModel:'gpt-6.2-sol',roles:['general'],catalogs:{subagent:catalog}};

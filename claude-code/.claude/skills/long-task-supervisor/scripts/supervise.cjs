@@ -309,6 +309,8 @@ function decision() {
   const {pendingApprovals:_legacy, ...current} = input;
   const value=validateDecision(binding,contract,event,resolved ? current : input);
   if (resolved) return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true};
+  const rework=require('./rework.cjs');
+  rework.scope(run,binding,event,value);
   if (event.kind==='progress_review') need(state.progressReviewPreflight===event.id,'Progress review requires current preflight before delivery');
   const queue = value.disposition==='accept' ? executorQueue() : [];
   const newer = queue.filter(item => item.kind==='submission').map(item => item.id);
@@ -365,6 +367,7 @@ function decision() {
   }
   save(path.join(run,'daemon-state.json'),state);
   for (const item of queue) fs.rmSync(item.file, {force:true});
+  rework.recordRuling(run,event,value);
   return {eventId:value.eventId,disposition:value.disposition,valid:true,processed:true,
     ...(queue.length ? {closedWithAcceptance:queue.map(({id, kind}) => ({id, kind}))} : {})};
 }

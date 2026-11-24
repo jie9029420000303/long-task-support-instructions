@@ -1,7 +1,7 @@
 ---
-name: lt-visual-checker-opus-max
-description: 長任務 A 線視覺查核子代理（opus／effort max，錯 3 後重新研究與重試）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：客觀查核真實畫面的裁切、遮擋、溢出、可讀性、對齊、響應式與已鎖定規格，不改成品、不判定風格。
-model: opus
+name: lt-visual-checker-max
+description: 長任務 A 線視覺查核子代理（sonnet／effort max，不合格後升檔用）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：客觀查核真實畫面的裁切、遮擋、溢出、可讀性、對齊、響應式與已鎖定規格，不改成品、不判定風格。
+model: sonnet
 effort: max
 tools: Read, Glob, Grep, Bash, Skill, mcp__Claude_Browser
 color: purple

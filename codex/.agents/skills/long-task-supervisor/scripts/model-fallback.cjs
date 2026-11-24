@@ -249,7 +249,8 @@ function checkQuotaTurn(check,owner){
     context=null;
   }
 }
-const hitOf=(owner,row)=>({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),status:row.status,error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
+const hitOf=(owner,row)=>({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),status:row.status,
+  ...(connectionReset(row)?{connectionReset:true}:{}),error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
 function readRange(file,from,to){
   const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(to-from);
   try{fs.readSync(fd,buffer,0,buffer.length,from);}finally{fs.closeSync(fd);}
@@ -388,6 +389,24 @@ function publish(run,state,now=Date.now(),fourth=null){
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);
   return body;
 }
+// The notice names what actually happened (2026-11-23: ten notices said 額度限速 while no provider had refused for
+// quota). A waiting entry carries no refusal of its own: its route simply came free. silentMs is the watcher's window.
+function switchReason(hit,target,silentMs){
+  if(!hit)return '前面的順位 '+target+' 已可再用：';
+  if(hit.connectionReset)return 'OpenCodex 連線中斷（OpenCodex 自己回 429，不是額度被拒）：';
+  if(hit.silent)return '切換後 '+Math.round(silentMs/60000)+' 分鐘（不含電腦睡眠）沒有成功回應：';
+  if(hit.failure)return '目前模型連續出錯（'+String(hit.error||'').slice(0,80)+'）：';
+  if(hit.status===402)return 'OpenRouter 餘額不足：';
+  if(hit.status===429&&String(hit.model||'').startsWith('openrouter/'))return '開源順位短暫限速：';
+  if(hit.quotaReset||hit.status===429)return '額度限速：';
+  return '順位 '+target+' 已可使用：';
+}
+function restoreReason(limit){
+  const basis=limit?.basis;
+  if(basis===FAILURE_BASIS||basis===SILENT_BASIS||limit?.cooldown==='failure')return '原模型的失敗暫停已結束。';
+  if(basis===OPENROUTER_BASIS)return '原模型的短暫限速已結束。';
+  return '額度已恢復。';
+}
 module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,OPENROUTER_ACCOUNT,
   modelPolicy,finalReviewer,lastResort,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,migrateLimits,syncApiMonth,recordApiMonth,
-  chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish};
+  chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish,switchReason,restoreReason};

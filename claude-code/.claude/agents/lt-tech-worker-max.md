@@ -1,7 +1,7 @@
 ---
-name: lt-tech-worker-fable-max
-description: 長任務 B 線技術實作子代理（fable／effort max，錯 3 後重新研究與重試）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：在授權範圍內實作前端邏輯、後端、資料整合、修復與必要測試，回報候選版與驗證輸出；主線驗收。
-model: fable
+name: lt-tech-worker-max
+description: 長任務 B 線技術實作子代理（sonnet／effort max，不合格後升檔用）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：在授權範圍內實作前端邏輯、後端、資料整合、修復與必要測試，回報候選版與驗證輸出；主線驗收。
+model: sonnet
 effort: max
 tools: Read, Edit, Write, NotebookEdit, Glob, Grep, Bash, WebFetch, WebSearch, Skill, mcp__Claude_Browser
 color: blue

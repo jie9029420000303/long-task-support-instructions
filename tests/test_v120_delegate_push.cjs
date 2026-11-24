@@ -37,9 +37,10 @@ async function telegram({fail=0}={}){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   return {messages,url:'http://127.0.0.1:'+server.address().port,close:()=>new Promise(resolve=>server.close(resolve))};
 }
-function notifyEnv(root,api){
+// The question pushes below are Jay's opt-in (notify.json "questionPush":true); the default since 2026-11-23 is off.
+function notifyEnv(root,api,{questionPush=true}={}){
   const config=path.join(root,'notify.json');
-  save(config,{telegram:{keychainService:'qa.telegram',keychainAccount:'qa',chatId:'4242'}});
+  save(config,{telegram:{keychainService:'qa.telegram',keychainAccount:'qa',chatId:'4242'},...(questionPush?{questionPush:true}:{})});
   return {LONG_TASK_HOME:path.join(root,'home'),LONG_TASK_NOTIFY_CONFIG:config,LONG_TASK_TELEGRAM_TOKEN:'123:qa-token',LONG_TASK_TELEGRAM_API:api,LONG_TASK_NOTIFY_RETRY_MS:'10'};
 }
 // Ledger rows as the supervisor's pending command writes them.
@@ -56,19 +57,20 @@ test('both platforms ship the same notice, ledger and continuation modules',()=>
 });
 
 for(const [platform,dir] of [['codex',codex],['claude',claude]]){
-  test(platform+': a question push carries each question in full and what the supervisor decided in Jay\'s place',()=>{
+  // Delegated decisions stay in the closing report and on the dashboard (Jay 2026-11-24); the push carries questions only.
+  test(platform+': a question push carries each question in full and nothing the supervisor decided in Jay\'s place',()=>{
     const pending=require(dir+'/pending-decisions.cjs');
     const items=[open('r24','R24/R21 要 uat2、uat3 重新登入才能跑，要怎麼驗？',iso(0)),open('mail','寄信上限要多少？',iso(0),{options:[]})];
-    const {text:body,delegated:used}=pending.pushText('區分 Debug 與新功能需求',items,[delegated('timeout','測試逾時要設多久？',iso(0))]);
+    const body=pending.pushText('區分 Debug 與新功能需求',items);
     assert.match(body,/^【開發任務需要你決定】『區分 Debug 與新功能需求』有 2 題要你回答：/);
     for(const part of ['1. R24/R21 要 uat2、uat3 重新登入才能跑，要怎麼驗？','建議：A 照原條文驗','原因／影響：改驗收要你同意','選項：A 照原條文驗／B 列已知缺口',
-      '2. 寄信上限要多少？','直接在監督對話回覆','監督已依規格代決','測試逾時要設多久？：用 10 分鐘逾時','改回：跟監督說改回 30 分鐘'])assert.ok(body.includes(part),part);
+      '2. 寄信上限要多少？','直接在監督對話回覆'])assert.ok(body.includes(part),part);
+    assert.ok(!body.includes('代決'),'no delegated section');
     assert.ok(!body.split('\n\n').find(block=>block.startsWith('2. ')).includes('選項'),'a question without choices gets no empty choices line');
-    assert.deepEqual(used.map(item=>item.key),['timeout']);
     // Telegram takes 4096 characters: a long list stays under the limit and says how many more wait in the chat.
     const many=Array.from({length:40},(_,index)=>open('k'+index,'第 '+index+' 題：'+'很長的說明'.repeat(60),iso(0)));
-    const long=pending.pushText('長清單',many,[]);
-    assert.ok(long.text.length<=3800,String(long.text.length));assert.match(long.text,/另有 \d+ 題，請打開監督對話『長清單』查看。/);
+    const long=pending.pushText('長清單',many);
+    assert.ok(long.length<=3800,String(long.length));assert.match(long,/另有 \d+ 題，請打開監督對話『長清單』查看。/);
   });
 
   test(platform+': each question version is pushed once, and a failed push is retried and stays visible until one gets through',async()=>{
@@ -86,7 +88,7 @@ for(const [platform,dir] of [['codex',codex],['claude',claude]]){
       await new Promise(resolve=>setTimeout(resolve,60));
       const retried=await pending.pushOpen(run,{title:'監督'});
       assert.equal(retried.ok,true);assert.match(retried.key,/-r1$/);assert.equal(pending.pushProblem(run),null);
-      assert.match(api.messages.at(-1).text,/第一題[\s\S]*第二題[\s\S]*逾時要多久？/);
+      assert.match(api.messages.at(-1).text,/第一題[\s\S]*第二題/);assert.ok(!api.messages.at(-1).text.includes('逾時要多久？'),'a delegated decision is not pushed');
       assert.equal((await pending.pushOpen(run,{title:'監督'})).reason,'already_pushed');
       // Jay answers k1: k2 went out already, so nothing is pushed again.
       const items=read(path.join(run,'pending-decisions.json')).items;items[0].status='answered';ledger(run,items);

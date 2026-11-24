@@ -5,11 +5,12 @@ const path=require('node:path');
 const {parse,planningBasis,planReview}=require('./dispatch-audit.cjs');
 const acceptance=require('./acceptance-audit.cjs');
 const formal=require('./formal-case.cjs');
+const rework=require('./rework.cjs');
 // Dispatch is shared by both adapters. Only Codex commits version-bound package rulings.
 const review=require('./guard.cjs').packageReview?.();
 const workerStart=review?require('./worker-start.cjs'):null;
-const LISTS=['ready','inFlight','returned','blocked','completed','recurringRework'];
-const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]]] [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [PACKAGE_ID ABSOLUTE_RESULT_JSON ...] [same options]';
+const LISTS=['ready','inFlight','returned','blocked','completed'];
+const USAGE='Usage: dispatch.cjs write ABSOLUTE_RUN ABSOLUTE_INPUT_JSON | summary ABSOLUTE_RUN | reconcile ABSOLUTE_RUN | from-wp ABSOLUTE_RUN ABSOLUTE_STATE_DIR [--activity A] [--revision R] [--base ABSOLUTE_JSON] [--reviewed REASON] | mark ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID STATUS_JSON [--estimate MODEL[:OUTPUT_TOKENS[:TOOL_MINUTES]]] [same options] | collect ABSOLUTE_RUN ABSOLUTE_STATE_DIR PACKAGE_ID ABSOLUTE_RESULT_JSON [PACKAGE_ID ABSOLUTE_RESULT_JSON ...] [same options] | submit ABSOLUTE_RUN ABSOLUTE_STATE_DIR ABSOLUTE_MANIFEST PACKAGE_ID [PACKAGE_ID ...] (called by candidate.cjs)';
 
 // Work-package files are the bookkeeping (Jay 2026-10-15). In GDB v1.2.0 the main line spent 99 minutes and 506 turns
 // on records alone, rewriting snapshot JSON and a generator of its own by hand. Each wp/<id>.md carries one
@@ -30,6 +31,7 @@ function status(value,where){
 // 收包 (Jay 2026-10-29): taking a package back was four separate steps (status line, evidence, acceptance table,
 // snapshot), each a round of hand-written JSON. One result file now does all four: {"status":{list,...,evidence},
 // "acceptance":[{id,status,evidence,lastAttempt?}]}. Every path and ID is checked before anything is written.
+// A subagent's delivery also carries "verdict":{kind:adopt|fail|external,reason,criteria?} (rework.cjs).
 function collected(file){
   let input;try{input=JSON.parse(fs.readFileSync(file,'utf8'));}catch(error){throw Error('RESULT_JSON: '+error.message);}
   const state=status(input?.status,'RESULT_JSON status');
@@ -38,8 +40,11 @@ function collected(file){
   const paths=[...(state.evidence||[]),...updates.flatMap(item=>item?.evidence||[])].filter(item=>typeof item==='string'&&item.startsWith('/'));
   const missing=paths.filter(item=>!fs.existsSync(item));
   if(missing.length)throw Error('RESULT_JSON evidence does not exist: '+missing.join(', '));
-  return {state,updates,ruling:input.ruling};
+  return {state,updates,ruling:input.ruling,verdict:input.verdict};
 }
+// A delivery from a subagent: the package leaves flight from a subagent handle and no supervisor ruling is applied.
+const fromSubagent=(before,result)=>before.list==='inFlight'&&typeof before.handle==='string'&&before.handle!=='main'&&
+  !before.handle.startsWith('resource:')&&result.state.list!=='inFlight'&&!result.ruling;
 // Fewer bookkeeping calls (Jay 2026-11-12; A WebRPA's main line made 516 collect and 150 estimate calls in five days,
 // 160 collects within 3 minutes of another and 81 estimates next to a mark, each call carrying its whole context):
 // collect takes several packages in one validated write, and mark --estimate fills the in-flight baseline with the
@@ -160,12 +165,15 @@ function save(run,binding,value){
   if(workerStart){workerStart.fill(value,previous,binding,run);parse(value,binding);}
   review?.validateSnapshot(value,previous,run,binding);
   formal.dispatchCheck(run,value,previous);
+  rework.dispatchCheck(run,value,previous);
   acceptance.record(run,value.acceptance,output);
   fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{flag:'wx'});
   fs.renameSync(temporary,output);
   // A short line per write, so a finished run shows when work waited while packages were ready or criteria open.
   const ids=list=>(list||[]).map(item=>item.id);
-  fs.appendFileSync(path.join(run,'dispatch-history.jsonl'),JSON.stringify({at:new Date().toISOString(),planningRevision:value.planningRevision,activity:value.activity,
+  // writer: which conversation wrote it (2026-11-22 a subagent's writes read as the mainline's in its own audit).
+  const {thread,session}=rework.caller();
+  fs.appendFileSync(path.join(run,'dispatch-history.jsonl'),JSON.stringify({at:new Date().toISOString(),writer:{thread,session},planningRevision:value.planningRevision,activity:value.activity,
     ready:ids(value.packages.ready),inFlight:(value.packages.inFlight||[]).map(item=>({id:item.id,handle:item.handle})),blocked:ids(value.packages.blocked),
     openCriteria:(value.acceptance?.items||[]).filter(item=>!['PASS','EXCLUDED'].includes(item.status)).map(item=>item.id)})+'\n');
   return output;
@@ -176,8 +184,12 @@ try{
   const absolute=value=>path.isAbsolute(value||'');
   const positional=args.filter((value,at)=>!value.startsWith('--')&&!(at>0&&args[at-1].startsWith('--')));
   const valid={'resume-observed':workerStart&&absolute(positional[2])&&positional.length===5,write:absolute(positional[2]),summary:true,reconcile:true,'from-wp':absolute(positional[2]),mark:absolute(positional[2])&&positional[3]&&positional[4],
-    collect:absolute(positional[2])&&positional.length>=5&&positional.length%2===1&&positional.slice(3).every((value,at)=>at%2?absolute(value):Boolean(value))}[command];
+    collect:absolute(positional[2])&&positional.length>=5&&positional.length%2===1&&positional.slice(3).every((value,at)=>at%2?absolute(value):Boolean(value)),
+    submit:absolute(positional[2])&&absolute(positional[3])&&positional.length>=5}[command];
   if(!valid||!absolute(runArg)||(flag('base')!==undefined&&!absolute(flag('base'))))throw Error(USAGE);
+  // Only the execution mainline writes dispatch state (Jay 2026-11-23「4這一版就做」); the prompt line telling a
+  // subagent what it is stays as a reminder, the tool is the stop.
+  if(!['summary','reconcile'].includes(command))rework.mainlineOnly('改派工狀態（'+command+'）');
   const run=path.resolve(runArg),binding=JSON.parse(fs.readFileSync(path.join(run,'binding.json'),'utf8'));
   if(!binding.dispatchAudit?.enabled&&!fs.existsSync(path.join(run,'DISPATCH_AUDIT')))throw Error('Dispatch auditing is not attached to this run');
   if(command==='summary'){const snapshot=checked(run,binding,JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')));
@@ -198,7 +210,7 @@ try{
       try{return !JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')).packages.inFlight.some(item=>item.id===positional[3]&&item.handle===state.handle);}catch{return true;}})();
     if(starting){staggeredMs=machine.staggerWait(run);if(staggeredMs>0)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,staggeredMs);}
     acquire(run);
-    const overrides=[],updates=[];
+    const overrides=[],updates=[],counted=[];
     if(command==='resume-observed'){
       const snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));
       const [threadId,turnId]=positional.slice(3);
@@ -218,16 +230,24 @@ try{
       state.baseline={...require('./pace.cjs').baseline({model:agent.model},require('./pace.cjs').speed(agents)),startedAt:state.startedAt};
       overrides.push({file,state,text:text.replace(/^\[狀態\].*$/m,()=>'[狀態] '+JSON.stringify(state))});
     }
-    if(command==='mark'||command==='collect'){
-      const pairs=command==='collect'?positional.slice(3):[positional[3],positional[4]],dir=path.join(stateDir,'wp');
+    // 送審 (Jay 2026-11-23「2A」): candidate.cjs registers the submitted version on its packages in the same step.
+    const submission=command==='submit'?(()=>{const manifest=positional[3];
+      return {revision:'sha256:'+require('./guard.cjs').hash(manifest),manifest};})():null;
+    if(command==='mark'||command==='collect'||command==='submit'){
+      const dir=path.join(stateDir,'wp');
+      const pairs=command==='collect'?positional.slice(3):command==='submit'?positional.slice(4).flatMap(id=>[id,null]):[positional[3],positional[4]];
       for(let at=0;at<pairs.length;at+=2){
-        const id=pairs[at],result=command==='collect'?collected(pairs[at+1]):{state:estimated(binding,status(pairs[at+1],'STATUS_JSON'),flag('estimate')),updates:[]};
+        const id=pairs[at],result=command==='collect'?collected(pairs[at+1]):command==='submit'?{state:null,updates:[]}:{state:estimated(binding,status(pairs[at+1],'STATUS_JSON'),flag('estimate')),updates:[]};
         if(!/^[A-Za-z0-9_-]+$/.test(id))throw Error('Invalid work-package ID');
         const wpFile=[path.join(dir,id+'.md'),...fs.readdirSync(dir).filter(name=>name.endsWith('.md')).sort().map(name=>path.join(dir,name))]
           .find(file=>fs.existsSync(file)&&path.dirname(fs.realpathSync(file))===packageDir&&packageId(fs.readFileSync(file,'utf8'),file)===id);
         if(!wpFile)throw Error('No work-package file for '+id+' under '+dir);
         if(overrides.some(item=>item.file===wpFile))throw Error('Work package '+id+' is named twice in one collect');
         const text=fs.readFileSync(wpFile,'utf8'),before=JSON.parse(tagLine(text,'狀態')||'{}');
+        if(submission){
+          if(['completed','archived'].includes(before.list))throw Error('送審：'+id+' 已是 '+before.list+'，不能登記送審版本；改登記仍在進行的工作包，或先開新的工作包');
+          result.state={...before,submission};
+        }
         if(result.state.appliedRulings && JSON.stringify(result.state.appliedRulings)!==JSON.stringify(before.appliedRulings))throw Error('Use collect with the delivered ruling');
         if(before.appliedRulings)result.state.appliedRulings=before.appliedRulings;
         if(before.submission && !result.state.submission)result.state.submission=before.submission;
@@ -238,6 +258,8 @@ try{
           if(!review)throw Error('A Codex ruling requires a bound Codex run');
           review.apply(run,binding,id,before,result);
         }
+        if(command==='collect'&&fromSubagent(before,result))
+          counted.push(...rework.verdictRows(run,binding,{id,verdict:result.verdict,before,tagIds:listOf(tagLine(text,'驗收條目')),handle:before.handle}));
         const line='[狀態] '+JSON.stringify(result.state);
         overrides.push({file:wpFile,state:result.state,
           text:/^\[狀態\].*$/m.test(text)?text.replace(/^\[狀態\].*$/m,()=>line):/^\[工作包\].*$/m.test(text)?text.replace(/^\[工作包\].*$/m,match=>match+'\n'+line):line+'\n'+text});
@@ -265,9 +287,14 @@ try{
     for(const item of overrides){const temporary=item.file+'.tmp-'+process.pid;fs.writeFileSync(temporary,item.text,{flag:'wx'});fs.renameSync(temporary,item.file);}
     const counts=Object.fromEntries(LISTS.map(name=>[name,value.packages[name].length]));
     const written=save(run,binding,value);if(starting)machine.recordStart(run);
+    if(counted.length)fs.appendFileSync(path.join(run,'acceptance-history.jsonl'),counted.map(row=>JSON.stringify(row)).join('\n')+'\n');
+    const rework_=counted.length?rework.status(run).filter(row=>counted.some(c=>c.criterionId===row.criterionId)):[];
     console.log(JSON.stringify({written:true,path:written,planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding,run),
       ...(staggeredMs>0?{staggeredSeconds:Math.round(staggeredMs/1000)}:{}),
       ...(notes.length?{collectionNotes:notes}:{}),
+      ...(submission?{submission,event:'LONG_TASK_EVENT '+JSON.stringify({kind:'submission',...submission})}:{}),
+      ...(rework_.length?{rework:rework_.map(r=>({criterionId:r.criterionId,failures:r.failures,held:r.held,
+        next:r.held?'這條已累計 '+rework.LIMIT+' 次不合格：另派研究子代理（推論 xhigh，研究工作包不列這條），研究交回用 rework.cjs research 登記':'同一模型推論升兩檔（最高 max）開新的子代理重做，附這次的具體指正'}))}:{}),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}

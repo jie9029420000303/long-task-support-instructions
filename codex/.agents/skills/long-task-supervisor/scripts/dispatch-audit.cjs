@@ -5,7 +5,7 @@ const crypto=require('node:crypto');
 const acceptance=require('./acceptance-audit.cjs');
 const machine=require('./machine.cjs');
 
-const kinds=['ready_capacity','returned_unintegrated','resource_conflict','recurring_rework','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn','snapshot_mismatch','untracked_agent','main_work_review','unrecorded_activity_review','planning_review','dependency_ready_review'];
+const kinds=['ready_capacity','returned_unintegrated','resource_conflict','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn','snapshot_mismatch','untracked_agent','main_work_review','unrecorded_activity_review','planning_review','dependency_ready_review'];
 // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time).
 const DOC_BUDGET_RATIO=1.5;
 const nonEmpty=value=>typeof value==='string'&&value.trim();
@@ -28,7 +28,7 @@ function parse(snapshot,binding){
     need(p&&/^[a-f0-9]{64}$/.test(p.basis)&&nonEmpty(p.reason)&&contractState.notLater(contractState.exactTime(p.at)),'planningReview needs basis, reason and at (a time with date, time and zone, not later than now)');}
   need(snapshot.packages&&typeof snapshot.packages==='object','packages is required');
   const p=snapshot.packages;
-  for(const name of ['ready','inFlight','returned','blocked','completed','recurringRework'])records(p[name],name);
+  for(const name of ['ready','inFlight','returned','blocked','completed'])records(p[name],name);
   for(const item of [...p.ready,...p.inFlight,...p.blocked])resources(item.exclusiveResources,item.id);
   for(const item of p.ready){need(typeof item.independent==='boolean'&&typeof item.safe==='boolean',item.id+' needs independent and safe');need(Array.isArray(item.dependencies),item.id+' dependencies must be an array');evidence(item.evidence,item.id);}
   for(const item of p.inFlight){need(nonEmpty(item.handle),item.id+' needs a platform handle');evidence(item.evidence,item.id);
@@ -36,7 +36,6 @@ function parse(snapshot,binding){
   for(const item of p.returned){need(typeof item.integrated==='boolean',item.id+' needs integrated');evidence(item.resultEvidence,item.id);}
   for(const item of p.blocked){need(nonEmpty(item.kind),item.id+' needs kind');evidence(item.evidence,item.id);}
   for(const item of p.completed){need(Array.isArray(item.acceptanceIds),item.id+' acceptanceIds must be an array');evidence(item.evidence,item.id);}
-  for(const item of p.recurringRework){need(Number.isInteger(item.count)&&item.count>=2,item.id+' recurring count must be at least 2');evidence(item.evidence,item.id);}
   // The budget is 1.5x the measured development time; more needs the amendment where Jay allowed it.
   if(snapshot.docBudget!==undefined){const b=snapshot.docBudget;need(b&&contractState.notLater(contractState.exactTime(b.startedAt)),'docBudget.startedAt must be a time with date, time and zone, not later than now');
     need(Number.isFinite(b.devMinutes)&&b.devMinutes>0&&Number.isFinite(b.minutes)&&b.minutes>0,'docBudget.devMinutes and docBudget.minutes must be positive');
@@ -111,13 +110,12 @@ function derive(snapshot,binding,run){
   for(const item of p.inFlight)for(const claim of item.exclusiveResources||[]){const values=claims.get(claim.key)||[];values.push({id:item.id,kind:claim.kind});claims.set(claim.key,values);}
   for(const [resource,values] of [...claims].sort(([a],[b])=>a.localeCompare(b))){if(values.length>1)issues.push(issue('resource_conflict',values.map(value=>value.id),{resource,kinds:[...new Set(values.map(value=>value.kind))].sort()}));}
   for(const item of p.blocked.filter(item=>item.kind==='resource_conflict'))issues.push(issue('resource_conflict',[item.id],{resources:(item.exclusiveResources||[]).map(value=>value.key).sort()}));
-  for(const item of p.recurringRework)issues.push(issue('recurring_rework',[item.id],{count:item.count}));
   return issues;
 }
 // Compare only concrete, readable sources. A difference is a lead for the supervisor, not a violation or dispatch.
 function crossCheck(run,binding,snapshot,state,agents,coverage={}){
   const out=[],p=snapshot?.packages;if(!p)return out;
-  const lists=['ready','inFlight','blocked','returned','completed','recurringRework'];
+  const lists=['ready','inFlight','blocked','returned','completed'];
   const records=lists.flatMap(list=>(p[list]||[]).map(item=>({list,item})));
   const byId=new Map(records.map(({list,item})=>[item.id,{list,item}]));
   const dirs=new Set(),roots=(binding.allowedRoots||[]).map(root=>{try{return fs.realpathSync(root);}catch{return null;}}).filter(Boolean);
@@ -142,7 +140,7 @@ function crossCheck(run,binding,snapshot,state,agents,coverage={}){
       if(!/^[A-Za-z0-9_-]+\.md$/.test(name))continue;
       const file=path.join(dir,name);let wp,text;
       try{const real=fs.realpathSync(file);if(path.dirname(real)!==dir){incomplete=true;continue;}text=fs.readFileSync(real,'utf8');const m=/^\[狀態\][ \t]*(\{[^\n]*\})/m.exec(text);if(!m){incomplete=true;continue;}wp=JSON.parse(m[1]);}catch{incomplete=true;continue;}
-      if(!['ready','inFlight','blocked','returned','completed','recurringRework','archived'].includes(wp.list)){incomplete=true;continue;}
+      if(!['ready','inFlight','blocked','returned','completed','archived'].includes(wp.list)){incomplete=true;continue;}
       if(wp.list==='inFlight'&&!(typeof wp.handle==='string'&&wp.handle.trim())){incomplete=true;continue;}
       const headerLine=/^\[工作包\][ \t]*(.*)$/m.exec(text)?.[1]||'';
       const id=/id\s*[=＝]\s*([^；;\s]+)/.exec(headerLine)?.[1]||name.slice(0,-3);

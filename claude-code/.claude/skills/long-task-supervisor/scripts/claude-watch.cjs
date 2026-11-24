@@ -429,6 +429,11 @@ async function pushQuestions(){
     const result=await questions.pushOpen(run,{title:'Claude 的監督對話'});
     if(!result.skipped||result.error)state.questionPush={ok:result.ok,key:result.key||null,error:result.error||null,at:now()};
   }catch(error){state.questionPush={ok:false,error:error.message,at:now()};}
+  // The same criterion studied twice (then every two more) becomes an open item that Veda's thrice-daily summary
+  // lists until Jay answers (Jay 2026-11-24). This watcher has no Codex app connection, so the at-once message to
+  // Veda對接對話 is sent only by the Codex watcher; Claude runs reach him through the summary.
+  try{require('./rework.cjs').raiseAlerts(run,binding,{title:'Claude 的監督對話'});}
+  catch(error){state.cycleAlert={ok:false,error:error.message,at:now()};}
 }
 async function waitChange(){
   await new Promise(resolve=>{

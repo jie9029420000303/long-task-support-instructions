@@ -1,8 +1,8 @@
 ---
-name: lt-ui-tester-fable-xhigh
-description: 長任務介面子代理（fable／effort xhigh，錯 3 後重新研究與重試）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：按案例用真實點擊／輸入操作前台並截圖蒐證，回報 PASS／FAIL／BLOCKED，不改程式、案例或設計。
-model: fable
-effort: xhigh
+name: lt-ui-tester-max
+description: 長任務介面子代理（sonnet／effort max，不合格後升檔用）。只由 long-task-orchestrator 主線依狀態檔派工、不自動選用：按案例用真實點擊／輸入操作前台並截圖蒐證，回報 PASS／FAIL／BLOCKED，不改程式、案例或設計。
+model: sonnet
+effort: max
 tools: Read, Glob, Grep, Bash, Skill, mcp__Claude_Browser, mcp__playwright, mcp__chrome-devtools
 color: green
 hooks:

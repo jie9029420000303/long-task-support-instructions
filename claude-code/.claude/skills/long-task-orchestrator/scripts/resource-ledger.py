@@ -32,12 +32,12 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
            關閉並核對已停止；只動帳本內、啟動時間核對相符的資源，external 不動。
            --remove：停止後移除（容器連同匿名資料卷；worktree 另須 --integrated-into 候選版的 commit 或分支，分支不刪）。
            只移除所屬工作包已判定 PASS、且識別值不在驗收結果帳、evidence/ 與決策帳裡的資源；每筆先記進 deletions.md、
-           刪後讀回。FAIL 或主線接手的只停不刪。
+           刪後讀回。FAIL 或還沒判定的只停不刪。
   prune    --state S --wp ID [--search 路徑]… (-- 過程檔… | --none --reason 文字)
            工作包判定 PASS 後，真的刪掉（不進垃圾桶）它登記的工作資料夾裡可重建的過程檔：輸入複本、演練工作區、
            被新版取代的整套輸出、建置產物。路徑可寫絕對路徑或相對於該資料夾。逐項核對：在登記的資料夾裡面（不含資料夾
            本身）、不符合 --keep、沒被驗收結果帳、evidence/ 與決策帳引用、沒有程序在用；每筆先記進 deletions.md、
-           刪後讀回，不符的保留並說明。FAIL、主線接手或還沒判定的一律不刪。沒有可刪的用 --none --reason 記一筆。
+           刪後讀回，不符的保留並說明。FAIL 或還沒判定的一律不刪。沒有可刪的用 --none --reason 記一筆。
   wait     --timeout 30m [--interval 20s] -- 查核指令…
            每隔 interval 跑一次查核指令，exit 0 就結束；逾時 exit 124。逾時必填。
   check    --state S [--final]
@@ -85,6 +85,7 @@ CLOSE_KINDS = ("wp", "final", "acceptance", "external")
 NEEDS_REASON = {"acceptance", "external"}
 ACCEPTANCE_TTL = 72 * 3600
 ROW = re.compile(r"^\|(?!\s*:?-{3})")
+# 「主線接手」是 v1.14.0 以前狀態檔的判定字樣，舊紀錄照樣視為已判定未通過。
 JUDGED = re.compile(r"PASS|FAIL|主線接手")
 PASSED = re.compile(r"PASS")
 NOT_PASSED = re.compile(r"FAIL|主線接手")
@@ -1115,7 +1116,7 @@ def git(cwd, *argv):
 
 
 def package_passed(state_dir, wp):
-    """True＝判定 PASS；False＝FAIL、主線接手或還沒判定；None＝查不到這包。主線自己的資源（wp 寫「主線」）不經判定。"""
+    """True＝判定 PASS；False＝FAIL（含舊紀錄的主線接手）或還沒判定；None＝查不到這包。主線自己的資源（wp 寫「主線」）不經判定。"""
     if wp == "主線":
         return True
     found = None

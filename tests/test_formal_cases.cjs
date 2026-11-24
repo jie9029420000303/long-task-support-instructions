@@ -6,6 +6,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {spawnSync} = require('node:child_process');
 const roots = ['claude-code/.claude','codex/.agents'].map(p=>path.resolve(__dirname,'..',p,'skills/long-task-supervisor/scripts'));
+// Research registration is mainline-only; a test run from inside a Codex subagent must not look like one.
+delete process.env.CODEX_THREAD_ID;delete process.env.CODEX_SESSION_ID;
 const write = (file,value)=>fs.writeFileSync(file,JSON.stringify(value));
 const read = file=>JSON.parse(fs.readFileSync(file));
 const preflight = {target:'test-machine',...Object.fromEntries(['files','syntax','directories','receipt'].map(k=>[k,{ok:true,evidence:k}]))};
@@ -51,7 +53,7 @@ function fixture(t,scripts) {
 for (const scripts of roots) {
   const platform=scripts.includes('claude-code')?'Claude':'Codex';
   test(platform+' formal launch and journal recovery preserve separate cases and the target exit status',t=>{
-    const {p,snapshot,dispatch,request,formal,run}=fixture(t,scripts);
+    const {root,p,snapshot,dispatch,request,formal,run,call}=fixture(t,scripts);
     // Initial formal dispatch must check the target before allowing the first snapshot to be written.
     const work=snapshot.packages.inFlight[0];work.preflight={target:'wrong'};
     assert.match(dispatch(snapshot,1).stderr,/target, files, syntax, directories, receipt/);
@@ -64,41 +66,44 @@ for (const scripts of roots) {
     assert.ok(fs.existsSync(duplicateEvidence));
     const saved=read(p('a.receipt'));write(p('a.receipt'),{...saved,result:{...saved.result,status:'PASS'}});
     assert.match(run('a','PASS',0,1).stderr,/Conflicting receipt/);write(p('a.receipt'),saved);
-    // A new package ID and different failure reason still belong to the same case.
+    // A new package ID still counts toward the same criterion: two failed formal runs of C1 hold every case proving C1.
     const second=read(p('dispatch.json'));second.packages.inFlight[0].id='P2';dispatch(second);
-    request('b','suite-2','P2');run('b','INCONCLUSIVE');
-    request('c','suite-2','P2');assert.match(run('c','PASS',0,1).stderr,/external research/);
+    request('b','suite-2','P2');run('b','FAIL');
+    request('c','suite-2','P2');assert.match(run('c','PASS',0,1).stderr,/C1 已累計 2 次不合格/);
     assert.equal(fs.existsSync(p('c.permit')),false);
     const plan=JSON.parse(formal('select',[p('c.req')]).stdout);
-    assert.deepEqual(plan.allowed,[{caseId:'suite-1',receiptCase:'1'}]);assert.equal(plan.held[0].reason,'research');
+    assert.deepEqual(plan.allowed,[]);assert.deepEqual(plan.held.map(x=>x.reason),['research','research']);
     const newPackage=read(p('dispatch.json'));
-    Object.assign(newPackage.packages.inFlight[0],{id:'P3',caseIds:['suite-2'],caseMap:{'suite-2':'2'}});
-    assert.match(dispatch(newPackage,1).stderr,/Research required/);
     Object.assign(newPackage.packages.inFlight[0],{caseIds:['alias'],caseMap:{alias:'2'}});
     assert.match(dispatch(newPackage,1).stderr,/cannot be renamed/);
+    Object.assign(newPackage.packages.inFlight[0],{id:'P3',caseIds:['suite-2'],caseMap:{'suite-2':'2'}});
+    assert.match(dispatch(newPackage,1).stderr,/C1 已累計 2 次不合格，P3 先不派/);
+    const experiment=p('experiment');fs.writeFileSync(experiment,'Confirmed example');
+    const research={criterionId:'C1',directCauses:['receipt a: FAIL','receipt b: FAIL'],commonCause:'same candidate defect',workPackage:'P2',excluded:'different target excluded',
+      sources:[{url:'https://example.org/test',checkedAt:'2025-01-01T00:00:00Z'}],experiment,experimentPassed:true,solution:'use revised candidate'};
+    write(p('research.json'),{...research,experimentPassed:false});
+    assert.match(call('rework.cjs',['research',root,p('research.json')],1).stderr,/experiment/);
+    write(p('research.json'),{...research,directCauses:['receipt b: FAIL']});
+    assert.match(call('rework.cjs',['research',root,p('research.json')],1).stderr,/directCauses/);
+    write(p('research.json'),research);call('rework.cjs',['research',root,p('research.json')]);
     request('d','suite-1','P2');formal('reserve',[p('d.req'),p('d.permit')]);
     request('conflict','suite-1','P2');assert.match(run('conflict','PASS',0,1).stderr,/awaiting its receipt/);
     run('d','PASS');
-    const experiment=p('experiment');fs.writeFileSync(experiment,'Confirmed example');
-    const research={caseId:'suite-2',afterId:'b',workPackage:'P2',failure:'receipt b',excluded:'different target excluded',
-      sources:[{url:'https://example.org/test',checkedAt:'2025-01-01T00:00:00Z'}],experiment,experimentPassed:true,solution:'use revised candidate'};
-    write(p('research.json'),{...research,experimentPassed:false});
-    assert.match(formal('research',[p('research.json')],1).stderr,/experiment/);
-    write(p('research.json'),research);formal('research',[p('research.json')]);
-    run('c','FAIL');request('e','suite-2','P2');assert.match(run('e','PASS',0,1).stderr,/external research/);
-    assert.deepEqual(fs.readFileSync(p('starts'),'utf8').trim().split('\n'),['suite-2','suite-2','suite-1','suite-2']);
+    // After registration the count starts again: one more failure does not hold the next run.
+    run('c','FAIL');request('e','suite-2','P2');run('e','PASS');
+    assert.deepEqual(fs.readFileSync(p('starts'),'utf8').trim().split('\n'),['suite-2','suite-2','suite-1','suite-2','suite-2']);
     const attempts=fs.readFileSync(p('acceptance-history.jsonl'),'utf8').trim().split('\n').map(x=>JSON.parse(x)).filter(x=>x.kind==='attempt');
-    assert.equal(attempts.length,4);assert.equal(attempts[2].outcome,'PASS');
+    assert.equal(attempts.length,5);assert.equal(attempts[2].outcome,'PASS');
   });
-  test(platform+' one case result reused for multiple criteria counts only once; a late invalidated pass cannot clear subsequent failures',()=>{
-    const {failures,needsResearch}=require(path.join(scripts,'formal-case.cjs'));
-    const row={kind:'attempt',criterionId:'C1',caseId:'X',id:'a',outcome:'FAIL',revision:'r1',startedAt:'2025-01-01T00:00:00Z'};
-    const history=[row,{...row,criterionId:'C2'}],state={permits:[],research:[]};
-    assert.equal(needsResearch(history,state,row),false);
-    history.push({kind:'change',toRevision:'r2',affectedCaseIds:['X'],requiredRegressionCaseIds:[]},
-      {...row,id:'b',revision:'r2'},{...row,id:'old',outcome:'PASS'});
-    assert.deepEqual(failures(history,row).map(x=>x.id),['a','b']);assert.equal(needsResearch(history,state,row),true);
-    history.push({...row,revision:'r2',id:'c',outcome:'PASS'});
-    assert.equal(needsResearch(history,state,row),false);
+  // One measured failure must not hold a criterion by itself: the formal run and the mainline's judgment of the same
+  // delivery are the same failure.
+  test(platform+' a failed formal run and the mainline judging that package failed count once; another package counts again',t=>{
+    const {root,p}=fixture(t,scripts),rework=require(path.join(scripts,'rework.cjs')),binding=read(p('binding.json'));
+    fs.writeFileSync(p('acceptance-history.jsonl'),JSON.stringify({kind:'verdict',criterionId:'C1',outcome:'FAIL',source:'formal',packageId:'P1',attemptId:'a',reason:'FAIL',at:'2025-01-01T00:00:00Z'})+'\n');
+    const judge=id=>rework.verdictRows(root,binding,{id,verdict:{kind:'fail',reason:'result wrong',criteria:['C1']},before:{acceptanceIds:['C1']}});
+    assert.deepEqual(judge('P1'),[]);
+    assert.equal(judge('P2').length,1);
+    assert.deepEqual(rework.verdictRows(root,binding,{id:'P2',verdict:{kind:'external',reason:'machine offline'},before:{acceptanceIds:['C1']}}),[]);
+    assert.throws(()=>rework.verdictRows(root,binding,{id:'P2',verdict:{kind:'fail',reason:'x',criteria:['Z9']},before:{}}),/現行契約的驗收條文/);
   });
 }

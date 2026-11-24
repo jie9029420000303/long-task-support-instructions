@@ -81,7 +81,7 @@ for(const platform of ['codex','claude-code'])test('three source-backed discussi
       assert.equal(cli('reconcile',run).reviewRequired,false);
       assert.equal(platformAudit.inspect(run,binding,auditState).issues.some(x=>x.kind==='planning_review'),false);
     }
-    const result=path.join(root,'result.json');save(result,{status:{list:'completed',acceptanceIds:['A1'],evidence:[source]},acceptance:[{id:'A1',status:'PASS',evidence:[source]}]});
+    const result=path.join(root,'result.json');save(result,{verdict:{kind:'adopt'},status:{list:'completed',acceptanceIds:['A1'],evidence:[source]},acceptance:[{id:'A1',status:'PASS',evidence:[source]}]});
     const collected=cli('collect',run,root,'A',result);
     assert.deepEqual(collected.reconciliation.dependenciesReady,[{id:'B',dependencies:['A']}]);
     assert.equal(JSON.parse(fs.readFileSync(path.join(run,'dispatch.json'))).packages.blocked[0].id,'B');
