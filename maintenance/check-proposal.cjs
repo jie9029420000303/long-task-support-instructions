@@ -10,7 +10,8 @@ const path=require('node:path');
 const {execFileSync}=require('node:child_process');
 const QUESTIONS=[['origin','事實最早在哪一步產生'],['missed','為什麼沒在那一步被記下或擋下'],['replaces','取代或刪掉哪個既有機制']];
 const ONLY_ADDS=/只能新增|沒有取代|不取代|未取代/;
-const SKILLS=['codex/.agents/skills','claude-code/.claude/skills'];
+// What install-update.py installs: both platforms' skills plus Claude Code's subagent definitions and workflows.
+const SKILLS=['codex/.agents/skills','claude-code/.claude/skills','claude-code/.claude/agents','claude-code/.claude/workflows'];
 // One answer per question: the text after "<question>：" up to the next question label or the end of the item.
 function answers(body){
   const out={};
@@ -40,7 +41,7 @@ function check(text){
   });
   return {ok:!problems.length,items:checked,problems};
 }
-// How much the installed skills grew or shrank between two commits (the release lists it).
+// How much the installed files grew or shrank between two commits (the release lists it).
 function growth(repo,base,head='HEAD'){
   const git=args=>execFileSync('git',['-C',repo,...args],{encoding:'utf8'});
   let added=0,removed=0;

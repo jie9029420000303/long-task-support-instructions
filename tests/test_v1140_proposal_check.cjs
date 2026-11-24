@@ -37,11 +37,11 @@ test('the release lists how much the skills grew or shrank between two commits',
   const git=(...args)=>execFileSync('git',['-C',repo,...args],{encoding:'utf8'});
   const put=(rel,text)=>{fs.mkdirSync(path.dirname(path.join(repo,rel)),{recursive:true});fs.writeFileSync(path.join(repo,rel),text);};
   git('init','-q');git('config','user.email','qa@example.org');git('config','user.name','qa');
-  put('codex/.agents/skills/a/SKILL.md','one\ntwo\nthree\n');put('claude-code/.claude/skills/b/old.md','x\n');put('README.md','outside\n');
+  put('codex/.agents/skills/a/SKILL.md','one\ntwo\nthree\n');put('claude-code/.claude/skills/b/old.md','x\n');put('README.md','outside\n');put('claude-code/.claude/agents/lt-old.md','agent\n');
   git('add','.');git('commit','-qm','base');const base=git('rev-parse','HEAD').trim();
-  put('codex/.agents/skills/a/SKILL.md','one\n');put('codex/.agents/skills/a/new.md','n\n');fs.rmSync(path.join(repo,'claude-code/.claude/skills/b/old.md'));put('README.md','outside\nmore\n');
+  put('codex/.agents/skills/a/SKILL.md','one\n');put('codex/.agents/skills/a/new.md','n\n');fs.rmSync(path.join(repo,'claude-code/.claude/skills/b/old.md'));fs.rmSync(path.join(repo,'claude-code/.claude/agents/lt-old.md'));put('README.md','outside\nmore\n');
   git('add','-A');git('commit','-qm','next');
-  assert.deepEqual(growth(repo,base),{base,head:'HEAD',linesAdded:1,linesRemoved:3,netLines:-2,filesAdded:1,filesRemoved:1});
+  assert.deepEqual(growth(repo,base),{base,head:'HEAD',linesAdded:1,linesRemoved:4,netLines:-3,filesAdded:1,filesRemoved:2});
 });
 
 test('the command exits 1 on a failing proposal and checks this release\'s own proposal shape',t=>{
