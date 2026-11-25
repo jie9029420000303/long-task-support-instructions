@@ -154,6 +154,15 @@ async function stop(p){if(p.exitCode===null){p.kill('SIGKILL');await new Promise
  await until(()=>messages(retry).length===1,'original send before restart');await stop(held);
  const resumed=start(retry);await until(()=>read(path.join(retry.run,'daemon-state.json')).resolved?.[retry.id],'receipt reconciliation after restart');
  assert.equal(messages(retry).length,1);await stop(resumed);
+ // 2026-11-25 工區 E: the answer to an earlier event still waits in the executor's queue while a later event is pending.
+ // It is checked against its own submitted decision and confirmed from the readback, without a second send.
+ const earlier=setup('event7'), heldEarlier=start(earlier,{MOCK_HOLD_ANSWER:'1'});await until(()=>fs.existsSync(path.join(earlier.run,'native-ready.json')),'earlier ready');
+ fs.writeFileSync(earlier.draft,JSON.stringify({eventId:earlier.id,disposition:'reply',reply:'answer to the earlier event'}));assert.equal(send(earlier).status,0);
+ await until(()=>messages(earlier).length===1,'earlier answer sent before restart');await stop(heldEarlier);
+ const later=read(path.join(earlier.run,'daemon-state.json'));assert.equal(later.inflight.key,'answer-event7');
+ later.pending={id:'event8',kind:'question',text:'later event',at:'2026-11-01T00:05:00.000Z'};fs.writeFileSync(path.join(earlier.run,'daemon-state.json'),JSON.stringify(later));
+ const earlierWatch=start(earlier);await until(()=>!read(path.join(earlier.run,'daemon-state.json')).inflight,'earlier answer reconciled with a later event pending');
+ assert.equal(earlierWatch.exitCode,null,earlierWatch.errorText());assert.equal(messages(earlier).length,1,'confirmed, not resent');await stop(earlierWatch);
  // needs_user can be revised only after the watcher has acknowledged that intermediate disposition.
  const wait=setup('event5'), wp=start(wait);await until(()=>fs.existsSync(path.join(wait.run,'native-ready.json')),'wait ready');
  fs.writeFileSync(wait.draft,JSON.stringify({eventId:wait.id,disposition:'needs_user'}));assert.equal(send(wait).status,0);
@@ -164,5 +173,5 @@ async function stop(p){if(p.exitCode===null){p.kill('SIGKILL');await new Promise
  // Legacy in-flight answer with no submitted snapshot must stop without sending or resending.
  const legacy=setup('event3'),state=read(path.join(legacy.run,'daemon-state.json'));state.inflight={target:'exec',key:'answer-event3',prompt:'legacy payload',at:new Date().toISOString(),phase:'sending'};fs.writeFileSync(path.join(legacy.run,'daemon-state.json'),JSON.stringify(state));
  const lp=start(legacy);await until(()=>lp.exitCode!==null,'legacy reconciliation stop');assert.equal(messages(legacy).length,0);assert.match(lp.errorText(),/manual receipt reconciliation/);assert.equal(read(path.join(legacy.run,'daemon-state.json')).phase,'needs_reconcile');
- console.log('PASS: unsubmitted draft / simulated denied call, partial draft, submission, duplicate, post-submit edit, legacy watcher parallel and migration, rejected reminder and resubmission, missing/damaged snapshot duplicate rejection, restart deduplication and receipt recovery, needs_user revision, stopped run, submission lock and malformed watcher PID, unknown child prevents restart, first startup without ready, EPERM status and both restart guards and no false recovery, changed event/content, legacy inflight fail-closed');
+ console.log('PASS: unsubmitted draft / simulated denied call, partial draft, submission, duplicate, post-submit edit, legacy watcher parallel and migration, rejected reminder and resubmission, missing/damaged snapshot duplicate rejection, restart deduplication and receipt recovery, earlier-event in-flight answer, needs_user revision, stopped run, submission lock and malformed watcher PID, unknown child prevents restart, first startup without ready, EPERM status and both restart guards and no false recovery, changed event/content, legacy inflight fail-closed');
 })().catch(e=>{console.error(e);process.exitCode=1;});

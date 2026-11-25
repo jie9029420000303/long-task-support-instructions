@@ -62,7 +62,8 @@ function call(name,args) {
     if(data.supervisorCommandsGate&&fs.existsSync(data.supervisorCommandsGate))for(const n of [1,2,3])latest.items.push({type:'commandExecution',id:'supervisor-command-'+n,status:'completed'});
     const closed=data.supervisorCompletedGate&&fs.existsSync(data.supervisorCompletedGate);
     if(data.supervisorCompletedGate){latest.status=closed?'completed':'inProgress';latest.completedAt=closed?Date.now():null;}
-    return reply({thread:{id:data.supervisorId,...(data.supervisorCompletedGate?{status:{type:closed?'idle':'active'}}:data.supervisorIdle?{status:{type:'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
+    // supervisorStatus: the state the idle supervisor reports, e.g. systemError after a turn that ended in an error.
+    return reply({thread:{id:data.supervisorId,...(data.supervisorCompletedGate?{status:{type:closed?'idle':'active'}}:data.supervisorIdle?{status:{type:data.supervisorStatus||'idle'}}:{})},turns:[latest,...(args.turnLimit===1?[]:sends.map((prompt,index)=>({id:'review-'+index,status:'inProgress',items:[{type:'userMessage',text:prompt}]})))]});
   }
   if (name==='send_message_to_thread') {
     // Model overrides are recorded beside the prompts so a rate-limit switch and its restore can be checked. They are

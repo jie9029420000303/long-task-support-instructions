@@ -52,12 +52,13 @@ function migrateLimits(state){
   }
   return changed;
 }
-// The Claude API key has a monthly cap shared by every run on this Mac: once one run learns it is used up, every run
-// skips it until the named reset. A test run under the temp directory keeps it to itself.
-function apiMonthFile(run){
-  if(!process.env.LONG_TASK_HOME&&run&&require('./claude-quota.cjs').temporary(run))return path.join(run,'anthropic-api-month.json');
-  return path.join(require('./notify.cjs').home(),'anthropic-api-month.json');
+// What one run learns about an account holds for every run on this Mac: the Claude API key's monthly cap, and a model
+// an account cannot run. A test run under the temp directory keeps it to itself.
+function sharedFile(run,name){
+  if(!process.env.LONG_TASK_HOME&&run&&require('./claude-quota.cjs').temporary(run))return path.join(run,name);
+  return path.join(require('./notify.cjs').home(),name);
 }
+const apiMonthFile=run=>sharedFile(run,'anthropic-api-month.json');
 function syncApiMonth(state,run,now=Date.now()){
   let shared=null;try{shared=JSON.parse(fs.readFileSync(apiMonthFile(run),'utf8'));}catch{}
   const best=[state.apiMonth,shared].filter(item=>item&&item.until>now).sort((a,b)=>b.until-a.until)[0]||null;
@@ -70,6 +71,30 @@ function recordApiMonth(state,run,until,basis,now=Date.now()){
   state.apiMonth={until,basis,at:now};
   const file=apiMonthFile(run);
   try{fs.mkdirSync(path.dirname(file),{recursive:true});const temp=file+'.'+process.pid+'.tmp';fs.writeFileSync(temp,JSON.stringify(state.apiMonth)+'\n');fs.renameSync(temp,file);}catch{}
+}
+// A model the serving account cannot run (model_unavailable) is skipped by every run on both sides until its pause
+// ends, or once the route has served a request since (Jay 2026-11-25 Q4 A: 工區 E moved its executor to Sol at 12:02
+// although 工區 D and 清票 had both been refused there by the free account).
+const unsupportedFile=run=>sharedFile(run,'model-unavailable.json');
+function readUnsupported(run){try{return JSON.parse(fs.readFileSync(unsupportedFile(run),'utf8'));}catch{return {};}}
+function recordUnsupported(run,route,since,until){
+  const all=readUnsupported(run),file=unsupportedFile(run);
+  if(all[route]?.since>=since)return;
+  all[route]={since,until};
+  try{fs.mkdirSync(path.dirname(file),{recursive:true});const temp=file+'.'+process.pid+'.tmp';fs.writeFileSync(temp,JSON.stringify(all)+'\n');fs.renameSync(temp,file);}catch{}
+}
+function syncUnsupported(state,run,now=Date.now()){
+  let changed=false;
+  for(const [route,item] of Object.entries(readUnsupported(run))){
+    if(!(item.until>now)||state.routeOk?.[route]>item.since)continue;
+    for(const side of ['supervisor','executor']){
+      const key=side+'|'+route,known=state.rateLimits?.[key];
+      if(known?.until>now)continue;
+      (state.rateLimits||={})[key]={since:item.since,model:route,files:[],until:item.until,basis:UNSUPPORTED_BASIS,cooldown:'unsupported'};
+      changed=true;
+    }
+  }
+  return changed;
 }
 // Legacy bindings used false both for manual selection and for an explicit lock.
 // Preserve their restriction until the owner authorizes migrating that run.
@@ -278,10 +303,13 @@ function readRange(file,from,to){
 }
 // New refusals since the last read. The first read looks back over the file's tail: a thread refused before the
 // watcher (re)started still waits on that refusal (2026-10-11 22:09: A's supervisor was refused, the watcher restarted
-// at 22:49 and read from the end, so the live limit was never handled). Every read counts only a thread whose latest
-// request in what was read is still the refusal; a refusal followed by a success is history (WEB 2026-11-09 01:02: a
-// watcher back after two hours read the 23:14 refusal from its saved offset and moved a working supervisor to the
-// paid key). Successful requests of any conversation also record when each route last worked (routeOk).
+// at 22:49 and read from the end, so the live limit was never handled). Every read counts only a route whose latest
+// request of that thread in what was read is still the refusal; a refusal followed by a success on the same route is
+// history (WEB 2026-11-09 01:02: a watcher back after two hours read the 23:14 refusal from its saved offset and moved
+// a working supervisor to the paid key). Each route of a thread is judged on its own: subagents' requests reach
+// OpenCodex under their mainline's conversation (2026-11-25 工區 E 10:23: the mainline's Sol refusal was followed ten
+// seconds later by a worker's Terra refusal and was never handled). Successful requests of any conversation also
+// record when each route last worked (routeOk).
 function scan(state,threads){
   const file=usageFile();let size;
   try{size=fs.statSync(file).size;}catch{return [];}
@@ -305,12 +333,12 @@ function scan(state,threads){
     // When each route last failed for any conversation: a supervisor's failure pause ends only after it has been quiet.
     if(model&&(isFailure(row)||connectionReset(row))&&!(failed[keyOf(model)]>=at))failed[keyOf(model)]=at;
     if(owners.has(row.conversationId)){
-      latest.set(row.conversationId,row);
+      latest.set(row.conversationId+'\u0000'+keyOf(model),row);
       const owner=owners.get(row.conversationId),switched=state.modelSwitch?.[owner.threadId];
       if(switched&&!switched.respondedAt&&model===switched.current&&at>=switched.since&&row.status>=200&&row.status<300&&row.usage?.outputTokens>0)switched.respondedAt=at;
-      // Consecutive non-quota failures of one mainline on one model; any success of that thread clears them.
+      // Consecutive non-quota failures of one mainline on one model; a success of that thread on that model clears them.
       if(owner.role!=='subagent'){
-        if(row.status>=200&&row.status<300)delete failures[owner.threadId];
+        if(row.status>=200&&row.status<300){if(failures[owner.threadId]?.model===model)delete failures[owner.threadId];}
         else if(isFailure(row)||supervisorReset(row,owner.role)){
           const known=failures[owner.threadId];
           failures[owner.threadId]=known&&known.model===model?{...known,count:known.count+1,lastAt:at,status:row.status}:{model,count:1,firstAt:at,lastAt:at,status:row.status};
@@ -327,13 +355,14 @@ function scan(state,threads){
     delete failures[threadId];
   }
   if(!Object.keys(failures).length)delete state.routeFailures;
-  for(const [id,row] of latest){
-    delete checks[id];
+  for(const row of latest.values()){
+    const id=row.conversationId,model=row.requestedModel||row.model;
+    if(checks[id]&&keyOf(checks[id].model)===keyOf(model))delete checks[id];
     if(first&&Date.now()-Number(row.timestamp)>=FALLBACK_MS)continue;
     const owner=owners.get(id);
     if(isLimit(row)&&!supervisorReset(row,owner.role))hits.push(hitOf(owner,row));
-    else if(row.status===400&&keyOf(row.requestedModel||row.model)==='anthropic-apikey/'){
-      checks[id]={model:row.requestedModel||row.model,at:Number(row.timestamp)};
+    else if(row.status===400&&keyOf(model)==='anthropic-apikey/'){
+      checks[id]={model,at:Number(row.timestamp)};
     }
   }
   // The terminal error may arrive after the usage row. Check it even on a poll with no new requests.
@@ -432,4 +461,5 @@ function restoreReason(limit){
 }
 module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,UNSUPPORTED_BASIS,OPENROUTER_ACCOUNT,
   modelPolicy,finalReviewer,solRoutes,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,subscriptionOpenAI,held,migrateLimits,syncApiMonth,recordApiMonth,
+  recordUnsupported,syncUnsupported,
   chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish,switchReason,restoreReason};
