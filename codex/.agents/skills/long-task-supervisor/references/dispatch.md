@@ -96,7 +96,7 @@ node "<skill>/scripts/dispatch.cjs" mark "<RUN>" "<狀態目錄絕對路徑>" <�
 node "<skill>/scripts/dispatch.cjs" from-wp "<RUN>" "<狀態目錄絕對路徑>" [同上選項]
 ```
 
-`id` 取自 `[工作包] id=`；就緒包的 `dependencies` 取自 `依賴：`，排他資源取自 `[共用資源]` 的每個 `前綴:值`（帳號→account、瀏覽器→browser、DB／資料→database、主機→test_environment、worktree→worktree，其餘為 other），`acceptanceIds` 取自 `[驗收條目]`；狀態 JSON 寫了同名欄位時以 JSON 為準。evidence 第一筆自動是工作包檔路徑。容量、驗收逐條、`docBudget` 等其他欄位沿用上一份快照，第一份或要改時用 `--base` 帶入。沒填 `--activity` 時，有在途包算 working、只有未收回的回報算 integrating、其餘算 waiting，讓有就緒包卻沒派出時照樣被背景程式看見。整份快照先驗過才改工作包檔，驗不過兩邊都不動；缺 `[狀態]` 行的工作包檔會被一次列出。2026-10-14～15 GDB 主線只為記帳就用了 99 分鐘、506 個回合，還自己寫了一支快照產生器。
+`id` 取自 `[工作包] id=`；就緒包的 `dependencies` 取自 `依賴：`，排他資源取自 `[共用資源]` 的每個 `前綴:值`（帳號→account、瀏覽器→browser、DB／資料→database、主機→test_environment、worktree→worktree，其餘為 other），`acceptanceIds` 取自 `[驗收條目]`，`segment` 取自 `[區段]`（run 有區段表時必須是表上的區段，否則整份快照不寫）；狀態 JSON 寫了同名欄位時以 JSON 為準。evidence 第一筆自動是工作包檔路徑。容量、驗收逐條、`docBudget` 等其他欄位沿用上一份快照，第一份或要改時用 `--base` 帶入。沒填 `--activity` 時，有在途包算 working、只有未收回的回報算 integrating、其餘算 waiting，讓有就緒包卻沒派出時照樣被背景程式看見。整份快照先驗過才改工作包檔，驗不過兩邊都不動；缺 `[狀態]` 行的工作包檔會被一次列出。2026-10-14～15 GDB 主線只為記帳就用了 99 分鐘、506 個回合，還自己寫了一支快照產生器。
 
 子代理交回時用 `collect`（收包）一步完成：改該包的 `[狀態]`、補證據、更新快照的驗收逐條表並重產整份快照（使用者 2026-10-29 定案；收一包原本要分開寫狀態行、證據、驗收表與快照，GDB V32 常因格式錯回頭重填）：
 

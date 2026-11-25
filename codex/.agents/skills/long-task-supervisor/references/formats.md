@@ -10,10 +10,11 @@
   - `LONG_TASK_EVENT {"kind":"progress","nextAction":"下一步具體工作"}`
   - `LONG_TASK_EVENT {"kind":"waiting","nextAction":"結果出來後要做的事","waitMinutes":15}`（1～120 分鐘；剩下的工作全部都要等背景結果時才用，會立刻交監督審查）
   - `LONG_TASK_EVENT {"kind":"question"}`、`LONG_TASK_EVENT {"kind":"blocked"}`
-  - 送驗：`node <skill>/candidate.cjs <新版清單絕對路徑> <候選檔>...`，把它印出的 submission 行原樣貼上。
+  - 送驗：`node <skill>/candidate.cjs <新版清單絕對路徑> <候選檔>...`，把它印出的 submission 行原樣貼上；有區段表時一次只送一個區段，事件自動帶 `segment` 與 `criteria`。
+- 區段（`RUN/segments.json`，監督劃分）：一次只載入一個區段，該段工作包全部收件採用後送驗，送完寫進度檔、壓縮上下文再進下一段，不等判定；切法不合適用提問提出。
 - `progress` 一律立即續接，附 `waitMinutes` 也不等待。一般結果與可自行處理的失敗先回執行主線，完成通知＋定期讀狀態補漏並存，倒數不是最早續接時間；依[執行層完成通知](execution-wake.md)用工作包資源或 `waitFor:[{"ledger":"/允許根目錄/resources.json","id":"r1"}]` 登記。
 
-- 工作包檔 `<狀態目錄>/wp/<id>.md`：`[工作包] id=WP-X；依賴：WP-Y`、`[狀態] {"list":"inFlight","handle":"agent:<id>","baseline":{"minutes":20,"startedAt":"<ISO 時間>","basis":"pace.cjs 估算"}}`、`[驗收條目] A1、A2`、`[共用資源] 帳號:… 瀏覽器:…`。文件工作包在狀態加 `"doc":true`；主線自己做的包 `handle` 寫 `main`。
+- 工作包檔 `<狀態目錄>/wp/<id>.md`：`[工作包] id=WP-X；依賴：WP-Y`、`[狀態] {"list":"inFlight","handle":"agent:<id>","baseline":{"minutes":20,"startedAt":"<ISO 時間>","basis":"pace.cjs 估算"}}`、`[驗收條目] A1、A2`、`[區段] S1`（有區段表時必填）、`[共用資源] 帳號:… 瀏覽器:…`。文件工作包在狀態加 `"doc":true`；主線自己做的包 `handle` 寫 `main`。
 - 改狀態：`node <skill>/dispatch.cjs mark RUN <狀態目錄> WP-X '<狀態 JSON>'`；派出時加 `--estimate <模型>[:<預估輸出 token>[:<工具分鐘>]]`，同一步填好 `baseline`，不另跑 `pace.cjs estimate`。同時交回多包用一次 `collect RUN <狀態目錄> WP-A <結果A> WP-B <結果B>`。
 - 收包（一步完成標記、證據、驗收表與快照，先驗格式，有錯什麼都不寫）：`node <skill>/dispatch.cjs collect RUN <狀態目錄> WP-X <結果檔絕對路徑>`，結果檔 `{"status":{"list":"completed","handle":"agent:<id>","evidence":["/絕對路徑"]},"acceptance":[{"id":"A1","status":"PASS","evidence":["/絕對路徑"]}]}`。
 - 新定案登記、壓縮續接及收包後，用 `node <skill>/dispatch.cjs reconcile RUN` 對照有效決策、可派包、已完成的前置與未分派條件；核對後在原 mark／collect／from-wp 命令加 `--reviewed "核對依據與結果"`，不另寫一份帳。未定案討論不改目標、授權、驗收或積極派工原則；只停確實受阻的動作。
@@ -47,5 +48,6 @@
 - 時間：用 `brief.now`、`status.nowTaipei` 或同一步的 `TZ=Asia/Taipei date`；amend 的 `authority.at` 要含時區的完整 ISO 時間、不晚於現在，否則程式拒收。指令輸出前面的語系警告不要當成結果。
 - `all_blocked` 或 `brief.allBlocked` 不是 null：逐包核對受阻四種原因，排在後面的請改 ready、拆準備包並當輪派出；不接受籠統的「沒有可並行工作」。
 - 時間條件用直接觸發或縮短時間驗（監督代決，不問使用者）；不自排「幾點以後」；驗收收尾附上線後觀察清單（含條文沒寫也不重要、記成代決的問題）。
-- 候選版與定版：執行端為中途候選發正式版時請它改以 commit 部署；真實環境情境在同一個候選走完一輪、沒有要改程式的新缺陷與未決新需求時，用 reply 通知定版；定版後才跑整套、正式發版與寫帶版本內容的文件，候選上的真實環境結果依影響清單沿用，契約寫明同一版本的項目照條文在定版後做。
+- 候選版與定版：執行端為中途候選發正式版時請它改以 commit 部署；真實環境情境在同一個候選走完一輪、沒有要改程式的新缺陷與未決新需求時，用 reply 通知定版；定版後才正式發版與寫帶版本內容的文件，候選上的真實環境結果依影響清單沿用，契約寫明同一版本的項目照條文在定版後做。
+- 區段表：`supervise.cjs segments RUN <檔>`，檔案 `{"segments":[{"id":"S1","title":"…","criteria":["A1","A2"],"dependsOn":[]}]}`；區段送驗用逐包裁決的 `accepted` 採認通過的條文。所有區段通過後只重測聯動範圍，再依技能 `templates/` 的範本寫真人QA驗收腳本，交付後登記 `user_action` 等驗收結果（見 acceptance「結案與真人QA」）。
 - 登記要問使用者的事時，同一則回覆點名執行端接著做的不相關工作；等使用者核准的 wait 填 `"dependsOn":[{"id":"條文 ID","pendingKey":"待決 key","reason":"為何依賴"}]`，涵蓋每個未通過條文且沒有可派工作包，才會靜音閒置與整點提醒。

@@ -20,7 +20,7 @@ function delegatedLines(delegated=[],closing=false){
     '| 決定的事 | 監督的選擇 | 依據 | 怎麼改回 | 時間 |','|---|---|---|---|---|',
     ...shown.map(item=>'| '+cell(item.ask)+' | '+cell(item.choice)+' | '+cell(item.basis)+' | '+cell(item.revert)+' | '+clock(Date.parse(item.at))+' |')];
 }
-function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions={open:[]},pushProblem=null,queue=[],now=Date.now()}){
+function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions={open:[]},pushProblem=null,queue=[],segments=null,now=Date.now()}){
   const items=snapshot?.acceptance?.items||[],passed=items.filter(item=>item.status==='PASS').length;
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
   const pending=state.pending?state.pending.id+'（'+state.pending.kind+(state.pending.reasons?'：'+state.pending.reasons.join('、'):'')+'）':'無';
@@ -48,6 +48,10 @@ function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions
   lines.push('','## 驗收條件（共 '+items.length+' 條，通過 '+passed+'，未通過 '+open.length+'）','');
   if(items.length)lines.push('| 條件 | 狀態 |','|---|---|',...items.map(item=>'| '+item.id+' | '+item.status+' |'));
   else lines.push('派工快照還沒有逐條驗收狀態。');
+  // Each segment with the criteria the supervisor has passed (Jay 2026-11-25): segments are ruled one at a time while
+  // the mainline works on the next, so progress shows here during development instead of only at the end.
+  if(segments?.length)lines.push('','## 區段進度（共 '+segments.length+' 段，已全部通過 '+segments.filter(item=>item.passed.length===item.criteria.length).length+' 段）','',
+    '| 區段 | 通過／條文 | 依賴 |','|---|---|---|',...segments.map(item=>'| '+item.id+(item.title?' '+cell(item.title):'')+' | '+item.passed.length+'／'+item.criteria.length+' | '+(item.dependsOn.join('、')||'—')+' |'));
   lines.push('','## 在途工作','');
   if(paced.packages.length)lines.push('| 工作包 | 已跑（分） | 預估（分） | 比值 |','|---|---|---|---|',
     ...paced.packages.map(item=>'| '+item.id+' | '+(item.elapsedMinutes??'—')+' | '+(item.baselineMinutes??'未填')+' | '+(item.ratio??'—')+' |'));
@@ -70,7 +74,8 @@ function render({binding,state,snapshot,paced,alive,hold,paused,pendingDecisions
 }
 function write(run,args){
   // An outage notice from watch-health.cjs stays at the top until the watch works again.
-  const file=path.join(run,FILE),body=require('./watch-health.cjs').withBanner(render({pendingDecisions:ledger.view(run,args.state),pushProblem:ledger.pushProblem(run),queue:queued(run),...args}),run);
+  const file=path.join(run,FILE),body=require('./watch-health.cjs').withBanner(render({pendingDecisions:ledger.view(run,args.state),pushProblem:ledger.pushProblem(run),queue:queued(run),
+    segments:require('./segments.cjs').progress(require('./segments.cjs').read(run),args.snapshot?.acceptance?.items),...args}),run);
   fs.writeFileSync(file+'.tmp',body);fs.renameSync(file+'.tmp',file);
   return file;
 }

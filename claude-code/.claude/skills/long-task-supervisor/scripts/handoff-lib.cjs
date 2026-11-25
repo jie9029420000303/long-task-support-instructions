@@ -11,11 +11,13 @@ function validateEvent(value){
   if(value.kind==='submission')need(/^sha256:[a-f0-9]{64}$/.test(value.revision||'')&&path.isAbsolute(value.manifest||''),'Invalid handoff submission');
   const line=eventLine(value),lines=value.text.split('\n'),index=lines.findLastIndex(item=>item.trim().startsWith('LONG_TASK_EVENT '));
   if(index===-1)lines.push(line);else lines[index]=line;
-  return {id:value.id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
+  return {id:value.id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,...segmentOf(value),
     nextAction:value.nextAction||null,waitMinutes:Number.isFinite(value.waitMinutes)?value.waitMinutes:null,
     text:lines.join('\n'),at:value.at||new Date().toISOString()};
 }
-function eventLine(value){const item={id:value.id,kind:value.kind,...(value.revision?{revision:value.revision}:{}),...(value.manifest?{manifest:value.manifest}:{})};return 'LONG_TASK_EVENT '+JSON.stringify(item);}
+// A submission of one segment names it and its criteria (Jay 2026-11-25), as candidate.cjs prints them.
+function segmentOf(value){return value.kind==='submission'&&typeof value.segment==='string'?{segment:value.segment,criteria:Array.isArray(value.criteria)?value.criteria:[]}:{};}
+function eventLine(value){const item={id:value.id,kind:value.kind,...(value.revision?{revision:value.revision}:{}),...(value.manifest?{manifest:value.manifest}:{}),...segmentOf(value)};return 'LONG_TASK_EVENT '+JSON.stringify(item);}
 function loadRun(run){
   const binding=read(path.join(run,'binding.json')),contract=path.join(run,'contract.json');
   need(binding.platform==='claude-code','Claude Desktop run required');

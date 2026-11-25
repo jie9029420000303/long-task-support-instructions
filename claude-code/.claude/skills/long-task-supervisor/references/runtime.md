@@ -40,10 +40,10 @@ LONG_TASK_EVENT {"kind":"progress","nextAction":"接下來要執行的具體工�
 LONG_TASK_EVENT {"kind":"question"}
 LONG_TASK_EVENT {"kind":"blocked"}
 LONG_TASK_EVENT {"kind":"waiting","nextAction":"正在等待的背景工作與完成後動作","waitMinutes":30}
-LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>"}
+LONG_TASK_EVENT {"kind":"submission","revision":"sha256:<候選清單檔的 SHA-256>","manifest":"<候選清單檔絕對路徑>","segment":"S2","criteria":["A3","A4"]}
 ```
 
-若工作正在執行而回合尚未結束，背景監看保持安靜。一般完成或仍有可執行工作的 `progress`，由執行主線依[執行層原生續接](execution-wake.md)在自己的 Bash 先 register 等待輸入、需要時掛唯一背景 watcher，最終回覆用 register 回傳的 `event`。子代理成果、測試／CI 一般結果及可自行處理的失敗先回原執行主線；監督不代轉每次完成，只在通知缺失或未接手時依既有查核恢復。剩下的工作全部都要等背景結果時用 `waiting` 加 `waitMinutes`（1～120），它立刻交監督審查，事件附看得到的完成來源（`completion`）；沒登記的 `progress` 也立刻交監督，附 `waitMinutes` 不再安靜等待（使用者 2026-11-08：「主線寫明下一步就直接續做，其他所有停下一律立刻交監督」）。分鐘數用 `scripts/pace.cjs` 依等待中工作包的剩餘 AI 時程基準算出，不憑人類開發經驗填；完成來源使用工作包資源或 `waitFor`，檔案通知與定期讀狀態共用去重及收件；有結果由執行層直接回執行主線，可觀察的工作仍在跑時不單因到期叫 AI。宣告的等待不會暫停監督自己的進度時鐘，也不補發保活續接；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。
+若工作正在執行而回合尚未結束，背景監看保持安靜。一般完成或仍有可執行工作的 `progress`，由執行主線依[執行層原生續接](execution-wake.md)在自己的 Bash 先 register 等待輸入、需要時掛唯一背景 watcher，最終回覆用 register 回傳的 `event`。子代理成果、測試／CI 一般結果及可自行處理的失敗先回原執行主線；監督不代轉每次完成，只在通知缺失或未接手時依既有查核恢復。剩下的工作全部都要等背景結果時用 `waiting` 加 `waitMinutes`（1～120），它立刻交監督審查，事件附看得到的完成來源（`completion`）；沒登記的 `progress` 也立刻交監督，附 `waitMinutes` 不再安靜等待（使用者 2026-11-08：「主線寫明下一步就直接續做，其他所有停下一律立刻交監督」）。分鐘數用 `scripts/pace.cjs` 依等待中工作包的剩餘 AI 時程基準算出，不憑人類開發經驗填；完成來源使用工作包資源或 `waitFor`，檔案通知與定期讀狀態共用去重及收件；有結果由執行層直接回執行主線，可觀察的工作仍在跑時不單因到期叫 AI。宣告的等待不會暫停監督自己的進度時鐘，也不補發保活續接；同一回覆只要還有待決、授權遭拒或其他阻塞，改用 `question` 或 `blocked`，把背景工作寫在正文中。監督仍須讀完整回覆，不可只依標籤忽略阻塞。沒有事件或格式錯誤送監督處理，不能算完成。送驗前執行 `node <installed-skill>/scripts/candidate.cjs <新版清單絕對路徑> <候選檔絕對路徑>...`，用輸出的完整事件行；改版後另建清單並重交。有區段表（`RUN/segments.json`）時，工具要求這次送審的工作包都標同一個 `[區段]`，事件另帶 `segment` 與該段的 `criteria`，監督依此逐條判定該段（見[區段驗收](acceptance.md#區段驗收)）。
 
 reply／reject 在呼叫桌面原生傳訊前先執行 `node <skill>/scripts/supervise.cjs decision-preflight RUN DECISION_PATH EVENT_HASH CONTRACT_HASH STATE_HASH_OR_DASH`；三個雜湊取自同一事件 context 的 `event.sha256`、`authorization.contractSha256` 與 `contractStateSha256`（後者為 null 時傳 `-`）。此指令只讀，核對目前 pending 事件、STOP、有效契約與授權狀態、裁示格式及準備傳送的內容，回傳事件 ID、契約／授權雜湊、草稿雜湊及「`LONG_TASK_DELIVERY:<eventId>`、換行、`reply` 原文」的訊息雜湊，不傳訊、不寫狀態。原有進度或派工 preflight 照舊；預檢失敗、被拒或事件／授權／草稿改變時不傳送，重查 context 後重新預檢。成功後緊接著用原生傳訊工具按上述精確內容送出；送達後照原流程記回執並執行 decision。預檢僅供監督遵守順序，不會在平台層攔住獨立的原生傳訊呼叫，也不保證預檢與傳訊之間狀態不再改變。
 
@@ -65,7 +65,7 @@ reply／reject 在呼叫桌面原生傳訊前先執行 `node <skill>/scripts/sup
 
 綁定完成後，監督把精確 run 路徑及本節交給執行對話。執行者在需要代答、阻塞判斷或送驗時，先保存事件，再以桌面原生跨對話工具喚醒監督，補足背景通知可能無法啟動模型的情況。只有 `question`、`blocked`、`submission` 走這條路徑；純背景等待與一般進度走[執行層原生續接](execution-wake.md)，監督巡查照常，不傳保活訊息。
 
-1. 為本次事件產生唯一 UUID，另存 `EVENT.json`：`id`、`kind`、完整回覆正文 `text`，送驗另含 `candidate.cjs` 產生的 `revision`、`manifest`。事件 ID 不因重試改變；正文不含最後的 `LONG_TASK_EVENT` 行。
+1. 為本次事件產生唯一 UUID，另存 `EVENT.json`：`id`、`kind`、完整回覆正文 `text`，送驗另含 `candidate.cjs` 產生的 `revision`、`manifest`（有區段表時另含 `segment`、`criteria`）。事件 ID 不因重試改變；正文不含最後的 `LONG_TASK_EVENT` 行。
 2. 執行 `node <skill>/scripts/handoff.cjs prepare <ABS_RUN> <ABS_EVENT_JSON>`。程式先存原文並放進 run 的持久佇列（每個事件一個 `handoff-request-<id>.json`，依送出先後），再與 watcher 以同一鎖交接：監督手上沒有待決事件時，佇列最前面的事件成為 pending；監督還在處理前一個事件時，本事件留在佇列（輸出 `queued:true` 與 `ahead`：前面的事件與排第幾），等該事件決策、watcher 重掛後依序成為 pending，不報錯、不遺失（2026-10-12／13 A 開發 22 次 prepare 有 7 次被「Another event is already pending」拒絕，一則提問和一則補件送驗沒送到監督）。事件存進 pending 或佇列後，才輸出 `ready:true` 及原生傳訊所需的精確目的地與短訊。這一步不呼叫模型或 CLI。
 3. 只有本次回傳 `ready:true` 才呼叫桌面原生傳訊一次，原樣使用 `targetDesktopId`、`message`。傳訊資格在呼叫前已落檔；中斷後再次 prepare 不會給第二次資格。`queued:true` 也照送這一則短訊（它會叫醒可能沒醒的監督），然後續做其他工作，不重試、不換 ID、不改請使用者處理。`ready:false`、錯誤或送達不明均先查事件、pending、佇列、收據及精確監督 transcript，不盲重送、不換新 ID 重試。
 4. 原生工具回傳後另存 `{eventId,marker,status,messageId}`，其中 `status` 是 `delivered`、`queued` 或 `unknown`；unknown 可不含 messageId。執行 `node <skill>/scripts/handoff.cjs receipt <ABS_RUN> <ABS_RECEIPT_JSON>` 保存結果。已排隊不代表模型已讀。

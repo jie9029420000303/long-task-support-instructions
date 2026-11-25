@@ -5,6 +5,8 @@
 // v1.4.1, same day (Jay 21:30): "主線如果測過，監督就是看他的報告，而不是自己再測一次，反正最後大全套監督會總驗收".
 // On v1.4.0's first day the same scope ran twice: WebRPA stage 1 by the executor and again by the supervisor (50.7
 // minutes together), and the accounting supervisor reran 782 files for 47.6 minutes. Interim reviews read the report.
+// v1.16.0 (Jay 2026-11-25): "所有東西做完後監督就是把有改的區段的地方，就是每一個區段條件有聯動到的地方再測一次". The final
+// full suite is gone: at the close the supervisor reruns only the linked scope itself, then hands over the human QA script.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -21,11 +23,13 @@ test('the shared spec splits the work: affected scope in between, failed stages 
   const spec=read('SPEC.md');
   for(const copy of [CX+'goal-orchestrator/references/spec.md',CL+'long-task-orchestrator/references/spec.md'])assert.equal(read(copy),spec,copy);
   for(const marker of ['中途候選不跑整套','只重跑失敗的段或檔','不為一兩個檔整場重跑','監督看執行端的測試報告、不自己重跑','並挑 1～2 處關鍵邏輯做突變抽查',
-    '受監督時由監督在自己的工作區親自跑、不沿用執行端結果','執行端不另跑最終整套','監督的測試不改執行端的檔案與工作樹','不是整套'])
+    '受監督時由監督在自己的工作區親自跑、不沿用執行端結果','執行端不另跑；未受監督時由主線跑','所有區段通過後只重測有聯動到的範圍','監督的測試不改執行端的檔案與工作樹','不是整套'])
     assert.ok(spec.includes(marker),marker);
   // The old wording let the executor run the final suite and the supervisor only read its log.
   assert.ok(!spec.includes('受監督時監督核對該紀錄、做突變抽查與主機讀回，不重跑整套'));
   assert.ok(!spec.includes('重跑一次受影響的測試段'),'interim reviews read the executor report');
+  assert.ok(!spec.includes('整套自動化測試只在最終候選版的乾淨匯出跑一次'),'no final full suite');
+  assert.ok(!spec.includes('執行端不另跑最終整套'),'no final full suite');
 });
 
 test('each supervisor reads the executor report for an interim delivery and runs the final suite itself in its own workspace',()=>{
@@ -37,22 +41,25 @@ test('each supervisor reads the executor report for an interim delivery and runs
     // WebRPA's supervisor cited a lockfile clause and two one-off approvals to demand the whole gate on every version.
     assert.ok(!acceptance.includes('監督不重跑整套'),p.name+': the supervisor runs the final suite');
     assert.ok(!acceptance.includes('重跑一次受影響的測試段'),p.name+': interim reviews read the report');
-    assert.ok(acceptance.indexOf('突變抽查')>acceptance.indexOf('3. 整套自動化測試只在最終候選的乾淨匯出跑一次'),p.name+': mutation checks go with the final suite');
+    assert.ok(acceptance.indexOf('突變抽查')>acceptance.indexOf('3. 結案不跑整套'),p.name+': mutation checks go with the linked-scope rerun');
+    assert.ok(!acceptance.includes('3. 整套自動化測試只在最終候選的乾淨匯出跑一次'),p.name+': no final full suite');
     assert.ok(acceptance.indexOf('**測試分工**')<acceptance.indexOf('### 測試範圍與實際結果核對'),p.name);
     const skill=read(p.supervisor+'SKILL.md');
-    for(const marker of ['最終候選的整套自動化測試由監督親自跑','執行端不另跑','中途版本不跑整套','看執行端的測試報告、不自己重跑'])assert.ok(skill.includes(marker),p.name+': '+marker);
+    for(const marker of ['結案只重測有聯動到的範圍，由監督親自跑','執行端不另跑','中途版本不跑整套','看執行端的測試報告、不自己重跑'])assert.ok(skill.includes(marker),p.name+': '+marker);
     const review=read(p.supervisor+'references/event-review.md');
-    for(const marker of ['監督看執行端的測試報告、不自己重跑','並先對乾淨匯出親自跑整套自動化測試'])assert.ok(review.includes(marker),p.name+': '+marker);
+    for(const marker of ['監督看執行端的測試報告、不自己重跑','結案由監督重測聯動範圍並交付真人QA驗收腳本'])assert.ok(review.includes(marker),p.name+': '+marker);
+    assert.ok(!skill.includes('最終候選的整套自動化測試由監督親自跑')&&!review.includes('並先對乾淨匯出親自跑整套自動化測試'),p.name+': no final full suite');
   }
 });
 
 test('each executor reruns only the failed stage and leaves the final suite to the supervisor when supervised',()=>{
   for(const p of PLATFORMS){
     const text=read(p.orchestrator+'SKILL.md')+read(p.orchestrator+'references/execution.md');
-    for(const marker of ['只重跑失敗的段或檔','不是整套','受監督時由監督親自跑、主線不另跑','由監督親自跑整套自動化測試並分功能段落全套驗收','未受監督時，主線跑整套自動化測試','只看主線的測試報告','逐檔或逐段結果與受驗 commit'])
+    for(const marker of ['只重跑失敗的段或檔','不是整套','受監督時由監督親自跑、主線不另跑','由監督重測有聯動到的範圍並交付真人QA驗收腳本','未受監督時，主線重測聯動範圍','只看主線的測試報告','逐檔或逐段結果與受驗 commit'])
       assert.ok(text.includes(marker),p.name+': '+marker);
     assert.ok(!text.includes('監督核對這份紀錄、做突變抽查與主機讀回，不重跑整套'),p.name);
     assert.ok(!text.includes('另在自己的工作區重跑'),p.name);
+    assert.ok(!text.includes('由監督親自跑整套自動化測試並分功能段落全套驗收')&&!text.includes('未受監督時，主線跑整套自動化測試'),p.name+': no final full suite');
   }
 });
 

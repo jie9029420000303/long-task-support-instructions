@@ -20,6 +20,7 @@ const line=(file,value)=>fs.appendFileSync(file,JSON.stringify(value)+'\n');
 const iso=ms=>new Date(ms).toISOString();
 const opus='anthropic/claude-opus-5-5',paid='anthropic-apikey/claude-opus-5-5';
 async function until(check,ms=20000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('Timed out');}
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 function withEnv(values,fn){
   const old=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));Object.assign(process.env,values);
   try{return fn();}finally{for(const [key,value] of Object.entries(old))if(value===undefined)delete process.env[key];else process.env[key]=value;}
@@ -329,13 +330,16 @@ test('a refused child from the previous executor family is reassigned using the 
   }finally{await f.stop();}
 });
 
-test('reset still restores the recorded model and effort after a manual model change',async()=>{
+// Until v1.15.2 the reset pulled a hand-picked chat back to the recorded original. Jay 2026-11-25 Q13 A made the model he
+// picks by hand after a switch the new starting point, so the reset of the old switch no longer overrides it.
+test('after a manual model change the reset of the old switch leaves the hand-picked model alone',async()=>{
   const record={role:'supervisor',original:opus,current:paid,effort:'high',since:Date.now()-3600000,until:Date.now()-4000,restored:null};
   const f=fixture({supervisorModel:'gpt-6.2-sol',state:{modelSwitch:{'supervisor-qa':record}}});
   try{
-    f.start();await until(()=>f.calls().some(c=>c.threadId==='supervisor-qa'&&c.prompt.includes('LONG_TASK_MODEL_RESTORED')));
-    const restore=f.calls().find(c=>c.prompt.includes('LONG_TASK_MODEL_RESTORED'));
-    assert.equal(restore.model,opus);assert.equal(restore.thinking,'high');
+    f.start();await until(()=>read(f.statePath).modelSwitch['supervisor-qa'].restored);
+    assert.equal(read(f.statePath).modelSwitch['supervisor-qa'].restoredBy,'manual-change');
+    await delay(1000);
+    assert.ok(!f.calls().some(c=>c.prompt.includes('LONG_TASK_MODEL_RESTORED')),'the chat keeps the model chosen by hand');
   }finally{await f.stop();}
 });
 
