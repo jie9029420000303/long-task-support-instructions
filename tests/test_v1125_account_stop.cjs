@@ -107,3 +107,36 @@ test('a failed pause leaves nothing recorded and is reported; a test without a s
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
+
+test('a stopped account is judged again by its current threshold: raised above its use, or cleared, it is resumed at once and the new line applies',async()=>{
+  // Jay 2026-11-26: he raised b***e from 50 to 80 in OpenCodex while it was paused at 51%, and it stayed paused until its reset.
+  const now=Date.now();
+  const ours={accounts:{bb:{state:'paused',label:'b',line:50,weeklyUsed:51,pausedAt:now-HOUR,resetAt:now+DAY}}};
+  const raised=(line,b=51)=>{const value=reading(now,{bPaused:true,b});value.accounts[2].autoSwitchThresholdOverride=line;return value;};
+  assert.deepEqual(quota.planStops(raised(80),ours,now).map(a=>[a.type,a.id]),[['resume','bb']],'51% used is under the new 80% line');
+  assert.deepEqual(quota.planStops(raised(null),ours,now).map(a=>a.type),['resume'],'a cleared threshold leaves no line to stop at');
+  assert.deepEqual(quota.planStops(raised(51),ours,now),[],'raised only to the use it already reached: still at the line');
+  assert.deepEqual(quota.planStops(raised(50),ours,now),[],'the same line: stays paused until its reset');
+  const unreadable=raised(80);delete unreadable.accounts[2].quota.weeklyPercent;
+  assert.deepEqual(quota.planStops(unreadable,ours,now),[],'an unreadable weekly use is no reason to resume');
+  assert.equal(quota.planStops(raised(80),ours,now).some(a=>a.id==='ww'),false,'a***e, paused by Jay under its 70% line, is still not touched');
+  const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'account-stop-')));
+  try{
+    const ocx=fakeOcx(root),file=path.join(root,'quota.json'),ledger=path.join(root,'stops.json');
+    save(ledger,ours);
+    await withEnv({LONG_TASK_CLAUDE_QUOTA_FILE:file,OPENCODEX_OCX_BIN:ocx.bin,LONG_TASK_ACCOUNT_STOPS_FILE:ledger},async()=>{
+      save(file,raised(80));
+      const state={};await quota.refresh(state,now);
+      assert.deepEqual(ocx.calls(),[['account','resume','anthropic','bb']]);
+      assert.deepEqual(read(ledger).accounts,{},'the stop record is dropped');
+      assert.equal(state.claudeQuota.weeklyRemaining,73.9,'counted at its real remainder again: (98*4+49*4+77)/9');
+      assert.doesNotMatch(quota.describe(state.claudeQuota),/b\*\*\*e@xplorx\.co 週用量到自訂門檻/);
+      save(file,reading(now+HOUR,{b:80,bReset:now+DAY}));
+      const file80=read(file);file80.accounts[2].autoSwitchThresholdOverride=80;save(file,file80);
+      await quota.refresh(state,now+HOUR);
+      assert.deepEqual(ocx.calls().at(-1),['account','pause','anthropic','bb'],'the new 80% line stops it when reached');
+      assert.equal(read(ledger).accounts.bb.line,80);
+    });
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
