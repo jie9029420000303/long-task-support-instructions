@@ -122,3 +122,23 @@ test('the Codex watcher hands the supervisor the segment and its criteria with a
   }finally{child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));fs.rmSync(root,{recursive:true,force:true});}
 });
 
+
+// v1.17.1 (Jay 2026-11-26「這裡處理就好了」): [驗收條目] holds contract criterion IDs only. 工區 E wrote the segment
+// code S4 there (WP-E-WIRING-C: 「I07、S4」); a ruling must file every ID of the package as accepted, failed or remaining
+// and may only name contract criteria, so the supervisor could not reject V10.5 or V10.6 and each rejection reached the
+// executor one round late. The dispatch write refuses it; completed packages without a submission stay as written.
+test('a live package whose [驗收條目] names anything but a contract criterion is refused before anything is written',t=>{
+  for(const [name,scripts] of platforms){
+    const f=isolated(t,scripts),wp=path.join(f.root,'wp');
+    ok(f.call('supervise.cjs','segments',f.run,f.table));
+    fs.writeFileSync(path.join(wp,'WP-A.md'),['[工作包] id=WP-A；類型=B 實作','[區段] S1','[驗收條目] E1、S1','[狀態] '+JSON.stringify({list:'ready'})].join('\n')+'\n');
+    const refused=f.call('dispatch.cjs','from-wp',f.run,f.root,'--base',f.base);
+    assert.notEqual(refused.status,0,name);assert.match(refused.stderr,/WP-A 的 \[驗收條目\] 只能寫現行契約的條文 ID，這些不是：S1/,name);
+    assert.equal(fs.existsSync(path.join(f.run,'dispatch.json')),false,name);
+    fs.writeFileSync(path.join(wp,'WP-A.md'),['[工作包] id=WP-A；類型=B 實作','[區段] S1','[驗收條目] E1','[狀態] '+JSON.stringify({list:'ready'})].join('\n')+'\n');
+    fs.writeFileSync(path.join(wp,'WP-OLD.md'),['[工作包] id=WP-OLD；類型=B 實作','[驗收條目] E1～E3（診斷輪 2 前置）','[狀態] '+JSON.stringify({list:'completed',evidence:[f.source]})].join('\n')+'\n');
+    ok(f.call('dispatch.cjs','from-wp',f.run,f.root,'--base',f.base));
+    assert.deepEqual(read(path.join(f.run,'dispatch.json')).packages.ready.find(item=>item.id==='WP-A').acceptanceIds,['E1'],name+': a finished package written before stays as it was');
+  }
+});
+

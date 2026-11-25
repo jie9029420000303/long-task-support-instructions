@@ -150,6 +150,19 @@ function checked(run,binding,value){
   if(table){const known=new Set(table.map(item=>item.id));
     for(const item of Object.values(value.packages||{}).flat())if(item.segment!==undefined&&!known.has(item.segment))
       throw Error('Work package '+item.id+' names segment '+item.segment+', which is not in segments.json');}
+  // [驗收條目] holds criterion IDs of the effective contract and nothing else (Jay 2026-11-26「這裡處理就好了」). A
+  // ruling on a submission files each of a package's IDs under accepted, failed or remaining, and those may only be
+  // contract criteria, so any other word made the supervisor's reject impossible: 工區 E 11/26 00:16 and 00:31, a
+  // segment code S4 in WP-E-WIRING-C. Completed packages with no submission are history and stay as written.
+  const listed=Object.entries(value.packages||{}).flatMap(([list,items])=>list==='completed'?items.filter(item=>item.submission):items)
+    .filter(item=>item.acceptanceIds?.length);
+  if(listed.length){
+    const criteria=new Set(contractState.effective(run,binding).criteria.map(item=>item.id));
+    for(const item of listed){
+      const unknown=item.acceptanceIds.filter(id=>!criteria.has(id));
+      if(unknown.length)throw Error('工作包 '+item.id+' 的 [驗收條目] 只能寫現行契約的條文 ID，這些不是：'+unknown.join('、')+'。區段代號寫在 [區段]，說明文字寫在其他行');
+    }
+  }
   if(value.acceptance)acceptance.validate(value.acceptance,contractState.effective(run,binding));
   else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
   return value;
