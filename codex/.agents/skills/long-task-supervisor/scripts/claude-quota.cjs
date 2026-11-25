@@ -4,13 +4,39 @@
 // usable account has used 80% of its five-hour window, the executor moves to Sol so the rest stays for the Opus supervisor.
 // The one change made in OpenCodex is the account stop line (Jay 2026-11-23, Q68 A): an account whose own threshold
 // (OpenCodex 自訂門檻) is set is paused once its weekly use reaches it and resumed after its weekly reset.
+// The same reading covers the OpenAI subscription (Jay 2026-11-25「能否在剩下2%時長任務就跳過openai帳號，但不用切暫停」):
+// once every OpenAI account Jay has not paused is down to its last 2%, every role skips the subscription GPT models so
+// the rest stays for Jay's own use (voice). Nothing is paused in OpenCodex for it.
 const fs=require('node:fs');
 const path=require('node:path');
 const {execFile}=require('node:child_process');
-const RESERVE_PERCENT=35, FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000;
+const RESERVE_PERCENT=35, FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000, OPENAI_FLOOR=2;
 // Max 20x counts four shares and Max 5x one (Q48 A); another plan has no agreed weight and is left out.
 function weightOf(plan){const match=/^max_(\d+)x$/.exec(plan||'');return match?Number(match[1])/5:null;}
 function fresh(value,reset,now){return Number.isFinite(value)&&value>=0&&value<=100&&Number.isFinite(reset)&&reset>now;}
+// OpenCodex reports OpenAI resets in seconds and Anthropic resets in milliseconds.
+const millis=at=>Number.isFinite(at)&&at<1e12?at*1000:at;
+// OpenAI subscription floor. The main slot and a pool slot of one ChatGPT account share an upstream key and count once.
+// An account is down to the floor when any of its current windows (five hours, week, month) has at most 2% left; it
+// serves again at the latest reset among those windows. An account whose use cannot be read keeps the subscription in
+// use: only a reading at the floor holds it back, and a refusal still moves a route as before.
+function evaluateOpenAI(data,now=Date.now()){
+  if(!data||data.error)return {held:false,floor:OPENAI_FLOOR,accounts:[],resetAt:null,...(data?.error?{error:data.error}:{})};
+  const seen=new Set(),accounts=[];
+  for(const account of (Array.isArray(data.accounts)?data.accounts:[])){
+    if(!account||account.provider!=='openai'||account.paused)continue;
+    const key=account.upstreamAccountKey||account.id;
+    if(seen.has(key))continue;
+    seen.add(key);
+    const q=account.quota||{};
+    const windows=['fiveHour','weekly','monthly'].map(name=>({used:q[name+'Percent'],resetAt:millis(q[name+'ResetAt'])})).filter(w=>fresh(w.used,w.resetAt,now));
+    const low=windows.filter(w=>100-w.used<=OPENAI_FLOOR);
+    accounts.push({label:account.label||account.id||'unknown',plan:account.plan||null,
+      remaining:windows.length?100-Math.max(...windows.map(w=>w.used)):null,resetAt:low.length?Math.max(...low.map(w=>w.resetAt)):null});
+  }
+  const held=accounts.length>0&&accounts.every(a=>a.resetAt!==null);
+  return {held,floor:OPENAI_FLOOR,accounts,resetAt:held?Math.min(...accounts.map(a=>a.resetAt)):null};
+}
 // An account whose weekly quota is used up still counts, at 0% remaining (Jay 2026-11-21, Q52 A), so the reserve does
 // not jump when an account reaches 100%. An account paused at its stop line cannot serve either, so it counts the same
 // way. Accounts Jay paused are left out.
@@ -114,13 +140,21 @@ function nextReadAt(result,readAt){
   const regular=readAt+READ_EVERY_MS;
   return result?.nextResetAt&&result.nextResetAt+RESET_GRACE_MS<regular?result.nextResetAt+RESET_GRACE_MS:regular;
 }
-// A test or an isolated run names a JSON file; otherwise ask the OpenCodex command line. A read at a reset bypasses
-// the quota cache so the reset is seen at once.
-function read(refresh=false){
+// A test or an isolated run names a JSON file holding every provider's accounts; otherwise ask the OpenCodex command
+// line once per provider. Every read refreshes the subscription quota before it is counted (Jay 2026-11-25「只要是月訂閱類
+// 的帳號，不分平台，一率都是先點選重新整理額度後再計算」); the API keys have no quota to read.
+async function read(){
   const file=process.env.LONG_TASK_CLAUDE_QUOTA_FILE;
-  if(file)return new Promise(resolve=>{try{resolve(JSON.parse(fs.readFileSync(file,'utf8')));}catch(error){resolve({error:String(error.message||error)});}});
+  if(file){
+    let data;try{data=JSON.parse(fs.readFileSync(file,'utf8'));}catch(error){data={error:String(error.message||error)};}
+    return {anthropic:data,openai:data};
+  }
+  const [anthropic,openai]=await Promise.all(['anthropic','openai'].map(list));
+  return {anthropic,openai};
+}
+function list(provider){
   const bin=process.env.OPENCODEX_OCX_BIN||'ocx';
-  return new Promise(resolve=>execFile(bin,['account','list','anthropic','--quota',...(refresh?['--refresh']:[]),'--json'],
+  return new Promise(resolve=>execFile(bin,['account','list',provider,'--quota','--refresh','--json'],
     {encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024},(error,stdout)=>{
       if(error)return resolve({error:String(error.message||error).split('\n')[0].slice(0,200)});
       try{resolve(JSON.parse(stdout));}catch(caught){resolve({error:'unreadable ocx output: '+String(caught.message).slice(0,120)});}
@@ -138,24 +172,29 @@ async function refresh(state,now=Date.now(),run=null){
   const known=state.claudeQuota;
   if(known&&now<known.nextReadAt)return false;
   if(!process.env.LONG_TASK_CLAUDE_QUOTA_FILE&&run&&temporary(run)){
-    state.claudeQuota={at:now,allowed:true,hold:null,unconfigured:true,weeklyRemaining:null,reserve:RESERVE_PERCENT,accounts:[],nextReadAt:now+READ_EVERY_MS};
+    state.claudeQuota={at:now,allowed:true,hold:null,unconfigured:true,weeklyRemaining:null,reserve:RESERVE_PERCENT,accounts:[],
+      openai:evaluateOpenAI(null,now),nextReadAt:now+READ_EVERY_MS};
     return !known||!known.unconfigured;
   }
-  const atReset=Boolean(known?.nextResetAt&&now>=known.nextResetAt);
   // The ledger is read before OpenCodex, so a pause the other run just made shows in this reading.
   const file=stopsFile(run), ledger=loadStops(file);
-  const data=await read(atReset);
+  const reading=await read(), data=reading.anthropic;
   const actions=data?.error?[]:await applyStops(data,ledger,now);
   if(actions.some(action=>!action.error))saveStops(file,ledger);
   const result=data?.error?{...evaluate(null,now,known),error:data.error}:evaluate(data,now,known,stoppedIds(ledger));
   result.stops=Object.values(ledger.accounts).filter(entry=>entry.state==='paused').map(({label,line,resetAt})=>({label,line,resetAt}));
   if(actions.length)result.stopActions=actions;
+  result.openai=evaluateOpenAI(reading.openai,now);
+  // The OpenAI reset is read at once too, so the subscription comes back a minute after it.
+  const resets=[result.nextResetAt,result.openai.resetAt].filter(at=>Number.isFinite(at)&&at>now);
+  result.nextResetAt=resets.length?Math.min(...resets):null;
   result.nextReadAt=nextReadAt(result,now);
-  const changed=!known||known.allowed!==result.allowed||known.hold!==result.hold||actions.length>0;
+  const changed=!known||known.allowed!==result.allowed||known.hold!==result.hold||known.openai?.held!==result.openai.held||actions.length>0;
   state.claudeQuota=result;
   return changed;
 }
 function allowed(state){return state.claudeQuota?.allowed===true;}
+function openaiHeld(state){return state.claudeQuota?.openai?.held===true;}
 function describe(quota){
   if(!quota)return '尚未讀取';
   if(quota.unconfigured)return '測試環境沒有額度來源，不套用保留';
@@ -167,4 +206,14 @@ function describe(quota){
   const failed=(quota.stopActions||[]).filter(a=>a.error).map(a=>a.label+(a.type==='pause'?' 暫停':' 恢復')+'失敗：'+a.error);
   return '可用帳號週剩餘加權 '+weekly+'（保留 '+quota.reserve+'% 給監督）：'+why+[...stops,...failed].map(s=>'；'+s).join('')+(quota.error?'；讀取錯誤：'+quota.error:'');
 }
-module.exports={RESERVE_PERCENT,FIVE_HOUR_HIGH,FIVE_HOUR_NEAR_MS,READ_EVERY_MS,weightOf,evaluate,nextReadAt,read,temporary,refresh,allowed,describe,planStops,applyStops,stopsFile};
+function describeOpenAI(quota){
+  const openai=quota?.openai;
+  if(!openai)return '尚未讀取';
+  if(quota.unconfigured)return '測試環境沒有額度來源，不套用保留';
+  const when=at=>new Date(at).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  const left=openai.accounts.map(a=>a.label+' 剩 '+(a.remaining===null?'讀不到':a.remaining+'%')).join('、')||'沒有未暫停的帳號';
+  if(openai.held)return left+'：都只剩 '+openai.floor+'% 以下，留給你自己用，長任務改用下一順位到 '+when(openai.resetAt)+' 重置';
+  return left+'：長任務照常可用'+(openai.error?'；讀取錯誤：'+openai.error:'');
+}
+module.exports={RESERVE_PERCENT,FIVE_HOUR_HIGH,FIVE_HOUR_NEAR_MS,READ_EVERY_MS,OPENAI_FLOOR,weightOf,evaluate,evaluateOpenAI,nextReadAt,read,temporary,refresh,
+  allowed,openaiHeld,describe,describeOpenAI,planStops,applyStops,stopsFile};

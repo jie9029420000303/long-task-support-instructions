@@ -28,6 +28,7 @@ function modelLines(binding,state,now){
   const lines=[];
   if(state.claudeQuota)lines.push('- Claude 訂閱額度：'+require('./claude-quota.cjs').describe(state.claudeQuota)+
     (state.quotaDrain?'；已停派新的 Claude 子代理，在途的做完後執行對話改用 Sol':''));
+  if(state.claudeQuota?.openai)lines.push('- OpenAI 訂閱額度：'+require('./claude-quota.cjs').describeOpenAI(state.claudeQuota));
   if(state.apiMonth?.until>now)lines.push('- Claude API（監督備用）：本月額度已用完，'+clock(state.apiMonth.until)+' 前所有任務的監督都跳過這一站');
   let open=null;try{open=require('./openrouter-route.cjs').routes(binding.fourthExecutorModel||null).length;}catch{}
   if(open===0)lines.push('- 開源備援：目前沒有可用模型（OpenCodex 設定或價格上限未通過）；前面順位都用完時只能等重置');

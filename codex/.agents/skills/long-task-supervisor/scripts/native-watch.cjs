@@ -386,10 +386,6 @@ async function settleQueued() {
   }
   if (state.queuedDeliveries && !Object.keys(state.queuedDeliveries).length) { delete state.queuedDeliveries; checkpoint(); }
 }
-// The executor may use the Claude subscription only while the reserve for the supervisor holds (Q48 A / Q49 A).
-function claudeHeld(target, model) {
-  return target === binding.executorId && fallback.subscriptionClaude(model) && !quota.allowed(state);
-}
 async function sendAndRead(target, prompt, key, options = {}) {
   need(!fs.existsSync(path.join(run,'STOP')),'Run stopped');
   need([binding.executorId,binding.supervisorId].includes(target), 'Target is not bound');
@@ -409,11 +405,12 @@ async function sendAndRead(target, prompt, key, options = {}) {
     await reconcile(state.inflight);
     return;
   }
-  // A regular delivery after reset can also carry the restoration, including while the thread is busy.
+  // A regular delivery after reset can also carry the restoration, including while the thread is busy. A route the
+  // quota reading holds back (the Claude reserve, the OpenAI floor) counts as limited.
   const activeRoute=state.modelSwitch?.[target];
   const role=target===binding.supervisorId?'supervisor':'executor';
   const due=activeRoute && !activeRoute.original?.startsWith('openrouter/') && (!state.routeWaiting?.[target]) && activeRoute.until<=Date.now() &&
-    !claudeHeld(target,activeRoute.original) && !fallback.limited(state,activeRoute.original,Date.now(),role);
+    !fallback.limited(state,activeRoute.original,Date.now(),role);
   const carryRestore=fallback.modelPolicy(binding)==='automatic' && !options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt);
   if(carryRestore)options={model:activeRoute.original,thinking:activeRoute.effort};
   const route=options.model?{model:options.model,...(options.thinking?{thinking:options.thinking}:{})}:{};
@@ -952,10 +949,13 @@ async function handleRateLimits() {
   // 2026-11-21) is moved up like a switched one: open source is only for when every route above it is out.
   const strandedIds=[binding.executorId,binding.supervisorId].filter(id=>!(state.modelSwitch?.[id]&&!state.modelSwitch[id].restored)&&!waiting[id]&&
     String(setModel(id)||'').startsWith('openrouter/'));
+  // A mainline set to the OpenAI subscription once it is down to its last 2% moves on to the next route (Jay 2026-11-25).
+  const heldIds=[[binding.executorId,'executor'],[binding.supervisorId,'supervisor']].filter(([id,role])=>!waiting[id]&&
+    fallback.subscriptionOpenAI(setModel(id))&&fallback.held(state,setModel(id),role)).map(([id])=>id);
   for(const id of Object.keys(state.strandedNotice||{}))if(!strandedIds.includes(id)){delete state.strandedNotice[id];dirty=true;}
   if(hits.length||refined||back||quotaBack||dirty){fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();}
-  if(!active.length && !Object.keys(waiting).length && !budgetChange && !strandedIds.length)return;
-  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[]),...strandedIds]);
+  if(!active.length && !Object.keys(waiting).length && !budgetChange && !strandedIds.length && !heldIds.length)return;
+  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[]),...strandedIds,...heldIds]);
   for(const id of ids){
     if(state.inflight)return;
     const hit=waiting[id], record=state.modelSwitch?.[id], switched=record&&!record.restored;
@@ -986,8 +986,7 @@ async function handleRateLimits() {
     if(!chain.includes(original) && !original?.startsWith('openrouter/') && !(role!=='supervisor'&&fallback.keyOf(original)==='anthropic-apikey/'))chain.unshift(original);
     chain.push(...fallback.openRoutes(role,binding.fourthExecutorModel).map(r=>r.model));
     const candidates=[...new Set(chain)].filter(model=>model && !fallback.limited(state,model,time,role) &&
-      !(switched && model===original && record.until>time && !state.rateLimits?.[fallback.limitKey(role,original)]) &&
-      !(role==='executor' && fallback.subscriptionClaude(model) && !claudeOk));
+      !(switched && model===original && record.until>time && !state.rateLimits?.[fallback.limitKey(role,original)]));
     const target=candidates[0];
     // Without its own refusal the supervisor is never moved down to an open-source route.
     if(role==='supervisor' && !hit && !current?.startsWith('openrouter/') && target?.startsWith('openrouter/'))continue;
@@ -1002,7 +1001,9 @@ async function handleRateLimits() {
     // gets its continuation: the turn it stopped does not resume by itself.
     if(hit?.waitingOnly && target===observed && await targetBusy(id)){delete waiting[id];checkpoint();continue;}
     const budget=budgetChange && id===binding.executorId && !hit;
-    if(!hit && !budget && switched && current!==target && await targetBusy(id))continue;
+    // Leaving the OpenAI subscription at its floor is told at once, like the Claude reserve: it takes effect on the next turn.
+    const floor=!hit && fallback.subscriptionOpenAI(current) && fallback.held(state,current,role);
+    if(!hit && !budget && !floor && switched && current!==target && await targetBusy(id))continue;
     // A stranded mainline is told while it is idle and once per turn: a notice cannot move the turn in progress
     // (2026-11-23 工區 E: 72 identical notices in 19 minutes into one supervisor turn). A notice sent again says why
     // (Jay 2026-11-23:「印出來的訊息要讓我知道重送原因，不然我會以為是死迴圈不斷傳訊息」).
@@ -1021,10 +1022,13 @@ async function handleRateLimits() {
     const until=state.rateLimits?.[fallback.limitKey(role,original)]?.until || time;
     let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：開源模型只在前面順位都不能用時使用。本對話改用 '+target+'，從已確認的進度接續。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：'+fallback.restoreReason(state.rateLimits?.[fallback.limitKey(role,original)]))+'本對話用 '+target+' 從中斷處接續原工作。':
       budget?'Claude 訂閱保留給監督（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
+      floor?'OpenAI 訂閱留給 Jay 自己用（'+quota.describeOpenAI(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
       fallback.switchReason(hit,target,SILENT_SWITCH_MS)+'本對話改用 '+target+'，從已確認的進度接續。';
-    const familyOf=model=>String(model||'').startsWith('openrouter/')?model:catalog.identity(model)?.family||model;
+    // The OpenAI subscription and the OpenAI API key are separate accounts: workers follow the mainline's account path.
+    const familyOf=model=>{if(String(model||'').startsWith('openrouter/'))return model;const m=catalog.identity(model);return m?(m.family==='gpt'?'gpt|'+m.provider:m.family):model;};
     if(role==='executor' && !isPaused() && familyOf(current)!==familyOf(target)){
-      const worker=familyOf(target)==='claude'?'同一家的 Sonnet（anthropic/，不用 Claude API）':familyOf(target)==='gpt'?'最新 Terra':'同一完整模型 ID、max 推論';
+      const worker=familyOf(target)==='claude'?'同一家的 Sonnet（anthropic/，不用 Claude API）':familyOf(target)==='gpt|'?'最新 Terra（OpenAI 訂閱）':
+        familyOf(target)==='gpt|openai-apikey/'?'openai-apikey/ 的最新 Terra':'同一完整模型 ID、max 推論';
       prompt+=' 換到不同家模型：在途的舊模型子代理改從工作包交付檔與原件收件，不再向它發訊；新派子代理用'+worker+'。';
     }
     if(role==='supervisor' && !isPaused() && target.startsWith('openrouter/'))prompt+=' 暫代監督依原契約照常收件、查證與派工；要結案的候選照常審查並提交，背景程式會保留原件，交恢復的高階監督逐條複驗結案。';

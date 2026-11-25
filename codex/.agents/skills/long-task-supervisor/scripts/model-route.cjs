@@ -21,14 +21,17 @@ function resolve(input) {
   if(!Array.isArray(input.roles)||!input.roles.length||input.roles.some(r=>!Object.hasOwn(roles,r)))throw Error('Request known roles');
   if(!main&&!require('./openrouter-route.cjs').choices.some(r=>r.model===input.executorModel||r.model===input.supervisorModel))return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
   const result={family:main?.family||'openrouter',provider:main?.provider||'openrouter/',supervisorModel:input.supervisorModel,roles:{}};
-  let limits={},claudeOk=true;
+  let limits={},claudeOk=true,openaiHeld=false;
   if(input.fallback){
     // The watcher publishes the executor's limits and whether the Claude reserve lets the executor side use the
-    // subscription; before its first reading nothing is held here and the watcher moves the mainline later.
-    try{const published=JSON.parse(fs.readFileSync(input.fallback,'utf8'));limits=published.limits||{};claudeOk=published.claudeQuota?.executorMayUseClaude!==false;}
+    // subscription, and whether the OpenAI subscription is down to its last 2%; before its first reading nothing is
+    // held here and the watcher moves the mainline later.
+    try{const published=JSON.parse(fs.readFileSync(input.fallback,'utf8'));limits=published.limits||{};claudeOk=published.claudeQuota?.executorMayUseClaude!==false;
+      openaiHeld=published.openaiQuota?.subscriptionHeld===true;}
     catch(error){if(error.code!=='ENOENT')throw error;} // A new run has no limit ledger yet.
   }
-  const limited=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now()||String(id).startsWith('openrouter/')&&Date.parse(limits['openrouter/']?.until)>Date.now();
+  const subscriptionGpt=id=>identity(id)?.family==='gpt'&&identity(id).provider==='';
+  const limited=id=>openaiHeld&&subscriptionGpt(id)||Date.parse(limits[keyOf(id)]?.until)>Date.now()||String(id).startsWith('openrouter/')&&Date.parse(limits['openrouter/']?.until)>Date.now();
   for(const role of input.roles){
     const worker=role!=='executor', owner=worker?identity(input.executorModel||input.supervisorModel):main;
     const catalog=available(input.catalogs?.[worker?'subagent':'executor']||[]);
@@ -58,22 +61,23 @@ function resolve(input) {
       unavailable('Claude 訂閱保留給監督：先不派新的 Claude 子代理，背景程式會把執行主線改用 Sol，之後子代理用 Terra');continue;
     }
     let basis=Object.keys(override).length?'explicit-user-override':'role-policy', restoreAfter;
-    // The executor starts on subscription Sonnet under a Claude supervisor, or on Sol while the reserve holds.
+    // The executor starts on subscription Sonnet under a Claude supervisor, or on Sol while the reserve holds: the
+    // subscription Sol, else the OpenAI API Sol (Jay 2026-11-25).
+    const sol=()=>['','openai-apikey/'].map(account=>latest(catalog,'gpt',account,'sol')).find(x=>x&&!limited(x.id));
     const start=()=>{
       if(main.family!=='claude')return catalog.find(x=>x.id===input.supervisorModel);
       if(claudeOk)return latest(catalog,'claude','anthropic/','sonnet');
-      basis='claude-reserve';return latest(catalog,'gpt','','sol');
+      basis='claude-reserve';return sol()||latest(catalog,'gpt','','sol');
     };
     let selected=override.model?catalog.find(x=>x.id===override.model):
       worker?latest(catalog,owner.family,provider,tier):start();
     if(selected && identity(selected.id)?.family!==owner.family && worker){unavailable('The worker must be compatible with the execution mainline');continue;}
     if(selected && limited(selected.id) && !override.model){
-      restoreAfter=limits[keyOf(selected.id)].until;
+      restoreAfter=limits[keyOf(selected.id)]?.until;
       const m=identity(selected.id);
       // Workers never use the Claude API key (Jay 2026-11-21): it is kept for the supervisor.
       const substitute=m.family==='claude'?[latest(catalog,m.family,'anthropic/',m.tier)].find(x=>x&&!limited(x.id)):null;
-      const sol=worker?null:latest(catalog,'gpt','','sol');
-      selected=substitute||(sol&&!limited(sol.id)?sol:null);basis='rate-limit-fallback';
+      selected=substitute||(worker?null:sol())||null;basis='rate-limit-fallback';
     }
     if(!selected){unavailable('The requested enabled role/model is unavailable in this tool inventory');continue;}
     const supported=efforts.filter(e=>selected.efforts.includes(e));

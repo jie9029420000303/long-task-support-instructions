@@ -1,7 +1,8 @@
-// Rate-limit model fallback (Jay 2026-10-11, revised 2026-11-21): the supervisor goes Claude subscription Opus ->
-// Claude API Opus (monthly; skipped once known used up) -> latest Sol -> Muse -> DeepSeek and moves only when it is
-// refused itself. The executor goes subscription Sonnet -> Sol (Terra workers) -> Muse -> DeepSeek and never uses the
-// API key. Workers stay with their current parent. Switch back when the limit resets. opencodex records every request in usage.jsonl with conversationId =
+// Rate-limit model fallback (Jay 2026-10-11, revised 2026-11-21 and 2026-11-25): the supervisor goes Claude subscription
+// Opus -> Claude API Opus (monthly; skipped once known used up) -> subscription Sol -> OpenAI API Sol -> Muse -> DeepSeek
+// and moves only when it is refused itself. The executor goes subscription Sonnet -> subscription Sol -> OpenAI API Sol
+// (Terra workers on the same account path) -> Muse -> DeepSeek and never uses the Claude API key. Workers stay with
+// their current parent. Switch back when the limit resets. opencodex records every request in usage.jsonl with conversationId =
 // sha256(Codex thread id)[:32], so a 429 maps to the exact thread (2026-10-11 05:04: this research chat on
 // anthropic/claude-opus-5-5, "All Anthropic OAuth accounts are temporarily rate-limited").
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
@@ -12,7 +13,9 @@ const FALLBACK_MS=5*60*60*1000;
 const FAILURE_COUNT=3,FAILURE_SPAN_MS=60000,FAILURE_COOLDOWN_MS=30*60000,OPENROUTER_COOLDOWN_MS=15*60000;
 const FAILURE_BASIS='連續失敗（非額度），暫停此順位 30 分鐘',OPENROUTER_BASIS='開源順位短暫限速，15 分鐘後再試',SILENT_BASIS='切換後沒有成功回應，暫停此順位 30 分鐘';
 const catalog=require('./model-catalog.cjs');
-const lastResort=()=>catalog.latest(catalog.installed(),'gpt','','sol')?.id;
+// The OpenAI subscription first, then the OpenAI API key (Jay 2026-11-25「兩邊都排，順位接在openai月訂閱戶後面」).
+const GPT_ACCOUNTS=['','openai-apikey/'];
+const solRoutes=(items=catalog.installed())=>GPT_ACCOUNTS.map(provider=>catalog.latest(items,'gpt',provider,'sol')?.id).filter(Boolean);
 const home=()=>process.env.OPENCODEX_HOME||path.join(os.homedir(),'.opencodex');
 const usageFile=()=>process.env.OPENCODEX_USAGE_FILE||path.join(home(),'usage.jsonl');
 const quotaFile=()=>process.env.OPENCODEX_QUOTA_FILE||path.join(home(),'provider-account-quota-cache.json');
@@ -27,6 +30,17 @@ function plainKey(key){const at=key.indexOf('|');return at<0?key:key.slice(at+1)
 // OpenRouter credit (HTTP 402) ends every open-source route for both sides.
 const OPENROUTER_ACCOUNT='openrouter/';
 function subscriptionClaude(model){const m=catalog.identity(model);return m?.family==='claude'&&m.provider==='anthropic/';}
+function subscriptionOpenAI(model){const m=catalog.identity(model);return m?.family==='gpt'&&m.provider==='';}
+// A route the quota reading holds back, for as long as the reading says so: the Claude subscription on the executor's
+// side below the reserve kept for the supervisor, and the OpenAI subscription for every role once each account Jay
+// has not paused is down to its last 2% (Jay 2026-11-25). A success of another conversation never ends either.
+function held(state,model,role){
+  // Before the first reading nothing is held here; the watcher reads the quota before it routes.
+  const quota=require('./claude-quota.cjs');
+  if(!state.claudeQuota)return false;
+  if(subscriptionOpenAI(model))return quota.openaiHeld(state);
+  return sideOf(role)==='executor'&&subscriptionClaude(model)&&!quota.allowed(state);
+}
 // Limits saved before 2026-11-21 had one record per route for every role; keep each for both sides until it ends.
 function migrateLimits(state){
   let changed=false;
@@ -72,20 +86,20 @@ function chainFor(original,role,executorModel=original){
     if(!owner)return require('./openrouter-route.cjs').routes().filter(r=>r.model===executorModel).map(r=>r.model);
     const sameFamily=originalModel?.family===owner.family;
     const tier=sameFamily?originalModel.tier:(owner.family==='claude'?'sonnet':'terra');
-    // Workers never use the Claude API key: it is the supervisor's reserve.
-    return [catalog.latest(items,owner.family,owner.family==='gpt'?'':'anthropic/',tier)?.id].filter(Boolean);
+    // Workers never use the Claude API key: it is the supervisor's reserve. GPT workers use the mainline's account path.
+    return [catalog.latest(items,owner.family,owner.family==='gpt'?owner.provider:'anthropic/',tier)?.id].filter(Boolean);
   }
   const tier=originalModel?.family==='claude'?originalModel.tier:(role==='supervisor'?'opus':'sonnet');
   const accounts=role==='supervisor'?['anthropic/','anthropic-apikey/']:['anthropic/'];
   const claude=accounts.map(provider=>catalog.latest(items,'claude',provider,tier)?.id).filter(Boolean);
-  const sol=catalog.latest(items,'gpt','','sol')?.id;
-  return sol?[...claude,sol]:claude;
+  return [...claude,...solRoutes(items)];
 }
-// After Sol the supervisor always tries Muse then DeepSeek (Jay 2026-11-22); the executor follows the run's preferred order.
+// After the Sol routes the supervisor always tries Muse then DeepSeek (Jay 2026-11-22); the executor follows the run's preferred order.
 function openRoutes(role,preference=null){
   return require('./openrouter-route.cjs').routes(role==='supervisor'?null:preference);
 }
 function limited(state,model,now=Date.now(),role='executor'){
+  if(held(state,model,role))return true;
   if(state.rateLimits?.[limitKey(role,model)]?.until>now)return true;
   if(String(model||'').startsWith('openrouter/')&&state.rateLimits?.[OPENROUTER_ACCOUNT]?.until>now)return true;
   return keyOf(model)==='anthropic-apikey/'&&state.apiMonth?.until>now;
@@ -375,15 +389,16 @@ function publish(run,state,now=Date.now(),fourth=null){
   // model-route reads limits by route for the executor's workers; the supervisor's own limits are listed apart.
   const limits=Object.fromEntries(live.filter(([key])=>!key.startsWith('supervisor|')).map(([key,item])=>[plainKey(key),entry(item)]));
   const supervisorLimits=Object.fromEntries(live.filter(([key])=>key.startsWith('supervisor|')).map(([key,item])=>[plainKey(key),entry(item)]));
-  const sol=lastResort(),open=role=>openRoutes(role,fourth).map(r=>r.model);
-  const quota=state.claudeQuota;
-  const body={chain:{supervisor:['anthropic/','anthropic-apikey/',...(sol?[sol]:[]),...open('supervisor')],executor:['anthropic/',...(sol?[sol]:[]),...open('executor')]},
+  const sol=solRoutes(),open=role=>openRoutes(role,fourth).map(r=>r.model);
+  const quota=state.claudeQuota,describe=require('./claude-quota.cjs').describeOpenAI;
+  const body={chain:{supervisor:['anthropic/','anthropic-apikey/',...sol,...open('supervisor')],executor:['anthropic/',...sol,...open('executor')]},
     limits,supervisorLimits,...(state.apiMonth?{apiMonth:{until:new Date(state.apiMonth.until).toISOString(),basis:state.apiMonth.basis}}:{}),
     ...(quota?{claudeQuota:{executorMayUseClaude:quota.allowed===true,weeklyRemaining:quota.weeklyRemaining,reserve:quota.reserve,hold:quota.hold||null,
       summary:require('./claude-quota.cjs').describe(quota),readAt:new Date(quota.at).toISOString()}}:{}),
+    ...(quota?.openai?{openaiQuota:{subscriptionHeld:quota.openai.held,floor:quota.openai.floor,summary:describe(quota),readAt:new Date(quota.at).toISOString()}}:{}),
     ...(open('executor').length?{}:{openSourceWarning:'開源備援目前沒有可用模型（OpenCodex 設定或價格上限未通過）'}),
     ...(fourth?{fourthExecutorModel:fourth}:{}),
-    rule:'監督只在自己被拒時依 chain.supervisor 往下換；執行端依 chain.executor，Claude 週剩餘加權低於保留值或 5 小時額度將滿時改用 Sol。子代理只在執行主線同一家選可用模型，不用 Claude API。',
+    rule:'監督只在自己被拒時依 chain.supervisor 往下換；執行端依 chain.executor，Claude 週剩餘加權低於保留值或 5 小時額度將滿時改用 Sol。OpenAI 訂閱只剩 2% 以下時所有角色跳過訂閱 GPT，改用 OpenAI API。子代理只在執行主線同一家、同一帳號路徑選可用模型，不用 Claude API。',
     updatedAt:new Date(now).toISOString()};
   const file=path.join(run,'model-fallback.json');
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);
@@ -408,5 +423,5 @@ function restoreReason(limit){
   return '額度已恢復。';
 }
 module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,OPENROUTER_ACCOUNT,
-  modelPolicy,finalReviewer,lastResort,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,migrateLimits,syncApiMonth,recordApiMonth,
+  modelPolicy,finalReviewer,solRoutes,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,subscriptionOpenAI,held,migrateLimits,syncApiMonth,recordApiMonth,
   chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish,switchReason,restoreReason};

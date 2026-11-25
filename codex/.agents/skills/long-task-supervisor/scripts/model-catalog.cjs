@@ -5,8 +5,9 @@ const efforts=['low','medium','high','xhigh','max','ultra'];
 function identity(id) {
   const claude=/^(?:(anthropic(?:-apikey)?)\/)?claude-(haiku|sonnet|opus|fable)(?:-([\d-]+))?$/i.exec(id||'');
   if(claude)return {family:'claude',provider:claude[1]?claude[1]+'/':'',tier:claude[2].toLowerCase(),version:claude[3]||''};
-  const gpt=/^gpt-([\d.]+)-(terra|sol|astra|luna)$/i.exec(id||'');
-  return gpt?{family:'gpt',provider:'',tier:gpt[2].toLowerCase(),version:gpt[1]}:null;
+  // A bare GPT ID runs on the OpenAI subscription; openai-apikey/ is the paid API key (Jay 2026-11-25).
+  const gpt=/^(?:(openai-apikey)\/)?gpt-([\d.]+)-(terra|sol|astra|luna)$/i.exec(id||'');
+  return gpt?{family:'gpt',provider:gpt[1]?gpt[1]+'/':'',tier:gpt[3].toLowerCase(),version:gpt[2]}:null;
 }
 function available(items) {
   return items.filter(x=>x && (!x.visibility || x.visibility==='list') && !x.hidden).map(x=>({
