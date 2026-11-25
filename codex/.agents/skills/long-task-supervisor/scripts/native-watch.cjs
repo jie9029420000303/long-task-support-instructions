@@ -316,7 +316,10 @@ async function provenLost(delivery) {
   if (!pace.sessionFiles(delivery.target).length) return false;
   const detail=unpack(await rpc('read_thread',{threadId:delivery.target,turnLimit:3,includeOutputs:false,maxOutputCharsPerItem:500}));
   const sentAt=Date.parse(delivery.at)/1000;
-  if (detail.thread?.status?.type!=='idle' || !(detail.turns||[]).some(turn=>Number(turn.completedAt)>sentAt)) return false;
+  // Any chat that is not running a turn has taken in or dropped the message; a turn that ended in an error leaves it
+  // in systemError, not idle (2026-11-25 工區 E 11:59: an answer queued behind a turn Jay stopped was judged
+  // uncertain and the watcher stopped, model switching with it).
+  if (detail.thread?.status?.type==='active' || !(detail.turns||[]).some(turn=>Number(turn.completedAt)>sentAt)) return false;
   return !pace.markerIn(delivery.target,deliveryMarker(delivery.key)).found;
 }
 // A message sent while the target runs a turn waits in its queue until that turn ends; that is not an uncertain
@@ -855,6 +858,7 @@ async function handleRateLimits() {
   if (fallback.modelPolicy(binding)==='locked') return;
   let dirty=fallback.migrateLimits(state);
   if(fallback.syncApiMonth(state,run))dirty=true;
+  if(fallback.syncUnsupported(state,run))dirty=true;
   if(await quota.refresh(state,Date.now(),run))dirty=true;
   const claudeOk=quota.allowed(state);
   const awaitingOutput=Object.values(state.modelSwitch||{}).filter(record=>!record.restored&&!record.respondedAt);
@@ -891,6 +895,7 @@ async function handleRateLimits() {
     }
     // The Claude API month cap holds for every run until its named reset.
     if(plain==='anthropic-apikey/'&&hit.quotaReset)fallback.recordApiMonth(state,run,hit.quotaReset.until,hit.quotaReset.basis);
+    if(hit.unsupported)fallback.recordUnsupported(run,plain,hit.at,hit.at+fallback.FALLBACK_MS);
     const queue = state.switchQueue ||= [];
     if (!queue.some(item => item.threadId === hit.threadId && item.model === hit.model)) queue.push(hit);
   }
@@ -910,18 +915,23 @@ async function handleRateLimits() {
   }
   // Keep one durable route decision per role. The next poll can resume it without a new failure or user message.
   const waiting=state.routeWaiting||={};
+  // The model a mainline is set to run. A turn in progress keeps the model it started with, so a setting applied
+  // since then is what counts; the executor's incremental reader already follows it, and after a restart its settings
+  // come from the same tail read as the supervisor's.
+  const setModel=id=>{const seen=id===binding.executorId?state.executorSettings:fallback.settingsOf(id);return seen?.applied?.model||seen?.model;};
   if(state.rateLimitedAll?.threadId && !state.routeWaitMigrated){
     const legacy=state.rateLimitedAll;
     waiting[legacy.threadId]={...legacy,at:Date.parse(legacy.at)||Date.now()};
   }
   state.routeWaitMigrated=true;
+  // This incremental reader also runs while a decision is pending.
+  clock.readExecutor(state,binding);
   if(state.switchQueue?.length){
-    for(const hit of state.switchQueue)waiting[hit.threadId]=hit;
+    // A worker's refusal reaches the same conversation as its mainline's: keep the one for the model the chat runs.
+    for(const hit of state.switchQueue)if(waiting[hit.threadId]?.model!==setModel(hit.threadId))waiting[hit.threadId]=hit;
     state.switchQueue=[];checkpoint();
   }
   if(awaitingOutput.some(record=>record.respondedAt))checkpoint();
-  // This incremental reader also runs while a decision is pending.
-  clock.readExecutor(state,binding);
   const executorRecord=state.modelSwitch?.[binding.executorId], executorSwitched=executorRecord&&!executorRecord.restored;
   const executorModel=executorSwitched?executorRecord.current:state.executorSettings?.model;
   // Below the reserve the executor first stops new Claude subagents and lets running ones finish (at most 15 minutes,
@@ -943,9 +953,6 @@ async function handleRateLimits() {
       await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE_CLEARED：Claude 訂閱額度回到保留值以上，可照常派 Claude 子代理。',drain.noticeKey+'-cleared');
   }
   const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
-  // The model a mainline is set to run. A turn in progress keeps the model it started with, so a setting applied
-  // since then is what counts; the executor's incremental reader already follows it.
-  const setModel=id=>{if(id===binding.executorId)return state.executorSettings?.model;const seen=fallback.settingsOf(id);return seen?.applied?.model||seen?.model;};
   // A mainline left on an open-source route without a switch of this watcher (a model chose it under the rule retired
   // 2026-11-21) is moved up like a switched one: open source is only for when every route above it is out.
   const strandedIds=[binding.executorId,binding.supervisorId].filter(id=>!(state.modelSwitch?.[id]&&!state.modelSwitch[id].restored)&&!waiting[id]&&
@@ -974,7 +981,11 @@ async function handleRateLimits() {
       delete record.delivery;checkpoint();
     }
     const time=Date.now();
-    if(hit && switched && record.current!==hit.model && fallback.settingsOf(id)?.model!==hit.model){
+    // A refusal of a model the chat is no longer set to run is not answered with another switch: the chat already
+    // runs its target, and a request on the old model (a worker's, or a compaction before the new turn) is left to
+    // the supervisor, which the failed turn wakes (Jay 2026-11-25 Q1 A: 12:03～12:04 工區 E's watcher sent the same
+    // switch to Muse 21 times while every new turn first asked for gpt-6.2-sol and failed before its turn context).
+    if(hit && switched && record.current!==hit.model && setModel(id)!==hit.model){
       delete waiting[id];checkpoint();continue;
     }
     const observed=setModel(id);
@@ -1074,10 +1085,14 @@ async function watch() {
     delete state.error; delete state.endedAt;
   }
   if (state.inflight && state.inflight.key.startsWith('answer-')) {
-    const event = state.pending, contract = checkSources();
+    // An answer left in the target's queue can belong to an earlier event than the one now pending (2026-11-25 工區 E:
+    // the answer to progress-review-367 waited behind a stuck turn while 372 became pending, and every restart refused
+    // to start). It is checked against its own committed decision; only that exact reply is ever confirmed or resent.
+    const eventId = state.inflight.key.slice('answer-'.length), event = state.pending?.id === eventId ? state.pending : null, contract = checkSources();
+    const commit = require('./decision-commit.cjs');
     let submitted = null;
-    try { if (event) submitted = require('./decision-commit.cjs').load(run,binding,contract,event); } catch {}
-    need(submitted && state.inflight.key === 'answer-' + event.id && submitted.decision.reply === state.inflight.prompt,
+    try { submitted = event ? commit.load(run,binding,contract,event) : commit.readSnapshot(run,eventId); } catch {}
+    need(submitted?.decision?.eventId === eventId && submitted.decision.reply === state.inflight.prompt,
       'Legacy or mismatched in-flight answer requires manual receipt reconciliation; no resend');
   }
   if (state.inflight) await reconcile(state.inflight);

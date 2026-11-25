@@ -312,6 +312,26 @@ test('a delivery proven lost is resent once; without a local rollout it stays un
   }finally{await lost.stop();await unknown.stop();}
 });
 
+// 2026-11-25 工區 E 11:59: an answer queued behind a turn Jay stopped was never taken in; the chat was left in systemError
+// after its next turn failed, the watcher found it not idle, called the delivery uncertain and stopped, model switching
+// with it. A chat that is not running a turn has taken the message in or dropped it, whatever state its last turn left.
+test('a delivery to a chat left in systemError by a failed turn is proven lost and resent once',async()=>{
+  const f=fixture({settings:fullAccess,mock:{supervisorIdle:true,supervisorStatus:'systemError'}});
+  const state=read(f.statePath);
+  state.phase='needs_reconcile';state.inflight={target:f.binding.supervisorId,prompt:'Review event E1',key:'review-lost',at:minutesAgo(5),phase:'sent-awaiting-readback',sent:{}};
+  save(f.statePath,state);f.env.LONG_TASK_RECEIPT_RETRY_MS='20';
+  const supervisorLog=path.join(today(f.home),'rollout-t-supervisor-qa.jsonl');
+  line(supervisorLog,{timestamp:minutesAgo(10),type:'session_meta',payload:{id:'supervisor-qa',session_id:'supervisor-qa'}});
+  line(supervisorLog,{timestamp:minutesAgo(1),type:'event_msg',payload:{type:'task_complete',error:{message:'model_not_found',codex_error_info:'model_not_found'}}});
+  f.start();
+  try{
+    await until(()=>read(f.statePath).messages.some(item=>item.key==='review-lost'));
+    assert.equal(f.calls().length,1,'resent exactly once');
+    assert.match(f.calls()[0].prompt,/^LONG_TASK_DELIVERY:review-lost\nReview event E1$/);
+    assert.equal(read(f.statePath).lostDeliveries[0].key,'review-lost');
+  }finally{await f.stop();}
+});
+
 // 2026-10-11 22:09: A's supervisor was refused on anthropic/claude-opus-5-5; the watcher restarted at 22:49 and read
 // usage from the end, so the live limit was never handled. A restart looks back; only a still-current refusal counts.
 test('a watcher restarted after a refusal still sees that limit, but not a refusal the thread already recovered from',()=>{
