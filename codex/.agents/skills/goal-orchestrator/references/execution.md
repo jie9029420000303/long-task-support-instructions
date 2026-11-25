@@ -158,6 +158,6 @@ C 研究包另明列：議題與決策問題、來源類型與截止時點、可
 
 - 派工快照的 ready、inFlight、blocked、returned 工作包都標 `acceptanceIds`，讓每條未通過的驗收條件都看得出有誰在做。某條 30 分鐘沒人負責、而且執行端閒著時，監督會被叫醒來點名派工。
 - 開工拆包就把跨版本可重用的準備工作（部署與回退腳本、測試腳本、唯讀查核工具、規格草稿）列為就緒包，和測試並行；帶版本內容的文件（手冊、發版說明、證據索引、授權依據清單、執行單與數值卡）等定版後一次寫，定版前列 blocked（kind `dependency`，等定版），不拿來填空席。
-- 派子代理前讀 `RUN/model-fallback.json`：原模型的系列在 `limits` 且 until 未到，就依 `chain.executor` 改用下一個模型，到期後換回；`supervisorLimits` 是監督自己的紀錄，不看。`claudeQuota.executorMayUseClaude` 為 false 或收到 `LONG_TASK_QUOTA_RESERVE` 時，Claude 主線停派新的 Claude 子代理、照常做其他工作，在途子代理做完後背景程式會把主線改用 Sol。模型由背景程式切換；收到「額度限速：…本對話改用…」或「Claude 訂閱保留給監督…」的訊息時，直接從中斷處接續，不重做已完成的部分。回合或子代理被其他平台錯誤中斷（串流中斷、連線失敗、伺服器錯誤）屬執行阻塞，收件判定記 external；收到監督的續接訊息也從中斷處接續，不重做已完成的部分。
+- 派子代理前讀 `RUN/model-fallback.json`：原模型的系列在 `limits` 且 until 未到，就依 `chain.executor` 改用下一個模型，到期後換回；`supervisorLimits` 是監督自己的紀錄，不看。`claudeQuota.executorMayUseClaude` 為 false 或收到 `LONG_TASK_QUOTA_RESERVE` 時，Claude 主線停派新的 Claude 子代理、照常做其他工作，在途子代理做完後背景程式會把主線改用 Sol。`openaiQuota.subscriptionHeld` 為 true 時不派 OpenAI 訂閱的 Terra，GPT 子代理用主線所在帳號路徑的最新 Terra。模型由背景程式切換；收到「額度限速：…本對話改用…」「Claude 訂閱保留給監督…」或「OpenAI 訂閱留給 Jay 自己用…」的訊息時，直接從中斷處接續，不重做已完成的部分。回合或子代理被其他平台錯誤中斷（串流中斷、連線失敗、伺服器錯誤）屬執行阻塞，收件判定記 external；收到監督的續接訊息也從中斷處接續，不重做已完成的部分。
 - 收到監督或背景程式附「全面加速」提醒的訊息時（使用者 2026-11-09），在處理訊息內容的同一輪，依 SKILL「積極派工」盤點並把已就緒、資源可隔離的工作派子代理並行，用滿可用席位；訊息要求暫停或停止時以暫停為準。提醒只重申積極派工，不放寬授權、範圍與資源隔離。
 - 訊息結尾附「子代理模型提醒」時（使用者 2026-11-09），下一次派工改回技能預設並寫明 model 與 reasoning_effort；不合格後的升檔照舊，不必回報解釋。

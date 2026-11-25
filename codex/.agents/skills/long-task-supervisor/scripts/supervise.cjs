@@ -167,6 +167,7 @@ function brief() {
     rateLimits:Object.fromEntries(Object.entries(state.rateLimits || {}).filter(([, item]) => item.until > Date.now()).map(([key, item]) => [key, {until:iso(item.until), basis:item.basis}])),
     // The model order the watcher applies (Jay 2026-11-21): read it here, never switch a model by hand.
     claudeQuota:state.claudeQuota ? {executorMayUseClaude:state.claudeQuota.allowed === true, summary:require('./claude-quota.cjs').describe(state.claudeQuota), readAt:iso(state.claudeQuota.at)} : null,
+    openaiQuota:state.claudeQuota?.openai ? {subscriptionHeld:state.claudeQuota.openai.held, summary:require('./claude-quota.cjs').describeOpenAI(state.claudeQuota)} : null,
     apiMonth:state.apiMonth?.until > Date.now() ? {until:iso(state.apiMonth.until), basis:state.apiMonth.basis} : null,
     heldFinalReviews:(state.heldFinalReviews || []).map(item => ({id:item.event?.id || null, model:item.model || null, at:item.at || null})),
     // An executor turn the platform ended and the executor has not left yet (Jay 2026-10-14): later wakes see it too.

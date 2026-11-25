@@ -37,7 +37,8 @@ function reading(now,{big=100,small=1,bigFive=0,smallFive=24,bigFiveReset=now+3*
     {provider:'anthropic',label:'jay@jjdigi.com.tw',plan:'max_5x',paused:false,quota:{weeklyPercent:small,weeklyResetAt:now+5*DAY,fiveHourPercent:smallFive,fiveHourResetAt:smallFiveReset}},
     {provider:'anthropic',label:'paused-1',plan:'max_20x',paused:true,quota:{weeklyPercent:0,weeklyResetAt:now+DAY}},
     {provider:'anthropic',label:'paused-2',plan:'max_20x',paused:true,quota:{}},
-    {provider:'openai',label:'not-claude',plan:'pro',paused:false,quota:{weeklyPercent:99,weeklyResetAt:now+DAY}}]};
+    // Not a Claude account; well above the OpenAI floor (v1.15.0), so the subscription Sol stays usable here.
+    {provider:'openai',label:'not-claude',plan:'pro',paused:false,quota:{weeklyPercent:10,weeklyResetAt:now+DAY}}]};
 }
 
 test('the reserve weighs Max 20x four times Max 5x, counts a used-up account at 0% and leaves paused accounts out',()=>{
