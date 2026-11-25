@@ -498,6 +498,27 @@ function reviewPrompt(event) {
   if(state.inflight?.key==='review-'+event.id && state.inflight.target===binding.supervisorId)return state.inflight.prompt;
   return require('./review-context.cjs').prompt(run,event);
 }
+// Three stops the program can judge without a model go straight back to the executor (Jay 2026-11-25 chose 甲): a wait
+// whose sources have all finished, a wait with no observable source, and a turn that ended with no event. Five runs had
+// 291 of them (78, 103 and 110), and the executor waited about 596 minutes in all for the supervisor's fixed reply.
+function autoContinueKind(event){
+  if(event.kind==='unmarked_final')return 'unmarked_final';
+  if(event.kind!=='waiting'||event.completion.blocked||event.completion.running.length)return null;
+  return event.completion.finished.length?'waiting_ready':'waiting_no_source';
+}
+function autoContinuePrompt(kind,event){
+  if(kind==='waiting_ready'){
+    const done=event.completion.finished.map(item=>(item.path||item.id||item.kind)+(item.finishedAt?'（'+item.finishedAt+' 完成）':''));
+    return '長任務續接 '+event.id+'：你在等的來源都已完成：'+done.join('、')+'。直接讀結果，接著做「'+event.nextAction+'」。'+
+      '還有真的要等的工作，再送 waiting 並附可觀察的 waitFor。';
+  }
+  if(kind==='waiting_no_source'){
+    return '長任務續接 '+event.id+'：你說在等的東西，背景程式查不到可觀察的完成來源'+
+      (event.completion.issues.length?'（'+event.completion.issues.join('；')+'）':'')+'。'+
+      '背景程序請用 resource-ledger 啟動並登記，結果檔寫進 waitFor，再送 waiting；不需要等的，現在就做「'+event.nextAction+'」。';
+  }
+  return '長任務續接 '+event.id+'：回合結束沒有送事件。照你最後寫的下一步現在就做，做完或真的要等時再送 progress 或 waiting。';
+}
 
 async function changed(directory, alreadyChanged = () => false) {
   await new Promise(resolve => {
@@ -1226,6 +1247,22 @@ async function watch() {
           event.completion=executionWake.facts(completionNow());
         }
       }
+      const autoKind=paused?null:autoContinueKind(event);
+      if(autoKind&&state.lastAutoContinue?.kind!==autoKind){
+        const inspection=event.kind==='waiting'?completionNow():{ready:[]};
+        await sendAndRead(binding.executorId,autoContinuePrompt(autoKind,event),'auto-'+event.id);
+        for(const source of inspection.ready)(state.executionWakeReceipts||={})[source.key]={eventId:event.id,packageId:source.packageId,
+          deliveryKey:'auto-'+event.id,deliveredAt:now()};
+        fs.appendFileSync(path.join(run,'auto-continue.jsonl'),JSON.stringify({at:now(),eventId:event.id,kind:autoKind,sentTo:'executor'})+'\n');
+        state.lastAutoContinue={kind:autoKind,eventId:event.id};state.progressWait=null;
+        state.seen.push(turn.id);state.cursor=nextCursor;checkpoint();continue;
+      }
+      if(autoKind){
+        // The same stop twice in a row means the fixed reply did not help, so the supervisor looks at why.
+        event.autoContinueRepeat={kind:autoKind,previousEventId:state.lastAutoContinue.eventId};
+        fs.appendFileSync(path.join(run,'auto-continue.jsonl'),JSON.stringify({at:now(),eventId:event.id,kind:autoKind,sentTo:'supervisor'})+'\n');
+      }
+      delete state.lastAutoContinue;
       if (event.kind === 'progress') {
         const repeated = state.lastProgressAction === event.nextAction ? (state.repeatedProgress || 0) + 1 : 1;
         state.lastProgressAction = event.nextAction;

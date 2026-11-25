@@ -10,6 +10,8 @@
 
 部署相關開發包派出前，在 sidecar 的 `deployment-targets.json` 登記 `targets` 陣列。每項填 `component`、`runtime`、`identity`、`dependencies`、`configuration`、`verify` 及 `source`（可讀規格或目標機回執的絕對路徑）。在工作包加入一行 `[部署元件] ["元件名"]` 連回該表，資料庫憑證等只記設定來源與授權。主線讀原文判斷是否適用；跨主機的本機測試另記其涵蓋範圍。
 
+受監督時，`deployment-targets.json` 另加頂層 `environments` 陣列，照契約環境表逐個環境填 `name`、`location`、`purpose`、`allowedTests`、`data`、`acceptance`（環境驗收結果的證據路徑）。工作包的測試只在它允許的環境跑，派工前核對。要換環境交監督，不自行另起容器或改用其他主機（工區 E 11/25 19:27 在 Mac 另起容器測交接，25 分鐘後撤回）。
+
 查證包在派出時列一行 `[待回答問題] ["原問題一","原問題二"]`。收回時逐題填 `status.answers`，每項有 `question`、`finding`、`evidence`（既有檔案絕對路徑清單）。來源只回答部分時，加 `gap:true` 並列 returned、integrated=false，由主線核對版本、環境、時間和授權，補件後才整合。工具清單可以證明已安裝的版本，資料庫操作權限須另有對應依據。
 
 送審用監督技能 `candidate.cjs RUN <sidecar 目錄> <工作包 ID[,ID…]> <清單絕對路徑> <交付檔…>` 一步完成：產生候選清單、把 `submission:{revision,manifest}` 寫進列出的工作包並重產派工快照，再印出完整 `submission` 事件行原樣貼上，不另外手動登記版本；裁決要逐包對到這次登記的工作包。收到階段裁決，當輪將 `ruling:{eventId,revision}` 放進 collect 的結果檔，依裁決更新該次送審、已採認及尚待驗的條文，讀回快照。壓縮或中斷後，以原事件及包內的 appliedRulings 續接。多包同次送審用同一個 collect 收回，附帶的 collectionNotes 在這次收件處理。

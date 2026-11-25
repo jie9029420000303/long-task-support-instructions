@@ -37,15 +37,18 @@ const executorCalls=f=>fs.existsSync(f.sent+'.args.json')?read(f.sent+'.args.jso
 
 // Jay 2026-11-08: 主線寫明下一步就直接續做，其他所有停下一律立刻交監督. A declared wait used to keep both chats idle until
 // its timer ran out (WEB 20:40 and 20:57: 8 and 9 minutes with nobody working); now the supervisor sees it at once.
+// Since v1.17.0 a wait with nothing observable, or with every source finished, goes back to the executor instead
+// (test_v1170_auto_continue.cjs); a wait on something still running is the one the supervisor reviews.
 test('a declared wait reaches the supervisor at once with what the background program can observe',async()=>{
-  const f=setup('Background command is running.\nLONG_TASK_EVENT '+JSON.stringify({kind:'waiting',nextAction:'Read the background result',waitMinutes:1}));
+  const f=setup(root=>'Background command is running.\nLONG_TASK_EVENT '+JSON.stringify({kind:'waiting',nextAction:'Read the background result',waitMinutes:1,
+    waitFor:[{path:path.join(root,'result.json'),sha256:null}]}));
   try{
     await until(()=>fs.existsSync(f.sent)&&read(f.sent).length===1);
     const call=read(f.sent+'.args.json')[0],state=read(path.join(f.run,'daemon-state.json'));
     assert.equal(call.threadId,'supervisor-qa','a declared wait is a stop, and every stop without a named next step goes to the supervisor');
     assert.match(call.prompt,/LONG_TASK_DELIVERY:review-executor-turn-1/);
     assert.equal(state.pending.kind,'waiting');
-    assert.equal(state.pending.completion.observable,false,'the supervisor learns that nothing observable would end this wait');
+    assert.equal(state.pending.completion.running.length,1,'the supervisor learns what is still running for this wait');
     assert.equal(state.progressWait.event.id,'executor-turn-1','the wait stays registered for its result');
     await new Promise(resolve=>setTimeout(resolve,300));
     assert.deepEqual(executorCalls(f),[],'while the supervisor reviews, only a real result goes to the executor');
