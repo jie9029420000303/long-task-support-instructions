@@ -3,7 +3,8 @@
 // subscription while the weighted weekly remainder of the usable accounts is at least 35%; below that, or while every
 // usable account has used 80% of its five-hour window, the executor moves to Sol so the rest stays for the Opus supervisor.
 // The one change made in OpenCodex is the account stop line (Jay 2026-11-23, Q68 A): an account whose own threshold
-// (OpenCodex 自訂門檻) is set is paused once its weekly use reaches it and resumed after its weekly reset.
+// (OpenCodex 自訂門檻) is set is paused once its weekly use reaches it and resumed after its weekly reset, or as soon as
+// a reading finds its threshold raised above (or cleared from) its weekly use (Jay 2026-11-26).
 // The same reading covers the OpenAI subscription (Jay 2026-11-25「能否在剩下2%時長任務就跳過openai帳號，但不用切暫停」):
 // once every OpenAI account Jay has not paused is down to its last 2%, every role skips the subscription GPT models so
 // the rest stays for Jay's own use (voice). Nothing is paused in OpenCodex for it.
@@ -74,6 +75,9 @@ function evaluate(data,now=Date.now(),previous=null,stopped=new Set()){
 // Stop line (Q68 A). Only an account whose own threshold is set in OpenCodex has one; the pool-wide threshold stays a
 // routing preference. The ledger names the accounts this program paused, so only those are ever resumed: an account
 // Jay paused stays paused. If Jay resumes a stopped account himself, it is left in use until its weekly reset.
+// Every reading judges a stopped account again by the threshold OpenCodex holds now (Jay 2026-11-26「讓背景程式每次讀額度時
+// 用最新門檻重新判斷已暫停的帳號，門檻調高到已用量以上就自動恢復」): once its weekly use is under the current line, or it
+// has no line any more, it is resumed and the record dropped, so the new line pauses it again when reached.
 // An account whose weekly use cannot be read is neither paused nor resumed. Both runs share one ledger.
 function stopsFile(run){
   if(process.env.LONG_TASK_ACCOUNT_STOPS_FILE)return process.env.LONG_TASK_ACCOUNT_STOPS_FILE;
@@ -97,15 +101,16 @@ function planStops(data,ledger,now=Date.now()){
   for(const account of (Array.isArray(data?.accounts)?data.accounts:[])){
     if(!account||account.provider!=='anthropic'||!account.id)continue;
     const entry=ledger.accounts[account.id], q=account.quota||{}, label=account.label||account.id;
+    const line=stopLine(account);
+    const weekly=fresh(q.weeklyPercent,q.weeklyResetAt,now)?q.weeklyPercent:null;
     if(entry?.state==='paused'){
       if(now>=entry.resetAt){actions.push({type:account.paused?'resume':'forget',id:account.id,label});continue;}
       // Jay resumed it himself (a minute after the pause, so a reading taken at the pause is not mistaken for that).
       if(!account.paused&&now-entry.pausedAt>=60000)actions.push({type:'released',id:account.id,label,until:entry.resetAt});
+      else if(account.paused&&weekly!==null&&(line===null||weekly<line))actions.push({type:'resume',id:account.id,label,line,weekly});
       continue;
     }
     if(entry?.state==='released'){if(now<entry.until)continue;actions.push({type:'forget',id:account.id,label});}
-    const line=stopLine(account);
-    const weekly=fresh(q.weeklyPercent,q.weeklyResetAt,now)?q.weeklyPercent:null;
     if(account.paused||line===null||weekly===null||weekly<line)continue;
     actions.push({type:'pause',id:account.id,label,line,weekly,resetAt:q.weeklyResetAt});
   }
