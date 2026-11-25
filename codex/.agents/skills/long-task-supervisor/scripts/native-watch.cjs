@@ -882,6 +882,7 @@ async function handleRateLimits() {
     // The refused thread's own rollout names the reset; its file is kept so later looks can still find that error.
     const files = [hit.file || pace.sessionFile(hit.threadId)].filter(Boolean);
     const reset=hit.quotaReset||(hit.failure?{until:hit.at+fallback.FAILURE_COOLDOWN_MS,basis:hit.silent?fallback.SILENT_BASIS:fallback.FAILURE_BASIS,cooldown:'failure'}:
+      hit.unsupported?{until:hit.at+fallback.FALLBACK_MS,basis:fallback.UNSUPPORTED_BASIS,cooldown:'unsupported'}:
       open&&hit.status!==402?{until:hit.at+fallback.OPENROUTER_COOLDOWN_MS,basis:fallback.OPENROUTER_BASIS,cooldown:'short'}:fallback.resetFor(plain,hit.at,files));
     if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...reset};
     else {

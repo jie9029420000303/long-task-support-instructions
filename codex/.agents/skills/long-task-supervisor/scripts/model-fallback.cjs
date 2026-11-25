@@ -12,6 +12,7 @@ const FALLBACK_MS=5*60*60*1000;
 // left for 30 minutes; an open-source rate limit is short-lived and is retried after 15 minutes (2026-11-21 review).
 const FAILURE_COUNT=3,FAILURE_SPAN_MS=60000,FAILURE_COOLDOWN_MS=30*60000,OPENROUTER_COOLDOWN_MS=15*60000;
 const FAILURE_BASIS='連續失敗（非額度），暫停此順位 30 分鐘',OPENROUTER_BASIS='開源順位短暫限速，15 分鐘後再試',SILENT_BASIS='切換後沒有成功回應，暫停此順位 30 分鐘';
+const UNSUPPORTED_BASIS='目前的帳號不支援這個模型，5 小時後再試';
 const catalog=require('./model-catalog.cjs');
 // The OpenAI subscription first, then the OpenAI API key (Jay 2026-11-25「兩邊都排，順位接在openai月訂閱戶後面」).
 const GPT_ACCOUNTS=['','openai-apikey/'];
@@ -216,7 +217,11 @@ function recovered(state,now=Date.now()){
   }
   return changed;
 }
-function isLimit(row){return row.status===429||row.status===402||row.failureCause==='rate-limit'||['rate_limit_exceeded','insufficient_quota'].includes(row.errorCode);}
+// OpenCodex marks a model the serving account cannot run as model_unavailable (HTTP 400). Retrying the same route
+// cannot fix it, so it is a refusal like a quota limit (Jay 2026-11-25 Q1 A: 10:58～11:03 the free account refused
+// gpt-6.2-sol three times and the chats waited for three failures over a minute before moving).
+function unsupported(row){return row.upstreamCondition==='model_unavailable';}
+function isLimit(row){return row.status===429||row.status===402||row.failureCause==='rate-limit'||unsupported(row)||['rate_limit_exceeded','insufficient_quota'].includes(row.errorCode);}
 // OpenCodex answers 429 itself when the upstream connection drops and it will not replay the request. For the
 // supervisor that is a broken connection counted with its other failures, not a quota refusal (Jay 2026-11-23 Q67:
 // one such answer at 15:31 took 工區 E's supervisor off Opus on the 5-hour default with quota left). The executor
@@ -264,7 +269,8 @@ function checkQuotaTurn(check,owner){
   }
 }
 const hitOf=(owner,row)=>({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),status:row.status,
-  ...(connectionReset(row)?{connectionReset:true}:{}),error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
+  ...(connectionReset(row)?{connectionReset:true}:{}),...(unsupported(row)?{unsupported:true}:{}),
+  error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
 function readRange(file,from,to){
   const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(to-from);
   try{fs.readSync(fd,buffer,0,buffer.length,from);}finally{fs.closeSync(fd);}
@@ -409,6 +415,7 @@ function publish(run,state,now=Date.now(),fourth=null){
 function switchReason(hit,target,silentMs){
   if(!hit)return '前面的順位 '+target+' 已可再用：';
   if(hit.connectionReset)return 'OpenCodex 連線中斷（OpenCodex 自己回 429，不是額度被拒）：';
+  if(hit.unsupported)return '目前的帳號不支援 '+hit.model+'（OpenCodex 回 model_unavailable）：';
   if(hit.silent)return '切換後 '+Math.round(silentMs/60000)+' 分鐘（不含電腦睡眠）沒有成功回應：';
   if(hit.failure)return '目前模型連續出錯（'+String(hit.error||'').slice(0,80)+'）：';
   if(hit.status===402)return 'OpenRouter 餘額不足：';
@@ -420,8 +427,9 @@ function restoreReason(limit){
   const basis=limit?.basis;
   if(basis===FAILURE_BASIS||basis===SILENT_BASIS||limit?.cooldown==='failure')return '原模型的失敗暫停已結束。';
   if(basis===OPENROUTER_BASIS)return '原模型的短暫限速已結束。';
+  if(basis===UNSUPPORTED_BASIS||limit?.cooldown==='unsupported')return '原模型已可再用。';
   return '額度已恢復。';
 }
-module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,OPENROUTER_ACCOUNT,
+module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,UNSUPPORTED_BASIS,OPENROUTER_ACCOUNT,
   modelPolicy,finalReviewer,solRoutes,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,subscriptionOpenAI,held,migrateLimits,syncApiMonth,recordApiMonth,
   chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish,switchReason,restoreReason};
