@@ -56,7 +56,7 @@
 [上次推論] 研究交回後重做時寫第 2 次的檔次（low|medium|high|xhigh|max）；其他情況省略
 [研究來源工作包] 研究包才寫：原工作包 id
 [狀態] 一行 JSON，是這包狀態的唯一紀錄：新建 {"list":"ready"}；派出 {"list":"inFlight","handle":"agent:<id>","baseline":{…}}；收回 {"list":"returned","resultEvidence":["<回報檔>"]}；核對完 {"list":"completed"}；受阻 {"list":"blocked","kind":"…"}（kind 只限四種原因，見 SKILL「積極派工」第 8 點）；不再是當前工作 {"list":"archived"}。受監督時用 `dispatch.cjs mark` 改，同一指令重產派工快照
-[驗收條目] 這包推進的驗收條件 ID（受監督時成為快照的 acceptanceIds）；沒有就省略
+[驗收條目] 這包推進的驗收條件 ID，只寫現行契約的條文 ID，派工工具會擋下其他文字（受監督時成為快照的 acceptanceIds）；沒有就省略
 [區段] 這包所屬的區段 ID（受監督且 run 有區段表時必填，成為快照的 segment；一次送審只送一個區段）
 [候選版] 版號／雜湊、來源路徑或 URL
 [工作區] 每行一個：path:<絕對路徑>、worktree:<唯一識別值>、base:<commit 或 SHA-256>
