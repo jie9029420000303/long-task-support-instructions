@@ -12,6 +12,7 @@ const { releaseAnnounced, stillCurrent } = require('./dispatch-audit.cjs');
 const pace = require('./pace.cjs');
 const pending = require('./pending-decisions.cjs');
 const login = require('./login-check.cjs');
+const segments = require('./segments.cjs');
 const { queued: handoffQueue } = require('./handoff-lib.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
@@ -101,6 +102,9 @@ function init() {
   // executor chat) takes that run's locked contract, amendment journal and pending ledger byte for byte (inheritFrom).
   const {contract, inherited} = contractState.startContract(input);
   validateContract(contract, inherited ? {run:inherited.run, binding:inherited.binding} : {});
+  // The supervisor's segment table may come with the contract (Jay 2026-11-25); it is checked before the run exists.
+  const criterionIds = (inherited ? contractState.effective(inherited.run, inherited.binding) : contract).criteria.map(item => item.id);
+  if (input.segments !== undefined) segments.validate(input.segments, criterionIds);
   const visible = visibleSupervisor(input.supervisorId,input.projectRoot,input.executorId);
   const supervisorLog = visible.log;
   need(desktopLog(supervisorLog),'Supervisor is not a Claude Desktop conversation');
@@ -120,6 +124,7 @@ function init() {
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
   else save(path.join(run, 'contract.json'), contract);
   login.write(run, input.loginSites);
+  if (input.segments !== undefined) segments.write(run, input.segments, criterionIds);
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
   fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   fs.writeFileSync(path.join(run, 'executor-prompt.txt'),
@@ -182,6 +187,14 @@ function executorQueue() {
 // Everything one wake needs, in one call: the event, whether the watcher runs, pace against baselines, the
 // executor's latest words and the dispatch picture. A wake that reads this instead of probing file by file
 // re-reads its long conversation context fewer times (Jay 2026-10-07: about 3M cached tokens per check).
+// The supervisor writes or adjusts the segment table; the mainline proposes changes by question (Jay 2026-11-25 3A).
+function segmentTable() {
+  const {binding} = load(), state = read(path.join(run, 'daemon-state.json'));
+  contractState.supervisorOnly(binding);
+  need(!fs.existsSync(path.join(run, 'STOP')) && !['accepted', 'stopped'].includes(state.phase), 'Stopped or accepted run cannot be changed');
+  const written = segments.write(run, read(inputArgument), contractState.effective(run, binding).criteria.map(item => item.id));
+  return {recorded:true, file:path.join(run, segments.FILE), segments:written.map(item => ({id:item.id, criteria:item.criteria.length, dependsOn:item.dependsOn}))};
+}
 function brief() {
   const {binding} = load(), state = read(path.join(run, 'daemon-state.json')), snapshot = snapshotOf(binding);
   const agentSource = require('./activity-correlation.cjs').localRuns(binding);
@@ -215,6 +228,8 @@ function brief() {
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     // Every remaining package blocked with none ready or in flight (2026-11-10): check each reason before accepting a wait.
     allBlocked:snapshot ? require('./dispatch-audit.cjs').allBlocked(snapshot) : null,
+    // Each segment and the criteria passed so far (Jay 2026-11-25): a submission names its segment and criteria.
+    segments:segments.progress(segments.read(run), snapshot?.acceptance?.items),
     eventQueue:executorQueue().map(({id, kind, at}) => ({id, kind, at})),
     // The whole pending-decision ledger on every wake, so compaction never loses what waits on Jay.
     pendingDecisions:pending.view(run, state), questionPush:pending.pushProblem(run), recentDecisions:resolved, unconfirmedDeliveries:state.unconfirmedDeliveries || {}};
@@ -463,7 +478,7 @@ function progressPreflight(){const {binding}=load(),state=read(path.join(run,'da
       :command==='pending'?pendingChange():command==='ask'?(load(),pending.ask(run))
       // Jay hears about the batch on his phone too (Jay 2026-10-29), one push per batch.
       :command==='shown'?await pending.pushShown(run,pending.shown(run,process.argv.slice(4),{binding:load().binding}),'Claude 的監督對話')
-      :command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
+      :command==='segments'?segmentTable():command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()
       :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision-preflight RUN FILE EVENT_HASH CONTRACT_HASH STATE_HASH_OR_DASH, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));

@@ -80,6 +80,8 @@ function packagesFrom(stateDir,overrides){
     const {list,...extra}=status(raw,file);if(list==='archived')continue;
     const header=tagLine(text,'工作包')||'',ids=listOf(tagLine(text,'驗收條目'));
     const record={id:packageId(text,file),...extra,evidence:[file,...(extra.evidence||[])]};
+    // [區段] names the segment the package works for (Jay 2026-11-25); the status JSON wins when it names one too.
+    const segment=tagLine(text,'區段');if(segment&&record.segment===undefined)record.segment=segment;
     if(workerStart && list==='inFlight' && !record.baseline && !record.activeTurnId){
       const fromFile=workerStart.declared(tagLine(text,'baseline'));
       if(fromFile && (!record.startedAt || Date.parse(record.startedAt)===Date.parse(fromFile.startedAt)))record.baseline=fromFile;
@@ -143,6 +145,11 @@ function build(run,binding,stateDir,options,overrides,packageDir){
 }
 function checked(run,binding,value){
   parse(value,binding);
+  // Once the supervisor has a segment table, a package's segment must be one of its segments.
+  const table=require('./segments.cjs').read(run);
+  if(table){const known=new Set(table.map(item=>item.id));
+    for(const item of Object.values(value.packages||{}).flat())if(item.segment!==undefined&&!known.has(item.segment))
+      throw Error('Work package '+item.id+' names segment '+item.segment+', which is not in segments.json');}
   if(value.acceptance)acceptance.validate(value.acceptance,contractState.effective(run,binding));
   else if(binding.dispatchAudit?.acceptance||fs.existsSync(path.join(run,'acceptance-history.jsonl')))throw Error('Acceptance progress is missing from the current snapshot');
   return value;
@@ -210,7 +217,7 @@ try{
       try{return !JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8')).packages.inFlight.some(item=>item.id===positional[3]&&item.handle===state.handle);}catch{return true;}})();
     if(starting){staggeredMs=machine.staggerWait(run);if(staggeredMs>0)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,staggeredMs);}
     acquire(run);
-    const overrides=[],updates=[],counted=[];
+    const overrides=[],updates=[],counted=[],submittedSegments=[];
     if(command==='resume-observed'){
       const snapshot=JSON.parse(fs.readFileSync(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json'),'utf8'));
       const [threadId,turnId]=positional.slice(3);
@@ -246,7 +253,7 @@ try{
         const text=fs.readFileSync(wpFile,'utf8'),before=JSON.parse(tagLine(text,'狀態')||'{}');
         if(submission){
           if(['completed','archived'].includes(before.list))throw Error('送審：'+id+' 已是 '+before.list+'，不能登記送審版本；改登記仍在進行的工作包，或先開新的工作包');
-          result.state={...before,submission};
+          result.state={...before,submission};submittedSegments.push(before.segment||tagLine(text,'區段'));
         }
         if(result.state.appliedRulings && JSON.stringify(result.state.appliedRulings)!==JSON.stringify(before.appliedRulings))throw Error('Use collect with the delivered ruling');
         if(before.appliedRulings)result.state.appliedRulings=before.appliedRulings;
@@ -266,6 +273,14 @@ try{
         updates.push(...result.updates);
       }
     }
+    // With a segment table one submission is one segment (Jay 2026-11-25): the event names it and its criteria, so the
+    // supervisor rules on that segment while the mainline starts the next.
+    let segmentOf=null;
+    if(submission){const table=require('./segments.cjs').read(run);
+      if(table){const named=[...new Set(submittedSegments)];
+        if(named.length!==1||!named[0])throw Error('送審：有區段表時一次只送一個區段，每個工作包都要有同一個 [區段] 行（這次是 '+JSON.stringify(named)+'）');
+        const segment=table.find(item=>item.id===named[0]);if(!segment)throw Error('送審：區段 '+named[0]+' 不在 segments.json');
+        segmentOf={segment:segment.id,criteria:segment.criteria};}}
     // Validate the whole snapshot before touching any package file, so a rejected change leaves everything as it was.
     const draft=build(run,binding,stateDir,options,overrides,packageDir);applyAcceptance(draft,updates);reviewed(draft,binding,flag('reviewed'));
     const notes=review && command==='collect'?require('./review-followup.cjs').collectionNotes(run).filter(n=>!draft.readCollectionNotes?.includes(n.eventId)):[];
@@ -292,7 +307,7 @@ try{
     console.log(JSON.stringify({written:true,path:written,planningRevision:value.planningRevision,activity:value.activity,packages:counts,reconciliation:planReview(value,binding,run),
       ...(staggeredMs>0?{staggeredSeconds:Math.round(staggeredMs/1000)}:{}),
       ...(notes.length?{collectionNotes:notes}:{}),
-      ...(submission?{submission,event:'LONG_TASK_EVENT '+JSON.stringify({kind:'submission',...submission})}:{}),
+      ...(submission?{submission,...segmentOf,event:'LONG_TASK_EVENT '+JSON.stringify({kind:'submission',...submission,...segmentOf})}:{}),
       ...(rework_.length?{rework:rework_.map(r=>({criterionId:r.criterionId,failures:r.failures,held:r.held,
         next:r.held?'這條已累計 '+rework.LIMIT+' 次不合格：另派研究子代理（推論 xhigh，研究工作包不列這條），研究交回用 rework.cjs research 登記':'同一模型推論升兩檔（最高 max）開新的子代理重做，附這次的具體指正'}))}:{}),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));

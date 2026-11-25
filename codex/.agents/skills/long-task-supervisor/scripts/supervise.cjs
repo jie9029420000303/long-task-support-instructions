@@ -8,6 +8,7 @@ const { stillCurrent } = require('./dispatch-audit.cjs');
 const pace = require('./pace.cjs');
 const pending = require('./pending-decisions.cjs');
 const login = require('./login-check.cjs');
+const segments = require('./segments.cjs');
 const [command, runArg, other] = process.argv.slice(2);
 const run = runArg && path.resolve(runArg);
 const now = () => new Date().toISOString();
@@ -47,6 +48,9 @@ function init() {
   // questions; every check runs before the run directory exists, so a refusal leaves nothing half made.
   const { contract, inherited } = contractState.startContract(input);
   validateContract(contract, inherited ? { run: inherited.run, binding: inherited.binding } : {});
+  // The supervisor's segment table may come with the contract (Jay 2026-11-25); it is checked before the run exists.
+  const criterionIds = (inherited ? contractState.effective(inherited.run, inherited.binding) : contract).criteria.map(item => item.id);
+  if (input.segments !== undefined) segments.validate(input.segments, criterionIds);
   // Every login the task uses was checked before Jay was asked anything (start step 1); the same list goes into the
   // run here, so the hourly check never starts empty (the 2026-10-13 v117 run had no login list at all).
   need(Array.isArray(input.loginSites), 'loginSites is required: the login list checked at start step 1 with login-check.cjs, or [] when the task uses no login');
@@ -59,6 +63,7 @@ function init() {
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
   else write(path.join(run, 'contract.json'), input.contract);
   login.write(run, input.loginSites);
+  if (input.segments !== undefined) segments.write(run, input.segments, criterionIds);
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
   fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   const binding = {
@@ -180,6 +185,8 @@ function brief() {
       inFlight:(snapshot.packages?.inFlight || []).map(item => item.id), blocked:(snapshot.packages?.blocked || []).map(item => ({id:item.id, kind:item.kind}))} : null,
     // Every remaining package blocked with none ready or in flight (2026-11-10): check each reason before accepting a wait.
     allBlocked:snapshot ? require('./dispatch-audit.cjs').allBlocked(snapshot) : null,
+    // Each segment and the criteria passed so far (Jay 2026-11-25): a submission names its segment and criteria.
+    segments:segments.progress(segments.read(run), snapshot?.acceptance?.items),
     dispatchReconciliation:snapshot?require('./dispatch-audit.cjs').planReview(snapshot,binding,run):null,
     // Executor events waiting behind the pending one, oldest first; native-watch hands them over one by one.
     eventQueue:(state.eventQueue || []).map(({id, kind, at}) => ({id, kind, at})),
@@ -387,6 +394,14 @@ function relocateSources() {
   validateContract(contract, {run, binding});
   return {run, relocated:manifest.entries.length, manifest:path.join(run, 'source-relocations.json')};
 }
+// The supervisor writes or adjusts the segment table; the mainline proposes changes by question (Jay 2026-11-25 3A).
+function segmentTable() {
+  const {binding} = load(), state = read(path.join(run, 'daemon-state.json'));
+  contractState.supervisorOnly(binding);
+  need(!fs.existsSync(path.join(run, 'STOP')) && !['accepted', 'stopped'].includes(state.phase), 'Stopped or accepted run cannot be changed');
+  const written = segments.write(run, read(other), contractState.effective(run, binding).criteria.map(item => item.id));
+  return {recorded:true, file:path.join(run, segments.FILE), segments:written.map(item => ({id:item.id, criteria:item.criteria.length, dependsOn:item.dependsOn}))};
+}
 function dispatchPreflight() {
   const {binding}=load(),state=read(path.join(run,'daemon-state.json'));
   need(state.pending?.id===other&&state.pending.kind==='dispatch_review','No matching pending dispatch review');
@@ -408,6 +423,7 @@ try {
     : command === 'shown' ? shown()
     : command === 'relocate-sources' ? relocateSources()
     : command === 'attach-dispatch' ? attachDispatch()
+    : command === 'segments' ? segmentTable()
     : command === 'dispatch-preflight' ? dispatchPreflight()
     : command === 'stop' ? stop()
     : command === 'pause' ? pause()

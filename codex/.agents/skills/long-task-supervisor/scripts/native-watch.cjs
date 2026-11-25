@@ -445,6 +445,8 @@ function extractEvent(turn, message) {
   if (item.kind === 'submission' && (!/^sha256:[a-f0-9]{64}$/.test(item.revision) || typeof item.manifest !== 'string')) item = {kind:'protocol_error'};
   if (['progress','waiting'].includes(item.kind) && !(typeof item.nextAction === 'string' && item.nextAction.trim())) item = {kind:'protocol_error'};
   return {id:turn.id,kind:item.kind,revision:item.revision || null,manifest:item.manifest || null,nextAction:item.nextAction || null,
+    // A submission of one segment names it and its criteria (Jay 2026-11-25), as candidate.cjs prints them.
+    ...(item.kind==='submission'&&typeof item.segment==='string'?{segment:item.segment,criteria:Array.isArray(item.criteria)?item.criteria:[]}:{}),
     waitMinutes:Number.isFinite(item.waitMinutes)?item.waitMinutes:null,
     ...(Array.isArray(item.waitFor)?{waitFor:item.waitFor}:{}),text,at:now()};
 }
@@ -926,6 +928,17 @@ async function handleRateLimits() {
   state.routeWaitMigrated=true;
   // This incremental reader also runs while a decision is pending.
   clock.readExecutor(state,binding);
+  // A chat set to another model by hand after this watcher switched it runs from that choice: the switch record no
+  // longer says what the chat runs, so it is closed and the chosen model is judged like any start, by the order and the
+  // Claude reserve (Jay 2026-11-25 Q13 A: 工區 E was set to Opus at 13:26 while the record still said Muse, and neither
+  // looked at Opus; it would have used the supervisor's Claude quota until the OpenAI pauses ended at 16:58). A chat set
+  // back to its original model is left to the restore below, which records it as already on the original.
+  for(const [id,record] of Object.entries(state.modelSwitch||{})){
+    if(record.restored||record.delivery)continue;
+    const seen=id===binding.executorId?state.executorSettings:fallback.settingsOf(id),chosen=setModel(id);
+    if(!chosen||chosen===record.current||chosen===record.original)continue;
+    if(Date.parse(seen?.applied?.at||seen?.at)>record.since){record.restored=now();record.restoredBy='manual-change';dirty=true;}
+  }
   if(state.switchQueue?.length){
     // A worker's refusal reaches the same conversation as its mainline's: keep the one for the model the chat runs.
     for(const hit of state.switchQueue)if(waiting[hit.threadId]?.model!==setModel(hit.threadId))waiting[hit.threadId]=hit;

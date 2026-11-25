@@ -98,6 +98,7 @@ function eventOf(text,id){
       value=known&&fs.existsSync(path.join(run,'handoff-request-'+value.id+'.json'))?{...value,kind:'queued_mirror'}:{kind:'protocol_error'};
   }
   return {id:value.id||id,kind:value.kind,revision:value.revision||null,manifest:value.manifest||null,
+    ...(value.kind==='submission'&&typeof value.segment==='string'?{segment:value.segment,criteria:Array.isArray(value.criteria)?value.criteria:[]}:{}),
     nextAction:value.nextAction||null,waitMinutes:Number.isFinite(value.waitMinutes)?value.waitMinutes:null,
     ...(Array.isArray(value.waitFor)?{waitFor:value.waitFor}:{}),
     ...(uuidExecutionWatch(value.executionWatch)?{executionWatch:value.executionWatch}:{}),
