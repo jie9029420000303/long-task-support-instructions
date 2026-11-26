@@ -50,7 +50,7 @@
 | 介面子代理 | 具瀏覽器／視覺能力中總成本最低者 @ Low | `sonnet` @ low | 未選 Haiku 4.5（不支援 effort 層級，會讓升檔失效） |
 | 升一檔 | 同模型改推理值 | 改派下一檔的 Agent 定義（effort 只能寫在定義檔） | 需 12 個定義檔；缺檔屬執行阻塞 |
 | 子代理不得 Git | 指令約束 | `tools` 排除 Agent／Edit／Write（依角色）＋ PreToolUse hook 擋 git/gh 寫入 | hook 只擋 Bash 內的 git／gh，其他不可逆操作仍靠指令與 CLAUDE.md |
-| 主線親手動手的提醒 | 背景程式讀主線的工具呼叫：第一次親手改程式、跑測試或 sleep 時傳訊要求改派，同一回合再犯才叫醒監督（2026-11-26） | 尚未實作：`claude-watch.cjs` 不讀主線的工具呼叫，只靠技能的派工規則 | 待補偵測 |
+| 主線親手動手的提醒 | 背景程式讀主線的工具呼叫：第一次親手改程式、跑測試或 sleep 時傳訊要求改派，同一回合再犯才叫醒監督（2026-11-26） | 第一次由執行對話的 PreToolUse hook（`activity-correlation.cjs hook`）放行並附改派訊息；同一回合再犯由 `claude-watch.cjs` 以 `self_work` 叫醒監督 | 需在使用者層設定加一條 hook；背景監看讀不到 hook 有沒有送出，只數同一回合的次數 |
 | 安裝位置 | `codex/.agents/skills/` | `.claude/skills/` 與 `.claude/agents/` | — |
 
 ## 驗證紀錄（2026-09-14／15 實跑）

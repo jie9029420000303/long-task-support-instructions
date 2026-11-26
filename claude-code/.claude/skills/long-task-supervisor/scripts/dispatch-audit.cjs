@@ -7,7 +7,7 @@ const machine=require('./machine.cjs');
 const activityCorrelation=require('./activity-correlation.cjs');
 
 const kinds=['ready_capacity','returned_unintegrated','resource_conflict','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn',
-  'main_write_review','agent_untracked','agent_finished_inflight','wp_mismatch','wp_source_unknown','planning_review','dependency_ready_review'];
+  'self_work','agent_untracked','agent_finished_inflight','wp_mismatch','wp_source_unknown','planning_review','dependency_ready_review'];
 // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time).
 const DOC_BUDGET_RATIO=1.5;
 const nonEmpty=value=>typeof value==='string'&&value.trim();

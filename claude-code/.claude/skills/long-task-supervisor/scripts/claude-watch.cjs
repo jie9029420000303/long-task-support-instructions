@@ -514,7 +514,6 @@ async function watch(){
     tickSleep();
     if(handoffRequest()){wake(state.pending);return;}
     const rows=readNew();
-    const dispatchHistory=rows.length&&state.executorKnowsRun?activityCorrelation.readHistory(run):null;
     if(rows.length)lastGrowthAt=Date.now();
     let finalized=false;const agentObservations={};
     for(const {row,start,end} of rows){
@@ -540,7 +539,7 @@ async function watch(){
           delete state.unconfirmedDeliveries[id];
         }
       }
-      if(state.executorKnowsRun)activityCorrelation.observeMainWrite(state,row,dispatchHistory);
+      if(state.executorKnowsRun)activityCorrelation.observeSelfWork(state,row);
       trackTools(row,start,agentObservations);trackExecutor(row,start);
       // Platform error rows are control signals, not assistant message text to assemble and persist.
       if(row.type==='assistant'&&row.isApiErrorMessage)continue;
