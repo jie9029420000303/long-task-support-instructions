@@ -14,11 +14,8 @@ const retryMs=()=>Number(process.env.LONG_TASK_NOTIFY_RETRY_MS)||5000;
 const readJson=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
 const hide=text=>String(text||'').replace(/bot\d+:[\w-]+/g,'bot<token>');
 function settings(){const telegram=readJson(configFile())?.telegram;return telegram?.chatId&&telegram.keychainService?telegram:null;}
-// User-level switches that survive upgrades (Jay 2026-11-23): questionPush, default off; cycleAlertThread, the chat a
-// repeated-failure notice goes to, default Veda對接對話.
-const VEDA_THREAD='01a20825-2c0c-7283-9c42-9fed54e30683';
+// User-level switch that survives upgrades (Jay 2026-11-23): questionPush, default off.
 const questionPush=()=>readJson(configFile())?.questionPush===true;
-const cycleAlertThread=()=>{const value=readJson(configFile())?.cycleAlertThread;return value===false?null:typeof value==='string'&&value.trim()?value.trim():VEDA_THREAD;};
 function token(telegram){
   if(process.env.LONG_TASK_TELEGRAM_TOKEN)return process.env.LONG_TASK_TELEGRAM_TOKEN; // tests only
   return execFileSync('security',['find-generic-password','-s',telegram.keychainService,'-a',telegram.keychainAccount||'','-w'],
@@ -81,12 +78,12 @@ function configure(service,account,source){
     configuredAt:new Date().toISOString()}},null,2)+'\n',{mode:0o600});
   return {configured:true,file:configFile()};
 }
-module.exports={post,sendOnce,sent,mark,settings,configFile,home,questionPush,cycleAlertThread,VEDA_THREAD};
+module.exports={post,sendOnce,sent,mark,settings,configFile,home,questionPush};
 if(require.main===module){
   const [command,...args]=process.argv.slice(2);
   (async()=>{
     const result=command==='configure'?configure(...args)
-      :command==='status'?{configured:Boolean(settings()),file:configFile(),questionPush:questionPush(),cycleAlertThread:cycleAlertThread()}
+      :command==='status'?{configured:Boolean(settings()),file:configFile(),questionPush:questionPush()}
       :command==='test'?await post(args.join(' ')||'【測試】長任務監督推播測試，不用處理。')
       :(()=>{throw Error('Commands: status, test [TEXT], configure KEYCHAIN_SERVICE KEYCHAIN_ACCOUNT SOURCE_JSON');})();
     console.log(JSON.stringify(result));

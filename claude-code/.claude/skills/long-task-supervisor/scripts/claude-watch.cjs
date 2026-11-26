@@ -430,9 +430,9 @@ async function pushQuestions(){
     const result=await questions.pushOpen(run,{title:'Claude 的監督對話'});
     if(!result.skipped||result.error)state.questionPush={ok:result.ok,key:result.key||null,error:result.error||null,at:now()};
   }catch(error){state.questionPush={ok:false,error:error.message,at:now()};}
-  // The same criterion studied twice (then every two more) becomes an open item that Veda's thrice-daily summary
-  // lists until Jay answers (Jay 2026-11-24). This watcher has no Codex app connection, so the at-once message to
-  // Veda對接對話 is sent only by the Codex watcher; Claude runs reach him through the summary.
+  // A criterion that failed a sixth time and was studied becomes an open rework_decision that Veda's thrice-daily
+  // summary lists until Jay rules (Jay 2026-11-26). This watcher has no Codex app connection to wake the supervisor,
+  // so it registers the item itself.
   try{require('./rework.cjs').raiseAlerts(run,binding,{title:'Claude 的監督對話'});}
   catch(error){state.cycleAlert={ok:false,error:error.message,at:now()};}
 }
@@ -514,7 +514,6 @@ async function watch(){
     tickSleep();
     if(handoffRequest()){wake(state.pending);return;}
     const rows=readNew();
-    const dispatchHistory=rows.length&&state.executorKnowsRun?activityCorrelation.readHistory(run):null;
     if(rows.length)lastGrowthAt=Date.now();
     let finalized=false;const agentObservations={};
     for(const {row,start,end} of rows){
@@ -540,7 +539,7 @@ async function watch(){
           delete state.unconfirmedDeliveries[id];
         }
       }
-      if(state.executorKnowsRun)activityCorrelation.observeMainWrite(state,row,dispatchHistory);
+      if(state.executorKnowsRun)activityCorrelation.observeSelfWork(state,row);
       trackTools(row,start,agentObservations);trackExecutor(row,start);
       // Platform error rows are control signals, not assistant message text to assemble and persist.
       if(row.type==='assistant'&&row.isApiErrorMessage)continue;

@@ -151,17 +151,12 @@ test('the subagent reminder names runs above the default once, on either route, 
   assert.match(modelReminder([run('x','gpt-5.6-terra','high')],{mainModel:'gpt-6.1-sol',now}).text,/（Medium）/);
   // Claude Code logs no effort, so an Opus subagent is named by its model alone.
   assert.deepEqual(modelReminder([run('o','claude-opus-5-5',undefined)],{mainModel:'claude',now}).ids,['o']);
-  // Jay 2026-11-23: the Codex skill starts Sonnet general workers at High, so High is no longer named there; above
-  // High and Opus still are, and a Terra worker keeps Medium as its default.
-  const sonnet='anthropic/claude-sonnet-5-5',high={mainModel:opus,now,sonnetEffort:'high'};
-  assert.equal(modelReminder([run('a',sonnet,'high'),run('b',sonnet,'medium'),run('c',sonnet,'low')],high),null,'Sonnet at High is the Codex default');
-  const raised=modelReminder([run('a',sonnet,'high'),run('b',sonnet,'xhigh'),run('c',opus,'high')],high);
-  assert.deepEqual(raised.ids,['b','c']);
-  assert.match(raised.text,/高於技能預設（Sonnet／High，介面 Sonnet／Low）/);
-  assert.deepEqual(modelReminder([run('t','gpt-6.1-terra','high')],{mainModel:'gpt-6.2-sol',now,sonnetEffort:'high'}).ids,['t']);
-  const routes=require(codex+'/model-route.cjs');
-  assert.equal(routes.sonnetGeneral,'high','the watcher reads the reminder level from the routing program');
-  assert.match(fs.readFileSync(codex+'/native-watch.cjs','utf8'),/sonnetEffort:require\('\.\/model-route\.cjs'\)\.sonnetGeneral/);
+  // Jay 2026-11-26: with the mainline on Opus xhigh, Sonnet general workers start at Medium again on both skills
+  // (replacing 2026-11-23's High), so Sonnet at High is named once more; Terra keeps Medium.
+  const sonnet='anthropic/claude-sonnet-5-5',base={mainModel:opus,now};
+  const raised=modelReminder([run('a',sonnet,'high'),run('b',sonnet,'medium'),run('c',opus,'high')],base);
+  assert.deepEqual(raised.ids,['a','c']);
+  assert.match(raised.text,/高於技能預設（Sonnet／Medium，介面 Sonnet／Low）/);
 });
 
 test('codex: full access is approval never with the full-access sandbox, as the executor log records it',()=>{
@@ -232,7 +227,7 @@ test('codex: a subagent above the default is named once at the end of the next m
     f.start();
     await until(()=>f.calls().some(call=>call.prompt.includes('run the B6 checks')));
     const sent=f.calls().find(call=>call.prompt.includes('run the B6 checks'));
-    assert.match(sent.prompt,/全面加速[\s\S]*\n\n子代理模型提醒：最近 1 個子代理高於技能預設（Sonnet／High，介面 Sonnet／Low）：anthropic\/claude-opus-5-5／xhigh ×1。/);
+    assert.match(sent.prompt,/全面加速[\s\S]*\n\n子代理模型提醒：最近 1 個子代理高於技能預設（Sonnet／Medium，介面 Sonnet／Low）：anthropic\/claude-opus-5-5／xhigh ×1。/);
     await until(()=>(read(f.statePath).modelReminded||[]).includes('sub-1'));
   }finally{await f.stop();}
 });

@@ -1,37 +1,66 @@
 // Structural clues only. A tool call is not proof that a write succeeded or that a rule was broken.
 const path=require('node:path');
 const fs=require('node:fs');
-const CODE=/\.(?:[cm]?[jt]sx?|py|sh|bash|zsh|go|rs|java|kt|swift|rb|php|cs|cpp|cc|c|h|sql)$/i;
+const {inputSource}=require('./guard.cjs');
 
-// A snapshot describes when it was recorded, not the exact time a package started or stopped.
-function readHistory(run){
-  try{
-    const rows=fs.readFileSync(path.join(run,'dispatch-history.jsonl'),'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line));
-    if(rows.some(row=>!Number.isFinite(Date.parse(row?.at))||!Array.isArray(row.inFlight)||
-      row.inFlight.some(item=>!item||typeof item.id!=='string'||typeof item.handle!=='string')))return null;
-    return rows.sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
-  }catch{return null;}
+// The mainline splits, dispatches, judges deliveries and submits; Git merges and commits, deployments and the dispatch
+// tools are its own. Editing code or configuration (a merge conflict included), running any test and sleeping to wait
+// belong to subagents (Jay 2026-11-26 decisions 31 and 35, no allowance). The same rules as the Codex supervisor clock.
+const TEST_COMMAND=/(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|npx\s+(?:jest|vitest|playwright\s+test|mocha)\b|pytest\b|python3?\s+-m\s+(?:pytest|unittest)\b|node\s+--test\b|(?:go|cargo|dotnet|swift|mix)\s+test\b|(?:jest|vitest|mocha|phpunit|rspec)\b|playwright\s+test\b|make\s+(?:test|check)\b|(?:mvn|gradle|\.\/gradlew)\b[^;&|]*\btest\b|test-run\.py\b)/;
+// A wait the mainline sets itself: a command that is a sleep (after any cd), or a loop that sleeps between polls. A
+// deployment script's own waiting is not in the command line and is not counted.
+const SLEEP_COMMAND=/^\s*(?:cd\s+[^;&|]+(?:&&|;)\s*)*sleep\s+\d|\b(?:while|until)\b[\s\S]*\bsleep\s+\d/;
+const EDIT_COMMAND=/(?:^|[\s;&|(])(?:sed\s+(?:-[a-zA-Z]*\s+)*-i|perl\s+-[a-zA-Z]*i|git\s+apply\b|git\s+checkout\s+--(?:ours|theirs)\b|git\s+mergetool\b)/;
+const EDIT_TOOLS=['Edit','Write','MultiEdit','NotebookEdit'];
+// Not code or configuration: documents, status and work package files, evidence and the task's own state folders.
+const NOT_CODE=/\.(?:md|markdown|txt|log|png|jpe?g|gif|webp|pdf|csv)$/i;
+const OWN_FILES=/(?:^|\/)(?:wp|evidence|證據)[^/]*\/|\/\.(?:claude|codex)\/long-task\//i;
+// A supervisor run folder (event, research and decision inputs live there) holds binding.json and contract.json.
+function inRun(file){
+  for(let dir=path.dirname(file),depth=0;depth<8&&dir!==path.dirname(dir);dir=path.dirname(dir),depth++)
+    if(fs.existsSync(path.join(dir,'binding.json'))&&fs.existsSync(path.join(dir,'contract.json')))return true;
+  return false;
 }
-function observeMainWrite(state,row,history){
-  if(row?.type!=='assistant'||row.isSidechain||!Array.isArray(row.message?.content))return;
+function selfWorkOf(block){
+  if(block?.type!=='tool_use')return null;
+  const input=block.input||{};
+  if(EDIT_TOOLS.includes(block.name)){
+    const file=input.file_path||input.notebook_path||input.path;
+    return typeof file==='string'&&!NOT_CODE.test(file)&&!OWN_FILES.test(file)&&!(path.isAbsolute(file)&&inRun(file))?{kind:'edit',item:file}:null;
+  }
+  if(block.name!=='Bash'||typeof input.command!=='string')return null;
+  const item=input.command.replace(/\s+/g,' ').trim().slice(0,160);
+  if(TEST_COMMAND.test(input.command))return {kind:'test',item};
+  if(SLEEP_COMMAND.test(input.command))return {kind:'sleep',item};
+  return EDIT_COMMAND.test(input.command)?{kind:'edit',item}:null;
+}
+function selfWorkPrompt(hits){
+  const name={edit:'改程式或設定',test:'跑測試',sleep:'自己等待'};
+  return 'LONG_TASK_SELF_WORK：本回合主線自己動手：\n'+hits.slice(0,6).map(hit=>'- '+name[hit.kind]+'：'+hit.item).join('\n')+'\n'+
+    '主線只做 Git 合併與提交、部署、派工、收件判定、狀態與送驗。改程式或設定（含解 Git 衝突）、跑測試都派子代理；子代理交回靠原生完成通知，'+
+    '等外部結果用 execution-watch.cjs 登記。這一則不叫醒監督；本回合再自己動手，背景程式會請監督處理。';
+}
+// A turn starts at a real input (Jay, the supervisor, a scheduled task or the execution watch). The first hand-done
+// edit, test or sleep of a turn gets the note above from the executor's own hook; the watcher keeps the turn's hits so
+// a second one wakes the supervisor (Jay 2026-11-26 decision 35). The state keeps the kind, call id and time only, never
+// file paths, contents or commands; the supervisor reads the call itself in the executor transcript.
+function observeSelfWork(state,row){
+  if(!row||row.isSidechain)return;
+  if(inputSource(row)){state.selfWork={turn:row.uuid||row.timestamp||'turn',hits:[]};return;}
+  if(row.type!=='assistant'||!state.selfWork||!Array.isArray(row.message?.content))return;
   for(const block of row.message.content){
-    if(block?.type!=='tool_use'||!['Edit','Write','MultiEdit'].includes(block.name))continue;
-    const file=block.input?.file_path||block.input?.path,at=Date.parse(row.timestamp);
-    if(typeof file!=='string'||!CODE.test(file)||!Number.isFinite(at)||!block.id)continue;
-    const writes=(state.activityAudit||={}).mainWrites||=[];
-    if(writes.some(item=>item.callId===block.id))continue;
-    const previous=Array.isArray(history)?history.filter(item=>Date.parse(item.at)<=at).at(-1):null;
-    // Never store file contents, command arguments, credentials, or paths in the monitoring state.
-    writes.push({callId:block.id,rowId:row.uuid||null,at:row.timestamp,extension:path.extname(file).toLowerCase(),
-      precedingSnapshotAt:previous?.at||null,precedingMainIds:previous?previous.inFlight.filter(item=>item.handle==='main').map(item=>item.id).sort():null});
+    const hit=selfWorkOf(block);
+    if(hit&&state.selfWork.hits.length<20&&!state.selfWork.hits.some(item=>item.callId===block.id))
+      state.selfWork.hits.push({kind:hit.kind,callId:block.id,at:row.timestamp||null});
   }
 }
+
 function correlate(snapshot,state,binding,runs){
   if(!snapshot?.packages)return [];
   const flight=snapshot.packages.inFlight||[],clues=[];
-  const observations=(state.activityAudit?.mainWrites||[]).filter(item=>Date.parse(item.at)>=(Date.parse(binding.createdAt)||0));
-  if(observations.length)clues.push({kind:'main_write_review',affected:[],detail:{observations,
-    meaning:'Main-session code-file writes were attempted; preceding snapshots are historical clues, not proof of success, package attribution, or violation. Verify actual changes and authority.'}});
+  // Work by hand again in the turn that already got the hook's note: one review per turn.
+  const own=state.selfWork;
+  if(own?.hits?.length>1)clues.push({kind:'self_work',affected:['turn:'+own.turn],detail:{turn:own.turn,hits:own.hits.slice(0,10)}});
   // A transcript without an end marker is only a possible active agent; missing transcripts do not prove absence.
   const handles=new Set(flight.map(item=>item.handle));
   for(const item of runs||[]){
@@ -97,4 +126,45 @@ function localRuns(binding){
     return {available:true,runs};
   }catch(error){return {available:false,runs:[],error:['ENOENT','EACCES','EPERM','INVALID_SOURCE'].includes(error.code)?error.code:'READ_ERROR'};}
 }
-module.exports={readHistory,observeMainWrite,correlate,localRuns};
+// The hook reads only the current turn, from the end of the transcript; a turn past 32 MB counts from where it stops.
+function currentTurn(file){
+  const rows=[],size=fs.statSync(file).size,fd=fs.openSync(file,'r');let end=size,carry=Buffer.alloc(0);
+  try{
+    while(end>0&&size-end<32*1024*1024){
+      const start=Math.max(0,end-1024*1024),chunk=Buffer.alloc(end-start);fs.readSync(fd,chunk,0,chunk.length,start);end=start;
+      // Lines are cut on bytes, so a chunk edge inside a multi-byte character never breaks a row.
+      const buffer=Buffer.concat([chunk,carry]),lines=[];let at=buffer.length;
+      for(let cut;at>0&&(cut=buffer.lastIndexOf(10,at-1))>=0;at=cut)lines.push(buffer.subarray(cut+1,at));
+      if(end>0)carry=buffer.subarray(0,at);else lines.push(buffer.subarray(0,at));
+      for(const line of lines){
+        let row;try{row=JSON.parse(line.toString('utf8'));}catch{continue;}
+        if(inputSource(row))return rows;
+        rows.push(row);
+      }
+    }
+  }finally{fs.closeSync(fd);}
+  return rows;
+}
+// The bind marker is in the executor's first message, near the start of its transcript.
+function bound(file){
+  const fd=fs.openSync(file,'r');
+  try{const head=Buffer.alloc(Math.min(fs.statSync(file).size,1024*1024));fs.readSync(fd,head,0,head.length,0);return head.toString('utf8').includes('LONG_TASK_BIND:');}
+  finally{fs.closeSync(fd);}
+}
+// PreToolUse hook for the supervised executor's own Bash and edit calls; a subagent's call carries agent_id. It never
+// blocks: the first hand-done work of a turn gets the note, a later one is left for the watcher to raise.
+function hook(input){
+  if(input?.hook_event_name!=='PreToolUse'||input.agent_id||!input.transcript_path)return null;
+  const current=selfWorkOf({type:'tool_use',name:input.tool_name,input:input.tool_input,id:input.tool_use_id});
+  if(!current||!bound(input.transcript_path))return null;
+  const earlier=currentTurn(input.transcript_path).filter(row=>row.type==='assistant'&&!row.isSidechain&&Array.isArray(row.message?.content))
+    .flatMap(row=>row.message.content.filter(block=>block?.id!==input.tool_use_id).map(selfWorkOf)).filter(Boolean);
+  return earlier.length?null:{hookSpecificOutput:{hookEventName:'PreToolUse',additionalContext:selfWorkPrompt([current])}};
+}
+
+module.exports={selfWorkOf,selfWorkPrompt,observeSelfWork,correlate,localRuns,hook};
+if(require.main===module&&process.argv[2]==='hook'){
+  let text='';process.stdin.setEncoding('utf8');
+  process.stdin.on('data',part=>{text+=part;});
+  process.stdin.on('end',()=>{try{const out=hook(JSON.parse(text));if(out)console.log(JSON.stringify(out));}catch{}});
+}

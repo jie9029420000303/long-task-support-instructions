@@ -157,19 +157,21 @@ class CodexDispatchContractTests(unittest.TestCase):
         # tool uses a different model. Only effort is known before resolving each role.
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
-        self.assertIn("GPT 工作者取最新 Terra，Claude 工作者取同一路徑最新 Sonnet", skill)
+        # Jay 2026-11-26: subagents follow their own chain regardless of the mainline model.
+        self.assertIn("子代理不論主線用哪個模型，都照子代理順位", skill)
         self.assertIn("介面子代理需具備所需瀏覽器", skill)
         self.assertIn("Goal 續跑／恢復沿用已鎖定模型", skill)
         for row in (
-            "| 主線 | | High |",
-            "| A 視覺查核 | | Sonnet High／Terra Medium |",
-            "| B 技術實作 | | Sonnet High／Terra Medium |",
-            "| C 研究 | | Sonnet High／Terra Medium |",
+            "| 主線 | | xhigh |",
+            "| A 視覺查核 | | Medium（開源 max） |",
+            "| B 技術實作 | | Medium（開源 max） |",
             "| 介面操作 | | Low |",
         ):
             self.assertIn(row, template)
-        # Jay 2026-11-23: a Sonnet general worker starts at High; Terra keeps Medium and interface work Low.
-        self.assertIn("一般包 Sonnet 以 high、Terra 以 medium 起跳，介面包以 low 起跳", skill)
+        # Jay 2026-11-26: the mainline moved up to Opus xhigh, so general workers return to Medium;
+        # open-source models only offer max, and interface work stays Low. The C research line is gone.
+        self.assertIn("一般包以 medium 起跳（開源固定 max），介面包以 low 起跳", skill)
+        self.assertNotIn("| C 研究 |", template)
 
     def test_pending_decision_does_not_pause_other_authorized_work(self):
         # A single unresolved decision must not idle agents or stop integration work that is
@@ -196,19 +198,23 @@ class CodexDispatchContractTests(unittest.TestCase):
         # slots occupied and refill them as dependencies unlock, or long tasks stay serialized.
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         execution = (self.SKILL / "references" / "execution.md").read_text(encoding="utf-8")
-        for marker in ("可派即派", "不留空席", "當輪立即補派"):
+        # Jay 2026-11-26 dispatch flow: dispatch every ready package at once and collect each return immediately.
+        for marker in ("一次全部派出", "交回一包就先收", "解鎖的包當輪補派"):
             self.assertIn(marker, skill)
-        self.assertIn("完成通知一到", execution)
-        self.assertIn("不等原批全部完成", execution)
+        # The execution protocol points back to that single flow instead of restating it, and keeps the no-sleep wait.
+        self.assertIn("派工順序照 SKILL「派工流程」10 步", execution)
+        self.assertIn("任一包交回就返回的等待，不忙輪詢、不 sleep", execution)
 
     def test_dispatcher_decomposes_unpassed_acceptance_and_keeps_mainline_focused(self):
         # The Codex adapter must carry the current orchestration design without copying
         # Claude-only workflow syntax or a fixed Claude concurrency ceiling.
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         execution = (self.SKILL / "references" / "execution.md").read_text(encoding="utf-8")
-        for marker in ("每條未通過的驗收條件至少對應一條工作線", "5～10 分鐘 AI 時間", "主線集中做規劃", "主線自做"):
+        for marker in ("每條未通過的驗收條件至少對應一條工作線", "5～10 分鐘 AI 時間", "一律派子代理", "主線自做"):
             self.assertIn(marker, skill)
-        self.assertIn("每條未通過條件至少有一條工作線", execution)
+        # Jay 2026-11-26: the dispatch rules live in one flow in SKILL.md; every unpassed criterion gets a package.
+        self.assertIn("每條未通過條文至少對應一包", skill)
+        self.assertIn("派工順序照 SKILL「派工流程」10 步", execution)
         self.assertNotIn("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS", skill)
         self.assertNotIn("Dynamic workflows", skill)
 

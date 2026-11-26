@@ -19,11 +19,12 @@ const PLATFORMS=[
 ];
 
 // v1.14.0 (Jay 2026-11-23) replaced the v1.9.0 "second return goes outside, fourth error goes to the main line" ladder with
-// per-criterion counting and a research loop that never hands the package to the main line; the markers follow it.
+// per-criterion counting and a research loop that never hands the package to the main line; v1.18.0 (Jay 2026-11-26)
+// keeps the count through research and ends the loop at the sixth failure with Jay's ruling. The markers follow it.
 test('the shared spec carries the five v1.9.0 rules and both adapters hold the same copy',()=>{
   const spec=read('SPEC.md');
   for(const marker of [
-    '不合格按驗收條文計數','直接原因與共同的上游原因','不涉及技術判斷的小修','不換模型、不由主線接手','監督不指定做法',
+    '不合格按驗收條文累計','直接原因與共同的上游原因','不涉及技術判斷的小修','主線全程不親手接手','監督不指定做法',
     '電腦睡眠不叫醒監督、不通知使用者','等待只因執行端自己重新開始工作而解除時只記錄、不查核','監督對話正在回合中或事件送出後已有新動作',
     '以檔案系統的寫入時複製複本取用，不整份複製','主線刪除其中可重建的過程檔','未通過者不刪',
     '已通過卻未清理也未寫明無可刪原因的工作資料夾須先處理','寫在該工作包自己的暫存資料夾','仍有程序使用者不刪，系統暫存區裡不屬本任務的內容不碰',

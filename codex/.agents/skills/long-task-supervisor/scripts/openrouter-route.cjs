@@ -1,11 +1,12 @@
 // The skill selects the model. OpenCodex owns the price-ranked supplier list for each model.
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
 const catalog=require('./model-catalog.cjs');
-// Default order (Jay 2026-11-22): Muse first, DeepSeek second. On our own two cases Muse passed review one round
-// sooner and cost about 10% less. A run's fourthExecutorModel still moves its choice to the front for the executor.
+// Default order (Jay 2026-11-26「開源模型先用deepseek 再用muse」, replacing 2026-11-22's Muse first): on workspace E's
+// submissions DeepSeek was rejected 34% of the time and Muse 58%. A run's fourthExecutorModel still moves its choice to
+// the front for the executor.
 const choices=[
-  {raw:'meta/muse-ember',provider:'google-vertex/global'},
-  {raw:'deepseek/deepseek-v4.1-flash-1017',provider:'ambient/fp4'}
+  {raw:'deepseek/deepseek-v4.1-flash-1017',provider:'ambient/fp4'},
+  {raw:'meta/muse-ember',provider:'google-vertex/global'}
 ].map(x=>({...x,model:'openrouter/'+x.raw.replace('/','-')}));
 function hasEligibleSupplier(rule,legacyPin){
   const only=rule?.only;

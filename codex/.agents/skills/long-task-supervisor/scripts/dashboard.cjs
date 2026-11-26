@@ -21,15 +21,14 @@ function delegatedLines(delegated=[],closing=false){
     '| 決定的事 | 監督的選擇 | 依據 | 怎麼改回 | 時間 |','|---|---|---|---|---|',
     ...shown.map(item=>'| '+cell(item.ask)+' | '+cell(item.choice)+' | '+cell(item.basis)+' | '+cell(item.revert)+' | '+clock(Date.parse(item.at))+' |')];
 }
-// The model order the watcher applies (Jay 2026-11-21), in the words Jay used: how much Claude is kept for the Opus
-// supervisor, whether the API key is out for the month, whether an open-source route is left, and acceptances an
-// interim supervisor wrote that wait for a high-tier review.
+// The model order the watcher applies (Jay 2026-11-21, 2026-11-26), in the words Jay used: how far down the quota
+// ladder each role is, whether the API key is out for the month, whether an open-source route is left, and acceptances
+// an interim supervisor wrote that wait for a high-tier review.
 function modelLines(binding,state,now){
   const lines=[];
-  if(state.claudeQuota)lines.push('- Claude 訂閱額度：'+require('./claude-quota.cjs').describe(state.claudeQuota)+
-    (state.quotaDrain?'；已停派新的 Claude 子代理，在途的做完後執行對話改用 Sol':''));
+  if(state.claudeQuota)lines.push('- 訂閱額度降級階梯：'+require('./claude-quota.cjs').describe(state.claudeQuota));
   if(state.claudeQuota?.openai)lines.push('- OpenAI 訂閱額度：'+require('./claude-quota.cjs').describeOpenAI(state.claudeQuota));
-  if(state.apiMonth?.until>now)lines.push('- Claude API（監督備用）：本月額度已用完，'+clock(state.apiMonth.until)+' 前所有任務的監督都跳過這一站');
+  if(state.apiMonth?.until>now)lines.push('- Claude API：本月額度已用完，'+clock(state.apiMonth.until)+' 前所有任務的各角色都跳過這一站');
   let open=null;try{open=require('./openrouter-route.cjs').routes(binding.fourthExecutorModel||null).length;}catch{}
   if(open===0)lines.push('- 開源備援：目前沒有可用模型（OpenCodex 設定或價格上限未通過）；前面順位都用完時只能等重置');
   const held=state.heldFinalReviews||[];

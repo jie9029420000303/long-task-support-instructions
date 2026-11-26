@@ -3,6 +3,9 @@
 // run stayed unwatched until Jay said 繼續 at 01:01. The refusal said "Try again at 11:40 PM." but the watcher assumed five
 // hours; back at 01:02 it read the old 23:14 refusal and moved a supervisor that worked again to the paid API key until
 // 04:14. Jay also asked that every message to the executor push it to dispatch subagents at full speed.
+// v1.18.0 (Jay 2026-11-26 decisions 19 and 20): the executor shares the supervisor's order (Opus, Opus API, Sol, Sol API,
+// Terra, Terra API, then open source), workers keep their own order, and with the 35% reserve gone a refusal limit
+// ends early for the executor the same way as for the supervisor.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -158,7 +161,8 @@ test('an executor can prefer an eligible fourth model and an exhausted superviso
     catalog.models.push(entry);save(catalogFile,catalog);f.env.OPENCODEX_MODEL_CATALOG=catalogFile;
     const bindingFile=path.join(f.run,'binding.json');save(bindingFile,{...f.binding,fourthExecutorModel:fourth});
     const resetAt=Date.now()+3600000,state=read(f.statePath);
-    state.rateLimits={'anthropic/':{until:resetAt},'anthropic-apikey/':{until:resetAt}};
+    // Terra comes before open source on the shared order; it is out too, so the next stop is the fourth model.
+    state.rateLimits={'anthropic/':{until:resetAt},'anthropic-apikey/':{until:resetAt},'executor|gpt-6.1-terra':{until:resetAt},'supervisor|gpt-6.1-terra':{until:resetAt}};
     state.modelSwitch={'executor-qa':{role:'executor',original:opus,current:'gpt-6.10-sol',effort:'high',since:Date.now()-60000,until:resetAt}};
     save(f.statePath,state);
     f.start();await until(()=>read(f.statePath).usageOffset!==undefined);
@@ -168,7 +172,7 @@ test('an executor can prefer an eligible fourth model and an exhausted superviso
     const stateAfter=read(f.statePath);assert.equal(stateAfter.modelSwitch['executor-qa'].effort,'high');
     assert.deepEqual(read(path.join(f.run,'model-fallback.json')).fourthExecutorModel,fourth);
     withEnv({OPENCODEX_HOME:f.root,OPENCODEX_MODEL_CATALOG:catalogFile},()=>{
-      assert.equal(fallback.next(opus,'gpt-6.10-sol','supervisor',stateAfter,Date.now(),opus,fourth),model);
+      assert.equal(fallback.next(opus,'gpt-6.10-sol','supervisor',stateAfter,Date.now(),fourth),model);
       assert.equal(fallback.availableFourth({...fourth,effort:'ultra'}),null);
       entry.visibility='hide';save(catalogFile,catalog);assert.equal(fallback.availableFourth(fourth),null);
     });
@@ -203,12 +207,12 @@ test('a route that serves requests again ends its limit early, but only after te
   assert.equal(quiet.rateLimits['supervisor|anthropic/'].until,now);assert.equal(quiet.modelSwitch.s.until,now,'the switched chat is due to return now, not at a guessed 04:14');
   const before=limited({routeRefused:{'anthropic/':now-40*60000},routeOk:{'anthropic/':since-60000}});
   assert.equal(fallback.recovered(before,now),false,'a success from before the limit proves nothing');
-  // The supervisor shares the Claude subscription: its success must not send a refused executor back onto it.
-  const sonnet='anthropic/claude-sonnet-5-5';
-  const executor={rateLimits:{'executor|anthropic/':{since,until:now+4*3600000,model:sonnet}},modelSwitch:{e:{role:'executor',original:sonnet,current:'gpt-6.10-sol',since,until:now+4*3600000,restored:null}},
+  // The quota ladder now holds the executor off the subscription by its own reading, so a refusal limit of the executor
+  // ends the same way once the route answers again.
+  const executor={rateLimits:{'executor|anthropic/':{since,until:now+4*3600000,model:opus}},modelSwitch:{e:{role:'executor',original:opus,current:paid,since,until:now+4*3600000,restored:null}},
     routeRefused:{'anthropic/':now-15*60000},routeOk:{'anthropic/':now-60000}};
-  assert.equal(fallback.recovered(executor,now),false,'the executor returns on a quota reading or its named reset only');
-  assert.equal(executor.rateLimits['executor|anthropic/'].until,now+4*3600000);assert.equal(executor.modelSwitch.e.until,now+4*3600000);
+  assert.equal(fallback.recovered(executor,now),true);
+  assert.equal(executor.rateLimits['executor|anthropic/'].until,now);assert.equal(executor.modelSwitch.e.until,now);
 });
 
 test('an authorization reaches the effective contract through the running watcher, which keeps watching',async()=>{
@@ -269,20 +273,20 @@ test('a refusal whose named reset already passed keeps the model and continues t
 });
 
 test('a refusal for a model the chat already left is ignored, but a chat back on that model is switched again',async()=>{
-  const sol='gpt-6.10-sol',record={role:'executor',original:opus,current:sol,effort:'high',since:Date.now()-60000,until:Date.now()+3600000,restored:null};
-  const stale=fixture({executorModel:sol,state:{modelSwitch:{'executor-qa':{...record}}}});
+  // The executor was moved from Opus to the Opus API, its next stop on the shared order (decision 19).
+  const record={role:'executor',original:opus,current:paid,effort:'high',since:Date.now()-60000,until:Date.now()+3600000,restored:null};
+  const stale=fixture({executorModel:paid,state:{modelSwitch:{'executor-qa':{...record}}}});
   const back=fixture({executorModel:opus,state:{modelSwitch:{'executor-qa':{...record}}}});
   try{
     stale.start();back.start();
     await until(()=>read(stale.statePath).usageOffset!==undefined&&read(back.statePath).usageOffset!==undefined);
     stale.refuse('executor-qa',opus);back.refuse('executor-qa',opus);
-    await until(()=>back.calls().some(call=>call.model===sol));
-    const again=back.calls().find(call=>call.model===sol);
+    await until(()=>back.calls().some(call=>call.model===paid));
+    const again=back.calls().find(call=>call.model===paid);
     assert.equal(again.threadId,'executor-qa');assert.match(again.prompt,/額度限速/);
-    assert.equal(read(back.statePath).modelSwitch['executor-qa'].current,sol);
-    assert.ok(!back.calls().some(call=>call.model===paid),'the executor never moves to the Claude API key');
+    assert.equal(read(back.statePath).modelSwitch['executor-qa'].current,paid);
     await until(()=>read(stale.statePath).rateLimits?.['executor|anthropic/']&&!(read(stale.statePath).switchQueue||[]).length);
-    assert.ok(!stale.calls().some(call=>call.model),'the chat already runs Sol: nothing to switch');
+    assert.ok(!stale.calls().some(call=>call.model),'the chat already runs the Opus API: nothing to switch');
   }finally{await stale.stop();await back.stop();}
 });
 
@@ -302,8 +306,8 @@ test('a supervisor moved to the paid key gets its model back once its route work
     await until(()=>read(f.statePath).modelSwitch['supervisor-qa'].restored);
     const published=read(path.join(f.run,'model-fallback.json'));
     assert.deepEqual(published.supervisorLimits,{},'the supervisor stops avoiding a route that works');
-    // The pre-2026-11-21 record covered every role; the executor's half returns on a quota reading or the reset only.
-    assert.deepEqual(Object.keys(published.limits),['anthropic/']);
+    // The pre-2026-11-21 record covered every role; the executor's half ends the same way now.
+    assert.deepEqual(published.limits,{});
   }finally{await f.stop();}
   const g=fixture({supervisorModel:opus,state:{modelSwitch:{'supervisor-qa':{...record,until:now-1000}}}});
   try{
@@ -314,7 +318,7 @@ test('a supervisor moved to the paid key gets its model back once its route work
   }finally{await g.stop();}
 });
 
-test('a refused child from the previous executor family is reassigned using the current executor family',async()=>{
+test('a refused child is reassigned by the subagent order whatever the executor runs',async()=>{
   const f=fixture(),id='child-qa',model='anthropic/claude-sonnet-5-5',at=iso(Date.now());
   try{
     const child=path.join(path.dirname(f.executorLog),'rollout-t-'+id+'.jsonl');
@@ -325,7 +329,7 @@ test('a refused child from the previous executor family is reassigned using the 
     f.refuse(id,model);
     await until(()=>f.calls().some(c=>c.threadId==='executor-qa'&&c.prompt.includes('rate-subagent-')));
     const notice=f.calls().find(c=>c.prompt.includes('rate-subagent-'));
-    assert.match(notice.prompt,/候選為 gpt-6\.1-terra/);
+    assert.match(notice.prompt,/候選為 anthropic-apikey\/claude-sonnet-5-5/,'Sonnet API is the next worker stop, under a Sol mainline too');
     assert.equal(notice.model,null,'the message asking for a new worker leaves the execution mainline model alone');
   }finally{await f.stop();}
 });
@@ -365,8 +369,11 @@ test('every message to the executor carries the full-speed push and ends with it
     p.start();
     await until(()=>read(p.statePath).usageOffset!==undefined);
     p.refuse('executor-qa',opus);
-    await until(()=>p.calls().some(call=>call.model==='gpt-6.10-sol'));
-    assert.ok(!p.calls().find(call=>call.model==='gpt-6.10-sol').prompt.includes(EXECUTOR_PUSH),'Jay paused the run: no push to dispatch more');
+    await until(()=>p.calls().some(call=>call.model===paid));
+    assert.ok(!p.calls().find(call=>call.model===paid).prompt.includes(EXECUTOR_PUSH),'Jay paused the run: no push to dispatch more');
   }finally{await p.stop();}
 });
+
+
+
 

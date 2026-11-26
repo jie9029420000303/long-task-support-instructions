@@ -19,10 +19,11 @@ function write(file, value) {
   try { fs.renameSync(tmp, file); } finally { fs.rmSync(tmp, {force:true}); }
 }
 function sameCase(a,b) { return a.caseId === b.caseId; }
-// The second-failure stop counts per acceptance criterion in rework.cjs, for every kind of package; a formal case
-// whose criterion is held waits there too.
+// The failure stops count per acceptance criterion in rework.cjs, for every kind of package; a formal case whose
+// criterion is held waits there too.
 function eligible(history,criterionId) {
-  required(!rework.held(history,[criterionId]).length, '驗收條文 '+criterionId+' 已累計 '+rework.LIMIT+' 次不合格：先派研究並用 rework.cjs research 登記（或 waive 登記不需研究的理由），再發下一次正式實測許可');
+  const item=rework.tally(history).get(criterionId);
+  required(!rework.held(history,[criterionId]).length, '驗收條文 '+criterionId+' 已累計 '+item?.failures.length+' 次不合格：'+(item&&rework.nextStep(item))+'，之後才發下一次正式實測許可');
 }
 function checkPreflight(pkg) {
   if (!pkg.scarceMachine && !pkg.target) return;

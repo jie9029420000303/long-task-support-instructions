@@ -17,9 +17,9 @@
 
 ## 連續兩次未過
 
-正式實測 FAIL 由 `formal-case.cjs` 自動計入該案例的驗收條文（`rework.cjs`，和子代理交付的不合格算同一個計數，同一份交付不重複計；INCONCLUSIVE、BLOCKED 不計）。同一條文累計 2 次，`select` 把它的案例列進 `held`（reason `research`），`run` 不發下一次許可；其他條文的案例照常。執行主線派研究子代理（推理 xhigh），自行安排小實驗並選定解法；實驗仍遵守本案授權、禁令與原驗收條文。監督在送驗時查核證據，或在研究交回後逾期未見後續工作包或進展時督促執行端。
+正式實測 FAIL 由 `formal-case.cjs` 自動計入該案例的驗收條文（`rework.cjs`，和子代理交付的不合格算同一個計數，同一份交付不重複計；INCONCLUSIVE、BLOCKED 不計）。同一條文累計到第 2、4、6 次，`select` 把它的案例列進 `held`（reason `research`），`run` 不發下一次許可；其他條文的案例照常。執行主線派研究子代理（推理 xhigh），自行安排小實驗並選定解法；實驗仍遵守本案授權、禁令與原驗收條文。監督在送驗時查核證據，或在研究交回後逾期未見後續工作包或進展時督促執行端。
 
-以 `node scripts/rework.cjs research RUN RESEARCH.json` 登記以下內容，登記後計數歸零。查不到可用解法也照實登記，保留該案受阻原因，繼續其他工作。錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證時，改用 `node scripts/rework.cjs waive RUN WAIVE.json`，寫 criterionId、directCauses 與 reason。
+以 `node scripts/rework.cjs research RUN RESEARCH.json` 登記以下內容，登記後解除擋下（次數不歸零；第 6 次另等使用者裁決）。查不到可用解法也照實登記，保留該案受阻原因，繼續其他工作。錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證時，改用 `node scripts/rework.cjs waive RUN WAIVE.json`，寫 criterionId、directCauses 與 reason。
 
 | 欄位 | 填寫內容 |
 |---|---|

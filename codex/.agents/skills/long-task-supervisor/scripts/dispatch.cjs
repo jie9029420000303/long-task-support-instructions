@@ -321,8 +321,7 @@ try{
       ...(staggeredMs>0?{staggeredSeconds:Math.round(staggeredMs/1000)}:{}),
       ...(notes.length?{collectionNotes:notes}:{}),
       ...(submission?{submission,...segmentOf,event:'LONG_TASK_EVENT '+JSON.stringify({kind:'submission',...submission,...segmentOf})}:{}),
-      ...(rework_.length?{rework:rework_.map(r=>({criterionId:r.criterionId,failures:r.failures,held:r.held,
-        next:r.held?'這條已累計 '+rework.LIMIT+' 次不合格：另派研究子代理（推論 xhigh，研究工作包不列這條），研究交回用 rework.cjs research 登記':'同一模型推論升兩檔（最高 max）開新的子代理重做，附這次的具體指正'}))}:{}),
+      ...(rework_.length?{rework:rework_.map(r=>({criterionId:r.criterionId,failures:r.failures,held:r.held,next:r.next}))}:{}),
       ...(command==='collect'?{acceptance:updates.map(item=>({id:item.id,status:item.status}))}:{})}));
   }
 }catch(error){console.error(error.message);process.exitCode=1;}

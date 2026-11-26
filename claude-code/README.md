@@ -8,7 +8,7 @@
 .claude/
 ├── skills/long-task-supervisor/     研究對話承接、執行 session 建立、事件監看及獨立驗收
 ├── skills/long-task-orchestrator/
-│   ├── SKILL.md                    技能本體：觸發、A／B／C 分工、路徑枚舉閘、C 研究線、模型／effort 鎖定、驗收與不合格升檔、研究循環規則
+│   ├── SKILL.md                    技能本體：觸發、A／B 分工與派工流程、路徑枚舉閘、模型／effort 鎖定、驗收與不合格六步循環
 │   ├── references/spec.md          共用規格逐字複本（不得在此改共同語意）
 │   ├── references/execution.md     Claude Code 執行協定：狀態檔、派工、前台案例、續接／壓縮／cloud
 │   ├── references/behavioral-cases.md  共同行為案例 + Claude Code 驗證對照
@@ -21,7 +21,7 @@
 └── agents/                         十二個子代理定義（4 角色 × 3 個 effort 檔）
     ├── lt-visual-checker-{medium,high,xhigh}.md   A 線視覺查核（唯讀＋瀏覽器）
     ├── lt-tech-worker-{medium,high,xhigh}.md      B 線技術實作（可編輯，git 寫入被 hook 擋）
-    ├── lt-researcher-{medium,high,xhigh}.md       C 線分面研究（唯讀＋WebFetch／WebSearch／瀏覽器；只能把來源快照存進 evidence/）
+    ├── lt-researcher-{medium,high,xhigh}.md       不合格查因與解卡研究（唯讀＋WebFetch／WebSearch／瀏覽器；只能把來源快照存進 evidence/）
     └── lt-ui-tester-{low,medium,high}.md          介面真實操作蒐證（唯讀＋瀏覽器）
 ```
 
@@ -45,11 +45,12 @@
 | 長任務機制 | Goal（可由技能建立、設 token 預算） | `/goal`（使用者指令；技能不能代下，也沒有 token 預算） | 技能只能建議使用者下 `/goal` |
 | 狀態保存 | Goal 物件 | `.claude/long-task/<slug>/state.md` | 需靠檔案，對話壓縮後以檔案為準 |
 | 主線模型 | 監督目前實際選定的模型 | 與監督同型的 session 模型 | 技能不能切換主模型；Codex 不以舊型號字串阻塞相容主線 |
-| 一般子代理 | GPT 配可見最新版 Terra（基準 medium），Claude 配同路徑 Sonnet（基準 high，使用者 2026-11-23 定案） | `sonnet` @ medium | 以當回合派工工具核對可用性，鎖定時記實際模型與替代原因；Sonnet 基準 high 只改 Codex 版，Claude Code 版仍從 medium 起跳 |
-| C 研究子代理 | 一般子代理（Sonnet @ High、Terra @ Medium），指令約束「不決策、不改正式文件」 | `lt-researcher-{medium,high,xhigh}`：`tools` 無 Edit／Write／Agent，Bash 只能把來源快照寫進 evidence/；互斥議題以 `[共用資源] 議題:<slug>` 交給 `scope-overlap.py` 擋同議題並行 | 正式文件的 Write／Edit 只有主線做得到；子代理靠 WebFetch 讀來源，JS 渲染頁才用 Browser pane（受序列化限制） |
+| 一般子代理 | 不論主線模型，依 Sonnet（訂閱→API）→ Terra（訂閱→API）→ DeepSeek → Muse，基準 medium（使用者 2026-11-26 定案） | `sonnet` @ medium | 以當回合派工工具核對可用性，鎖定時記實際模型與替代原因；Sonnet 基準 high 只改 Codex 版，Claude Code 版仍從 medium 起跳 |
+| 研究子代理（不合格查因、解卡研究） | 一般子代理 @ xhigh，指令約束「不決策、不改正式文件」 | `lt-researcher-{medium,high,xhigh}`：`tools` 無 Edit／Write／Agent，Bash 只能把來源快照寫進 evidence/；互斥議題以 `[共用資源] 議題:<slug>` 交給 `scope-overlap.py` 擋同議題並行 | 正式文件的 Write／Edit 只有主線做得到；子代理靠 WebFetch 讀來源，JS 渲染頁才用 Browser pane（受序列化限制） |
 | 介面子代理 | 具瀏覽器／視覺能力中總成本最低者 @ Low | `sonnet` @ low | 未選 Haiku 4.5（不支援 effort 層級，會讓升檔失效） |
 | 升一檔 | 同模型改推理值 | 改派下一檔的 Agent 定義（effort 只能寫在定義檔） | 需 12 個定義檔；缺檔屬執行阻塞 |
 | 子代理不得 Git | 指令約束 | `tools` 排除 Agent／Edit／Write（依角色）＋ PreToolUse hook 擋 git/gh 寫入 | hook 只擋 Bash 內的 git／gh，其他不可逆操作仍靠指令與 CLAUDE.md |
+| 主線親手動手的提醒 | 背景程式讀主線的工具呼叫：第一次親手改程式、跑測試或 sleep 時傳訊要求改派，同一回合再犯才叫醒監督（2026-11-26） | 第一次由執行對話的 PreToolUse hook（`activity-correlation.cjs hook`）放行並附改派訊息；同一回合再犯由 `claude-watch.cjs` 以 `self_work` 叫醒監督 | 需在使用者層設定加一條 hook；背景監看讀不到 hook 有沒有送出，只數同一回合的次數 |
 | 安裝位置 | `codex/.agents/skills/` | `.claude/skills/` 與 `.claude/agents/` | — |
 
 ## 驗證紀錄（2026-09-14／15 實跑）
@@ -96,7 +97,9 @@
 
 `/goal` 的 7 次退回全部只談「時段／日期沒窮舉」，0 次指出地區漏查或餐廳不對：檢查器跟著助手自己的框架評，沒回到原始目標。這些缺口對應 v0.4.0 的修正：路徑枚舉閘（候選全集先寫、同判準逐驗、「沒有」只認 UI 層證據、宣稱完整必附計數、範圍不擴大）與主線 Haiku 擋派工。
 
-## C 研究線（v0.6.0，2026-09-19）
+## C 研究線（v0.6.0，2026-09-19；2026-11-26 移除）
+
+2026-11-26 起研究計畫與系統規劃型任務不用本技能（日後另建技能），以下為當時紀錄；`lt-researcher-*` 只留給不合格查因與監督派的解卡研究。
 
 對應 SPEC 不變量 4／7 與 tests 16：研究／系統規劃任務走 C 線——子代理按互斥議題蒐集原始來源、反證、比較與待確認事項；主線鎖定研究問題、來源類型與截止時點，親自核對關鍵原始來源後判定系統取捨、架構並撰寫正式規劃文件；規劃文件需要視覺排版時另併用 A。Claude Code 的落地方式：
 

@@ -41,8 +41,6 @@ const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
 // A delivery queued behind a running turn no longer holds the whole watcher (2026-11-21 review): after 10 minutes it
 // stays queued in the target's own message queue and is confirmed later, so rate limits and other events still run.
 const BUSY_LIMIT_MS = Number(process.env.LONG_TASK_BUSY_LIMIT_MS) || 10 * 60000;
-// Before the executor leaves the Claude subscription for its reserve, its running Claude subagents may finish (Q49 A).
-const DRAIN_MS = Number(process.env.LONG_TASK_QUOTA_DRAIN_MS) || 15 * 60000;
 // A switched chat that has produced no successful answer after 15 minutes moves on to the next route.
 const SILENT_SWITCH_MS = Number(process.env.LONG_TASK_SILENT_SWITCH_MS) || 15 * 60000;
 // The App unloads a chat idle for about three hours and ends the processes it started, this watcher included
@@ -281,7 +279,7 @@ function outgoing(target,prompt,key=''){
   }else{
     try{
       const workers=pace.agentRuns(binding).filter(agent=>!require('./openrouter-route.cjs').choices.some(route=>route.model===agent.model&&agent.effort==='max'));
-      const found=executionWake.modelReminder(workers,{mainModel:selected,reported:state.modelReminded||[],sonnetEffort:require('./model-route.cjs').sonnetGeneral});
+      const found=executionWake.modelReminder(workers,{mainModel:selected,reported:state.modelReminded||[]});
       if(found){reminder='\n\n'+found.text;state.modelReminded=[...(state.modelReminded||[]),...found.ids].slice(-500);}
     }catch{}
   }
@@ -416,6 +414,12 @@ async function sendAndRead(target, prompt, key, options = {}) {
     !fallback.limited(state,activeRoute.original,Date.now(),role);
   const carryRestore=fallback.modelPolicy(binding)==='automatic' && !options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt);
   if(carryRestore)options={model:activeRoute.original,thinking:activeRoute.effort};
+  // The supervisor reasons at xhigh where a case is judged (a submission, and its closing review) and at High for every
+  // other event (Jay 2026-11-26 decision 2). An open-source supervisor stays at max, and a restore keeps its model.
+  if(role==='supervisor'&&key.startsWith('review-')&&state.pending){
+    const model=options.model||fallback.settingsOf(target)?.applied?.model||fallback.settingsOf(target)?.model;
+    if(model&&!model.startsWith('openrouter/'))options={model,thinking:state.pending.kind==='submission'?'xhigh':'high'};
+  }
   const route=options.model?{model:options.model,...(options.thinking?{thinking:options.thinking}:{})}:{};
   state.inflight = {target,prompt,key,at:now(),phase:'sending',route};
   checkpoint();
@@ -661,6 +665,8 @@ async function pendingDecision() {
       state.pending=null;state.phase='watching';checkpoint();return;
     }
     if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:submitted.decisionSha256};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
+    // A ruled review of the mainline's own work ends it; another one needs another note and another repeat.
+    if(state.selfWorkEscalated&&event.dispatchIssueKeys?.includes(state.selfWorkEscalated.key))delete state.selfWorkEscalated;
   }
   if(event.kind==='progress_review'){
     const fresh=await waitExecutor();
@@ -797,24 +803,40 @@ async function pushQuestions(){
   }catch(error){state.questionPush={ok:false,error:error.message,at:now()};}
 }
 const clockText = ms => new Date(ms).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-// The same criterion studied twice (then every two studies more) tells Jay like an important mail (Jay 2026-11-24): at
-// once in Veda對接對話, held from 00:00 to 08:00 Taipei, and as an open item that Veda's thrice-daily summary repeats
-// until he answers. The executor keeps working; nothing waits for the reply.
+// A criterion that failed six times and was studied waits for Jay (Jay 2026-11-26 decisions 33-34): the supervisor is
+// woken once per round to read the six deliveries, the rejections and the studies and to put one question to Jay in the
+// pending ledger. Veda's thrice-daily summary carries it; nothing is pushed at once. The executor keeps working.
 let cycleCheckAt=0;
-async function cycleAlerts(){
-  if(state.inflight||Date.now()<cycleCheckAt)return;
+async function reworkDecisions(){
+  if(state.inflight||state.pending||isPaused()||Date.now()<cycleCheckAt)return;
   cycleCheckAt=Date.now()+60000;
-  try{rework.raiseAlerts(run,binding,{title:state.threadTitles?.supervisor});}
-  catch(error){state.cycleAlert={ok:false,error:error.message,at:now()};return;}
-  const target=notify.cycleAlertThread();
-  if(!target)return;
-  for(const item of rework.vedaDue(questions.load(run).items,{sent:key=>notify.sent(run,key)})){
-    const key='veda-'+item.key;
-    const prompt='LONG_TASK_REWORK_CYCLE：長任務通知（比照重要郵件，執行端照常繼續，不等回覆）。\n'+item.ask+
-      '\n題目 key：'+item.key+'；監督對話：'+binding.supervisorId+'。Jay 回覆後，請把他的原話與題目 key 轉到監督對話，註明是 Jay 透過 Veda 回覆，由監督登記；沒回覆就列進每天三次的待決彙整，直到他回覆。';
-    try{await rpc('send_message_to_thread',{threadId:target,prompt},20000);notify.mark(run,key,{target});state.cycleAlert={ok:true,key:item.key,at:now()};}
-    catch(error){state.cycleAlert={ok:false,key:item.key,error:error.message,at:now()};return;}
+  let due=[];try{due=rework.alerts(run,binding);}catch(error){state.cycleAlert={ok:false,error:error.message,at:now()};return;}
+  const asked=new Set(questions.load(run).items.map(item=>item.key));
+  for(const alert of due.filter(item=>!asked.has(item.key)&&!(state.messages||[]).some(m=>m.key==='rework-decision-'+item.key))){
+    const prompt='LONG_TASK_REWORK_DECISION：驗收條文 '+alert.criterionId+' 這一輪已 '+alert.failures+' 次不合格，研究也登記了 '+alert.studies.length+' 次，這條停止派工與送驗，其他工作照常。\n'+
+      '請讀這 '+alert.failures+' 次交付、退件理由與研究結果（rework.cjs status、acceptance-history.jsonl），用 pending-decisions.cjs 在待決帳登記一題給 Jay：key '+alert.key+'、kind rework_decision，四段寫齊（情境、現況、選項含推薦、效果）。'+
+      '只走 Veda 每天 09:00、12:00、19:00 的彙整，不另外推播；Jay 在本對話在線時當場列出。Jay 裁決後，照錄他的原話用 rework.cjs resume 登記，這條才重新起算。\n'+rework.describe(alert,state.threadTitles?.supervisor);
+    await sendAndRead(binding.supervisorId,prompt,'rework-decision-'+alert.key);
+    state.cycleAlert={ok:true,key:alert.key,at:now()};checkpoint();return;
   }
+}
+// The mainline's own edits, tests and sleeps (supervisor-clock selfWorkOf; Jay 2026-11-26 decisions 31 and 35): the first
+// in a turn gets a fixed note from this watcher, without waking the supervisor; doing it again in the same turn after
+// that note wakes the supervisor through a dispatch review, which asks the mainline to hand the work over.
+async function selfWorkNotice(){
+  const work=state.selfWork;
+  if(!work?.hits?.length||work.escalated||isPaused()||state.inflight)return;
+  let directory=null;try{directory=read(path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json')).workPackageDirectory||null;}catch{}
+  const hits=clock.selfWorkHits(work,run,directory);
+  if(!hits.length)return;
+  if(!work.noticeKey){
+    work.noticeKey='self-work-'+fallback.hashId(binding.executorId+'/'+work.turnId).slice(0,16);work.noticeAt=Date.now();checkpoint();
+    await sendAndRead(binding.executorId,clock.selfWorkPrompt(hits),work.noticeKey);return;
+  }
+  const again=hits.filter(hit=>Date.parse(hit.at)>work.noticeAt);
+  if(!again.length)return;
+  work.escalated=true;
+  state.selfWorkEscalated={key:'self-work-'+fallback.hashId(binding.executorId+'/'+work.turnId),turnId:work.turnId,hits:again.slice(0,10),at:now()};checkpoint();
 }
 // supervise.cjs amend, run while this watcher is alive, leaves Jay's authorization in amend-request.json. The watcher records
 // it at a safe point (no event waiting for a ruling, no unconfirmed delivery) under its own lock and keeps watching. The
@@ -870,11 +892,10 @@ async function handleAmendRequest(){
   }
   return true;
 }
-// Model routes (Jay 2026-10-11, revised 2026-11-21): this background watcher, not the chats, moves each mainline. The
-// supervisor moves down only when it is refused itself and returns to Opus once the reset passes. The executor also
-// leaves the Claude subscription while the weighted weekly remainder is below the 35% kept for the supervisor or every
-// usable account has used 80% of its five-hour window, and returns on the next turn once the reading allows it. A
-// refused subagent is re-dispatched in the current executor's family.
+// Model routes (Jay 2026-10-11, revised 2026-11-21 and 2026-11-26): this background watcher, not the chats, moves each
+// mainline. A mainline moves down when it is refused itself or when the quota ladder keeps it off its front stops
+// (claude-quota.cjs, model-fallback.cjs held), and moves back up once the reset passes or the ladder rises. A refused
+// subagent is re-dispatched on the subagent order; new packages follow the ladder through model-route.cjs.
 // The notice names what actually happened (2026-11-23: ten notices said 額度限速 while no provider had refused for
 // quota): model-fallback.cjs switchReason / restoreReason.
 async function handleRateLimits() {
@@ -883,7 +904,6 @@ async function handleRateLimits() {
   if(fallback.syncApiMonth(state,run))dirty=true;
   if(fallback.syncUnsupported(state,run))dirty=true;
   if(await quota.refresh(state,Date.now(),run))dirty=true;
-  const claudeOk=quota.allowed(state);
   const awaitingOutput=Object.values(state.modelSwitch||{}).filter(record=>!record.restored&&!record.respondedAt);
   const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path,file:item.sourceFile}));
   const hits = fallback.scan(state,[{role:'supervisor',threadId:binding.supervisorId},{role:'executor',threadId:binding.executorId},...subagents]);
@@ -926,16 +946,7 @@ async function handleRateLimits() {
   for (const [key,item] of Object.entries(state.rateLimits || {})) if (!item.files)
     item.files = Object.entries(state.modelSwitch || {}).filter(([,record]) => fallback.limitKey(record.role,record.original) === key)
       .map(([threadId]) => pace.sessionFile(threadId)).filter(Boolean);
-  const refined = fallback.refine(state), back = fallback.recovered(state);
-  // The executor's Claude limit ends on a later reading that shows the subscription can serve it again; another
-  // conversation's success never counts for it.
-  const executorClaude=state.rateLimits?.['executor|anthropic/'], reading=state.claudeQuota;
-  let quotaBack=false;
-  if(executorClaude&&executorClaude.until>Date.now()&&claudeOk&&!reading.unconfigured&&!reading.fiveHourHigh&&reading.at>executorClaude.since+60000){
-    executorClaude.until=Date.now();executorClaude.basis='額度讀值顯示訂閱可再供執行端使用';quotaBack=true;
-    const record=state.modelSwitch?.[binding.executorId];
-    if(record&&!record.restored&&fallback.subscriptionClaude(record.original)&&record.until>Date.now())record.until=Date.now();
-  }
+  const refined = fallback.refine(state), back = fallback.recovered(state), reading=state.claudeQuota;
   // Keep one durable route decision per role. The next poll can resume it without a new failure or user message.
   const waiting=state.routeWaiting||={};
   // The model a mainline is set to run. A turn in progress keeps the model it started with, so a setting applied
@@ -966,47 +977,29 @@ async function handleRateLimits() {
     state.switchQueue=[];checkpoint();
   }
   if(awaitingOutput.some(record=>record.respondedAt))checkpoint();
-  const executorRecord=state.modelSwitch?.[binding.executorId], executorSwitched=executorRecord&&!executorRecord.restored;
-  const executorModel=executorSwitched?executorRecord.current:state.executorSettings?.model;
-  // Below the reserve the executor first stops new Claude subagents and lets running ones finish (at most 15 minutes,
-  // the mainline keeps working), then moves to Sol with Terra workers (Q49 A).
-  let budgetChange=false;
-  if(!claudeOk && fallback.subscriptionClaude(executorModel) && !waiting[binding.executorId]){
-    if(!state.quotaDrain){state.quotaDrain={since:Date.now(),hold:reading?.hold||null};dirty=true;}
-    const drain=state.quotaDrain;
-    const running=pace.agentRuns(binding).filter(agent=>agent.active&&catalog.identity(agent.model)?.family==='claude');
-    if(!drain.noticeKey && running.length && !isPaused() && !state.inflight){
-      drain.noticeKey='quota-reserve-'+fallback.hashId(binding.executorId+'/'+drain.since).slice(0,12);checkpoint();
-      await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE：'+quota.describe(reading)+'。先停派新的 Claude 子代理；在途子代理完成後（最多 '+
-        Math.round(DRAIN_MS/60000)+' 分鐘），背景程式會把本對話改用 Sol，新子代理改用 Terra。等待期間照常工作。',drain.noticeKey);
-    }
-    budgetChange=!running.length||Date.now()-drain.since>=DRAIN_MS;
-  }else if(state.quotaDrain){
-    const drain=state.quotaDrain;delete state.quotaDrain;dirty=true;
-    if(drain.noticeKey&&claudeOk&&fallback.subscriptionClaude(executorModel)&&!isPaused()&&!state.inflight)
-      await sendAndRead(binding.executorId,'LONG_TASK_QUOTA_RESERVE_CLEARED：Claude 訂閱額度回到保留值以上，可照常派 Claude 子代理。',drain.noticeKey+'-cleared');
-  }
+  // A drain left by an older version (the executor waiting to leave the Claude subscription) has no meaning now.
+  if(state.quotaDrain){delete state.quotaDrain;dirty=true;}
   const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
   // A mainline left on an open-source route without a switch of this watcher (a model chose it under the rule retired
   // 2026-11-21) is moved up like a switched one: open source is only for when every route above it is out.
   const strandedIds=[binding.executorId,binding.supervisorId].filter(id=>!(state.modelSwitch?.[id]&&!state.modelSwitch[id].restored)&&!waiting[id]&&
     String(setModel(id)||'').startsWith('openrouter/'));
-  // A mainline set to the OpenAI subscription once it is down to its last 2% moves on to the next route (Jay 2026-11-25).
+  // A mainline set to a stop the quota reading holds back moves on: the OpenAI subscription at its line or last 2%
+  // (Jay 2026-11-25), or a stop in front of its ladder floor (2026-11-26 decision 24).
   const heldIds=[[binding.executorId,'executor'],[binding.supervisorId,'supervisor']].filter(([id,role])=>!waiting[id]&&
-    fallback.subscriptionOpenAI(setModel(id))&&fallback.held(state,setModel(id),role)).map(([id])=>id);
+    setModel(id)&&fallback.held(state,setModel(id),role)).map(([id])=>id);
   for(const id of Object.keys(state.strandedNotice||{}))if(!strandedIds.includes(id)){delete state.strandedNotice[id];dirty=true;}
-  if(hits.length||refined||back||quotaBack||dirty){fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();}
-  if(!active.length && !Object.keys(waiting).length && !budgetChange && !strandedIds.length && !heldIds.length)return;
-  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...(budgetChange?[binding.executorId]:[]),...strandedIds,...heldIds]);
+  if(hits.length||refined||back||dirty){fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();}
+  if(!active.length && !Object.keys(waiting).length && !strandedIds.length && !heldIds.length)return;
+  const ids=new Set([...Object.keys(waiting),...active.map(([id])=>id),...strandedIds,...heldIds]);
   for(const id of ids){
     if(state.inflight)return;
     const hit=waiting[id], record=state.modelSwitch?.[id], switched=record&&!record.restored;
     const role=hit?.role||record?.role||(id===binding.supervisorId?'supervisor':'executor');
     if(role==='subagent'){
-      const owner=fallback.settingsOf(binding.executorId)?.model;
-      const target=fallback.next(hit.model,hit.model,role,state,Date.now(),owner);
-      const notice='rate-subagent-'+fallback.hashId(id+'/'+hit.at+'/'+(owner||''));
-      await sendAndRead(binding.executorId,'子代理 '+(hit.path||id)+' 遇額度限速。'+(target?'依目前執行主線重派，候選為 '+target+'。':'依執行主線派工清單重查可用模型，先繼續其他工作。'),notice);
+      const target=fallback.next(hit.model,hit.model,role,state,Date.now());
+      const notice='rate-subagent-'+fallback.hashId(id+'/'+hit.at);
+      await sendAndRead(binding.executorId,'子代理 '+(hit.path||id)+' 遇額度限速。'+(target?'依子代理順位重派，候選為 '+target+'。':'依派工清單與 model-fallback.json 重查可用模型，先繼續其他工作。'),notice);
       delete waiting[id];checkpoint();continue;
     }
     if(record?.delivery){
@@ -1028,14 +1021,15 @@ async function handleRateLimits() {
     const original=switched?record.original:hit?.model||(stranded?fallback.chainFor(observed,role)[0]:observed);
     const current=hit?.model||(switched?record.current:observed);
     const chain=fallback.chainFor(original,role);
-    // A manually chosen start stays in the chain; the executor never starts on the Claude API key.
-    if(!chain.includes(original) && !original?.startsWith('openrouter/') && !(role!=='supervisor'&&fallback.keyOf(original)==='anthropic-apikey/'))chain.unshift(original);
+    // A manually chosen start stays in the chain (every role has the Claude API on its order since 2026-11-26).
+    if(!chain.includes(original) && !original?.startsWith('openrouter/'))chain.unshift(original);
     chain.push(...fallback.openRoutes(role,binding.fourthExecutorModel).map(r=>r.model));
     const candidates=[...new Set(chain)].filter(model=>model && !fallback.limited(state,model,time,role) &&
       !(switched && model===original && record.until>time && !state.rateLimits?.[fallback.limitKey(role,original)]));
     const target=candidates[0];
-    // Without its own refusal the supervisor is never moved down to an open-source route.
-    if(role==='supervisor' && !hit && !current?.startsWith('openrouter/') && target?.startsWith('openrouter/'))continue;
+    // Without its own refusal the supervisor goes down to an open-source route only at the ladder's bottom step.
+    const ladder=!hit && fallback.held(state,current,role);
+    if(role==='supervisor' && !hit && !ladder && !current?.startsWith('openrouter/') && target?.startsWith('openrouter/'))continue;
     if(!target){
       if(!waiting[id])waiting[id]={threadId:id,model:current,role,at:time,error:'等待可用順位',waitingOnly:true};
       delete state.rateLimitedAll;
@@ -1046,10 +1040,9 @@ async function handleRateLimits() {
     // WebRPA -22: set to DeepSeek since 16:24, its turn running, told at 16:36 to use DeepSeek). A real refusal always
     // gets its continuation: the turn it stopped does not resume by itself.
     if(hit?.waitingOnly && target===observed && await targetBusy(id)){delete waiting[id];checkpoint();continue;}
-    const budget=budgetChange && id===binding.executorId && !hit;
-    // Leaving the OpenAI subscription at its floor is told at once, like the Claude reserve: it takes effect on the next turn.
-    const floor=!hit && fallback.subscriptionOpenAI(current) && fallback.held(state,current,role);
-    if(!hit && !budget && !floor && switched && current!==target && await targetBusy(id))continue;
+    // Leaving a stop the quota reading holds back is told at once: it takes effect on the next turn.
+    const floor=ladder && fallback.subscriptionOpenAI(current) && require('./claude-quota.cjs').openaiHeld(state);
+    if(!hit && !ladder && switched && current!==target && await targetBusy(id))continue;
     // A stranded mainline is told while it is idle and once per turn: a notice cannot move the turn in progress
     // (2026-11-23 工區 E: 72 identical notices in 19 minutes into one supervisor turn). A notice sent again says why
     // (Jay 2026-11-23:「印出來的訊息要讓我知道重送原因，不然我會以為是死迴圈不斷傳訊息」).
@@ -1062,30 +1055,27 @@ async function handleRateLimits() {
     }
     const restored=target===original && !original.startsWith('openrouter/');
     const settings=fallback.settingsOf(id)||{};
-    // Leaving open source (always max) a stranded mainline takes its role's usual effort: the executor High, the supervisor xhigh.
-    const effort=(switched?record.effort:stranded?(role==='supervisor'?'xhigh':'high'):settings.effort)||null;
+    // Leaving open source (always max) a stranded mainline takes its role's usual effort: xhigh for both (decisions 1-2).
+    const effort=(switched?record.effort:stranded?'xhigh':settings.effort)||null;
     const targetEffort=target.startsWith('openrouter/')?'max':effort;
     const until=state.rateLimits?.[fallback.limitKey(role,original)]?.until || time;
     let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：開源模型只在前面順位都不能用時使用。本對話改用 '+target+'，從已確認的進度接續。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：'+fallback.restoreReason(state.rateLimits?.[fallback.limitKey(role,original)]))+'本對話用 '+target+' 從中斷處接續原工作。':
-      budget?'Claude 訂閱保留給監督（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
       floor?'OpenAI 訂閱留給 Jay 自己用（'+quota.describeOpenAI(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
+      ladder?'降級階梯（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
       fallback.switchReason(hit,target,SILENT_SWITCH_MS)+'本對話改用 '+target+'，從已確認的進度接續。';
-    // The OpenAI subscription and the OpenAI API key are separate accounts: workers follow the mainline's account path.
-    const familyOf=model=>{if(String(model||'').startsWith('openrouter/'))return model;const m=catalog.identity(model);return m?(m.family==='gpt'?'gpt|'+m.provider:m.family):model;};
-    if(role==='executor' && !isPaused() && familyOf(current)!==familyOf(target)){
-      const worker=familyOf(target)==='claude'?'同一家的 Sonnet（anthropic/，不用 Claude API）':familyOf(target)==='gpt|'?'最新 Terra（OpenAI 訂閱）':
-        familyOf(target)==='gpt|openai-apikey/'?'openai-apikey/ 的最新 Terra':'同一完整模型 ID、max 推論';
-      prompt+=' 換到不同家模型：在途的舊模型子代理改從工作包交付檔與原件收件，不再向它發訊；新派子代理用'+worker+'。';
-    }
+    // Workers keep their own order whatever the mainline runs (Jay 2026-11-26 decision 20), so only a change of model
+    // family is told: the subscription and the API of one family are the same model to the chat.
+    const familyOf=model=>String(model||'').startsWith('openrouter/')?model:catalog.identity(model)?.family||model;
+    if(role==='executor' && !isPaused() && familyOf(current)!==familyOf(target))
+      prompt+=' 換到不同家模型：在途子代理改從工作包交付檔與原件收件，不再向它發訊；新派子代理照 model-fallback.json 的子代理順位（ladder.first.subagent）。';
     if(role==='supervisor' && !isPaused() && target.startsWith('openrouter/'))prompt+=' 暫代監督依原契約照常收件、查證與派工；要結案的候選照常審查並提交，背景程式會保留原件，交恢復的高階監督逐條複驗結案。';
     if(stranded && told)prompt+='（第 '+(told.count+1)+' 次通知。重送原因：上一則在 '+clockText(Date.parse(told.at))+' 送出，之後開始的新回合仍設定為 '+observed+'。）';
     state.modelSwitches=(state.modelSwitches||0)+1;
     const key='model-switch-'+id.slice(0,8)+'-'+state.modelSwitches;
     (state.modelSwitch||={})[id]={role,original,current:target,effort,since:time,until,restored:null,
-      ...(budget||switched&&record.budgetOrigin&&!hit?{budgetOrigin:true}:{}),delivery:{key,prompt,effort:targetEffort}};
+      ...(ladder||switched&&record.ladderOrigin&&!hit?{ladderOrigin:true}:{}),delivery:{key,prompt,effort:targetEffort}};
     if(stranded)(state.strandedNotice||={})[id]={turnId,at:now(),count:(told?.count||0)+1};
     delete waiting[id];
-    if(budget)delete state.quotaDrain;
     if(state.rateLimitedAll?.threadId===id)delete state.rateLimitedAll;
     checkpoint();
     await sendAndRead(id,prompt,key,{model:target,thinking:targetEffort});
@@ -1139,7 +1129,8 @@ async function watch() {
     if (await handleAmendRequest()) continue;
     writeDashboard();
     await pushQuestions();
-    await cycleAlerts();
+    await reworkDecisions();
+    await selfWorkNotice();
     // The supervisor saw an outage warning: one short note once reads work again, so it does not act on a stale alarm.
     if (state.appHealth?.recoveryNotice && !state.inflight && !state.pending) {
       const since = state.appHealth.recoveryNotice;

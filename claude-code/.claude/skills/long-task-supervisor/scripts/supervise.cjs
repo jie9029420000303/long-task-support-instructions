@@ -354,17 +354,6 @@ function decision() {
       sentAt:Date.now(), deadlineMs:(given?.deadlineMinutes || INSTRUCTION_DEADLINE_MS / 60000) * 60000, misses:0};
   }
   checkedWait.remember(state,value,binding);
-  // Consume only write-attempt clues actually shown in this reviewed event. Later transcript rows remain queued.
-  if(event.kind==='dispatch_review'&&state.activityAudit?.mainWrites){
-    const reviewed=new Set((event.issues||[]).filter(item=>item.kind==='main_write_review')
-      .flatMap(item=>(item.detail?.observations||[]).map(value=>value.callId)));
-    state.activityAudit.mainWrites=state.activityAudit.mainWrites.filter(item=>!reviewed.has(item.callId));
-    const keys=new Set((event.issues||[]).filter(item=>item.kind==='main_write_review').map(item=>item.key));
-    if(state.dispatchAudit){
-      state.dispatchAudit.active=(state.dispatchAudit.active||[]).filter(key=>!keys.has(key));
-      state.dispatchAudit.announced=(state.dispatchAudit.announced||[]).filter(key=>!keys.has(key));
-    }
-  }
   (state.resolved ||= {})[event.id]={event,decision:input,decisionSha256:hash(inputArgument)};
   state.seen.push(event.id);state.pending=null;
   if (event.kind==='progress_review') {state.progressReviewPreflight=null;state.lastProgressReviewAt=Date.now();state.failedCommands={};}

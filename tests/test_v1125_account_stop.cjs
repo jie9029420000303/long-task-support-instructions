@@ -3,6 +3,10 @@
 // their own threshold are paused; an account Jay paused is never resumed by the program; an account Jay resumed himself
 // is not paused again before its reset; an unreadable account is left alone; a stopped account counts at 0% in the
 // supervisor reserve so the executor leaves the Claude subscription instead of crowding the supervisor.
+// v1.18.0 (Jay 2026-11-26 decisions 25, 27 and 28): only an account shared with other people (its OpenCodex label holds
+// 「共用」) is paused at its line, so nobody uses it past what was agreed; Jay's own accounts are never paused for it, he
+// keeps using them through OpenCodex, and the long task only counts nothing available on them. What lies above any
+// line is kept for Jay: available = Σ weight × max(0, line − used) ÷ Σ weight × line.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -19,12 +23,12 @@ function withEnv(values,fn){
   const restore=()=>{for(const [key,value] of Object.entries(old))if(value===undefined)delete process.env[key];else process.env[key]=value;};
   return Promise.resolve().then(fn).finally(restore);
 }
-// The 2026-11-23 21:40 accounts: jay@xplorx (no own threshold), a***e (70, paused by Jay), b***e (50), jjdigi (none).
-function reading(now,{b=52,bPaused=false,jay=2,small=23,bReset=now+DAY,wwPaused=true,wwReset=now+2*DAY}={}){
+// The 2026-11-23 21:40 accounts: jay@xplorx (no own threshold), a***e (70, paused by Jay), b***e (50, shared), jjdigi (none).
+function reading(now,{b=52,bPaused=false,jay=2,small=23,bReset=now+DAY,wwPaused=true,wwReset=now+2*DAY,bLabel='b***e@xplorx.co（共用帳號）'}={}){
   return {accounts:[
     {provider:'anthropic',id:'jay',label:'jay@xplorx.co',plan:'max_20x',paused:false,autoSwitchThresholdOverride:null,quota:{weeklyPercent:jay,weeklyResetAt:now+7*DAY}},
     {provider:'anthropic',id:'ww',label:'a***e@wwinno.com',plan:'max_20x',paused:wwPaused,autoSwitchThresholdOverride:70,quota:{weeklyPercent:61,weeklyResetAt:wwReset}},
-    {provider:'anthropic',id:'bb',label:'b***e@xplorx.co',plan:'max_20x',paused:bPaused,autoSwitchThresholdOverride:50,quota:{weeklyPercent:b,weeklyResetAt:bReset}},
+    {provider:'anthropic',id:'bb',label:bLabel,plan:'max_20x',paused:bPaused,autoSwitchThresholdOverride:50,quota:{weeklyPercent:b,weeklyResetAt:bReset}},
     {provider:'anthropic',id:'jj',label:'j***y@jjdigi.com.tw',plan:'max_5x',paused:false,autoSwitchThresholdOverride:null,quota:{weeklyPercent:small,weeklyResetAt:now+4*DAY}}]};
 }
 function fakeOcx(root,{fail=false}={}){
@@ -35,12 +39,13 @@ function fakeOcx(root,{fail=false}={}){
   return {bin,calls:()=>fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[]};
 }
 
-test('only an account with its own threshold is paused, and only once its weekly use reaches it',()=>{
+test('only a shared account with its own threshold is paused, and only once its weekly use reaches it',()=>{
   const now=Date.now(),empty={accounts:{}};
   assert.deepEqual(quota.planStops(reading(now,{b:49}),empty,now),[],'49% is under the 50% line');
   const at=quota.planStops(reading(now,{b:50}),empty,now);
   assert.deepEqual(at.map(a=>[a.type,a.id,a.line]),[['pause','bb',50]],'50% used is the line Jay asked for: half left');
   assert.deepEqual(quota.planStops(reading(now,{b:30,jay:99,small:99}),empty,now),[],'accounts without their own threshold are never paused, whatever the pool-wide threshold');
+  assert.deepEqual(quota.planStops(reading(now,{b:80,bLabel:'b***e@xplorx.co'}),empty,now),[],'Jay\'s own account past its line is not paused: he keeps using it');
   assert.deepEqual(quota.planStops(reading(now,{b:100,bPaused:true}),empty,now),[],'an account already paused by someone else is left alone');
   const unreadable=reading(now);delete unreadable.accounts[2].quota.weeklyPercent;
   assert.deepEqual(quota.planStops(unreadable,empty,now),[],'an unreadable weekly use is neither a reason to pause nor to resume');
@@ -71,14 +76,14 @@ test('the watcher pauses through OpenCodex, records it for both runs, counts the
       assert.equal(await quota.refresh(state,now),true);
       assert.deepEqual(ocx.calls(),[['account','pause','anthropic','bb']]);
       assert.equal(read(ledger).accounts.bb.state,'paused');
-      // jay 2% (x4), b***e stopped 0% (x4), jjdigi 23% used (x1): (98*4+0*4+77)/9
-      assert.equal(state.claudeQuota.weeklyRemaining,52.1,'the stopped account still counts, at 0% remaining');
-      assert.match(quota.describe(state.claudeQuota),/b\*\*\*e@xplorx\.co 週用量到自訂門檻 50%，已暫停到 .* 重置/);
+      // jay 2% used of 100 (x4), b***e stopped at its 50 line (x4), jjdigi 23% used of 100 (x1): (98*4+0+77)/(400+200+100)
+      assert.equal(state.claudeQuota.available,67,'the stopped account still counts, with nothing available');
+      assert.match(quota.describe(state.claudeQuota),/b\*\*\*e@xplorx\.co（共用帳號） 是共用帳號，週用量到停用線 50%，已暫停到 .* 重置/);
       const other={};
       save(file,reading(now+MINUTE,{b:53,bPaused:true}));
       await quota.refresh(other,now+MINUTE);
       assert.equal(ocx.calls().length,1,'the other run reads the same ledger and does not pause or resume again');
-      assert.equal(other.claudeQuota.weeklyRemaining,52.1);
+      assert.equal(other.claudeQuota.available,67);
       save(file,reading(now+DAY+MINUTE,{b:0,bPaused:true,bReset:now+8*DAY}));
       await quota.refresh(state,now+DAY+MINUTE);
       assert.deepEqual(ocx.calls().at(-1),['account','resume','anthropic','bb']);
@@ -96,8 +101,8 @@ test('a failed pause leaves nothing recorded and is reported; a test without a s
     await withEnv({LONG_TASK_CLAUDE_QUOTA_FILE:file,OPENCODEX_OCX_BIN:ocx.bin,LONG_TASK_ACCOUNT_STOPS_FILE:ledger},async()=>{
       const state={};await quota.refresh(state,now);
       assert.equal(fs.existsSync(ledger),false);
-      assert.match(quota.describe(state.claudeQuota),/b\*\*\*e@xplorx\.co 暫停失敗/);
-      assert.equal(state.claudeQuota.weeklyRemaining,72.1,'not paused: counted at its real remainder, (98*4+45*4+77)/9');
+      assert.match(quota.describe(state.claudeQuota),/b\*\*\*e@xplorx\.co（共用帳號） 暫停失敗/);
+      assert.equal(state.claudeQuota.available,67,'not paused, but past its line it has nothing available either');
     });
     await withEnv({LONG_TASK_CLAUDE_QUOTA_FILE:file,OPENCODEX_OCX_BIN:undefined,LONG_TASK_ACCOUNT_STOPS_FILE:ledger},async()=>{
       const state={};await quota.refresh(state,now);
@@ -129,8 +134,8 @@ test('a stopped account is judged again by its current threshold: raised above i
       const state={};await quota.refresh(state,now);
       assert.deepEqual(ocx.calls(),[['account','resume','anthropic','bb']]);
       assert.deepEqual(read(ledger).accounts,{},'the stop record is dropped');
-      assert.equal(state.claudeQuota.weeklyRemaining,73.9,'counted at its real remainder again: (98*4+49*4+77)/9');
-      assert.doesNotMatch(quota.describe(state.claudeQuota),/b\*\*\*e@xplorx\.co 週用量到自訂門檻/);
+      assert.equal(state.claudeQuota.available,71.3,'counted under its new line: (98*4+29*4+77)/(400+320+100)');
+      assert.doesNotMatch(quota.describe(state.claudeQuota),/週用量到停用線/);
       save(file,reading(now+HOUR,{b:80,bReset:now+DAY}));
       const file80=read(file);file80.accounts[2].autoSwitchThresholdOverride=80;save(file,file80);
       await quota.refresh(state,now+HOUR);
@@ -139,4 +144,6 @@ test('a stopped account is judged again by its current threshold: raised above i
     });
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+
 
