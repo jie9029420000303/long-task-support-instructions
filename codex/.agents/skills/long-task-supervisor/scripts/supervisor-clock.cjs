@@ -52,11 +52,28 @@ const commandKey=command=>'sha256:'+crypto.createHash('sha256').update(command).
 // tools are its own. Editing code or configuration (a merge conflict included), running any test and sleeping to wait
 // belong to subagents (Jay 2026-11-26 decision 31, with no allowance). Each such call of the mainline's own rollout is
 // noted with the files or the command it names; status, work package, evidence and document files are not code.
-const TEST_COMMAND=/(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|npx\s+(?:jest|vitest|playwright\s+test|mocha)\b|pytest\b|python3?\s+-m\s+(?:pytest|unittest)\b|node\s+--test\b|(?:go|cargo|dotnet|swift|mix)\s+test\b|(?:jest|vitest|mocha|phpunit|rspec)\b|playwright\s+test\b|make\s+(?:test|check)\b|(?:mvn|gradle|\.\/gradlew)\b[^;&|]*\btest\b|test-run\.py\b)/;
+// What the shell runs is judged, command word first: quoted text, here-document bodies and another command's arguments
+// are data (2026-11-26 工區 E: ps aux | grep -E 'buildx|vitest|playwright' was taken for a test run). A shell's -c
+// string is a command line of its own and is read as one.
+const TEST_COMMAND=/^(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|npx\s+(?:jest|vitest|playwright\s+test|mocha)\b|pytest\b|python3?\s+-m\s+(?:pytest|unittest)\b|node\s+--test\b|(?:go|cargo|dotnet|swift|mix)\s+test\b|(?:jest|vitest|mocha|phpunit|rspec)\b|playwright\s+test\b|make\s+(?:test|check)\b|(?:mvn|gradle|\.\/gradlew)\b.*\btest\b|(?:python3?\s+)?\S*test-run\.py\b)/;
+const EDIT_COMMAND=/^(?:sed\s+(?:-[a-zA-Z]*\s+)*-i|perl\s+-[a-zA-Z]*i|git\s+apply\b|git\s+checkout\s+--(?:ours|theirs)\b|git\s+mergetool\b)/;
+function shellCommands(command){
+  const text=String(command)
+    .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\s|$)/g,'')
+    .replace(/\b(?:ba|z)?sh\s+-[a-z]*c\s+(?:'([^']*)'|"((?:\\.|[^"\\])*)")/g,(match,single,double)=>';'+(single??double)+';')
+    .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g,"''");
+  return text.split(/\$\(|[;&|()\x60{}\n]|\b(?:do|then|else)\b/)
+    .map(part=>part.trim().replace(/^(?:\w+=\S*\s+|(?:env|time|nohup|exec|sudo|command)\s+|timeout\s+\S+\s+)*/,'')).filter(Boolean);
+}
 // A wait the mainline sets itself: a command that is a sleep (after any cd), or a loop that sleeps between polls. A
 // deployment script's own waiting is not in the command line and is not counted.
-const SLEEP_COMMAND=/^\s*(?:cd\s+[^;&|]+(?:&&|;)\s*)*sleep\s+\d|\b(?:while|until)\b[\s\S]*\bsleep\s+\d/;
-const EDIT_COMMAND=/(?:^|[\s;&|(])(?:sed\s+(?:-[a-zA-Z]*\s+)*-i|perl\s+-[a-zA-Z]*i|git\s+apply\b|git\s+checkout\s+--(?:ours|theirs)\b|git\s+mergetool\b)/;
+function commandKind(command){
+  const parts=shellCommands(command);
+  if(parts.some(part=>TEST_COMMAND.test(part)))return 'test';
+  const first=parts.find(part=>!/^cd\b/.test(part))||'';
+  if(parts.some(part=>/^sleep\s+\d/.test(part))&&(/^sleep\b/.test(first)||parts.some(part=>/^(?:while|until)\b/.test(part))))return 'sleep';
+  return parts.some(part=>EDIT_COMMAND.test(part))?'edit':null;
+}
 function patchFiles(text){
   return [...String(text||'').matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)\s*(?=\\n|\n|$)/g)].map(match=>match[1].trim());
 }
@@ -65,9 +82,8 @@ function selfWorkOf(payload){
   const input=payload.type==='custom_tool_call'?String(payload.input||''):payload.type==='function_call'?String(payload.arguments||''):'';
   if(payload.name==='apply_patch'||/apply_patch\s*\(/.test(input))for(const file of patchFiles(input))out.push({kind:'edit',item:file});
   for(const command of commandsOf(payload)){
-    if(TEST_COMMAND.test(command))out.push({kind:'test',item:command.replace(/\s+/g,' ').trim().slice(0,160)});
-    else if(SLEEP_COMMAND.test(command))out.push({kind:'sleep',item:command.replace(/\s+/g,' ').trim().slice(0,160)});
-    else if(EDIT_COMMAND.test(command))out.push({kind:'edit',item:command.replace(/\s+/g,' ').trim().slice(0,160)});
+    const kind=commandKind(command);
+    if(kind)out.push({kind,item:command.replace(/\s+/g,' ').trim().slice(0,160)});
   }
   if(payload.type==='function_call'&&/sleep/i.test(payload.name||''))out.push({kind:'sleep',item:payload.name});
   else if(payload.type==='custom_tool_call'&&/\bsleep\s*\(|clock__sleep|setTimeout\s*\(\s*\w+\s*,\s*[1-9]\d{4,}/.test(input)&&!commandsOf(payload).length)out.push({kind:'sleep',item:payload.name||'sleep'});
