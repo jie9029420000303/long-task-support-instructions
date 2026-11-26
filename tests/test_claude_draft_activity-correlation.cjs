@@ -31,6 +31,15 @@ try{
   assert.equal(selfWorkOf(tool('Bash',{command:'git merge --no-ff wp-b1 && git commit -m x'})),null,'merging and committing stay with the mainline');
   assert.equal(selfWorkOf(tool('Read',{file_path:'/repo/src/app.ts'})),null);
   assert.equal(selfWorkOf(tool('Write',{file_path:'/repo/docs/說明.md'})),null,'documents are not code');
+  // Looking for a runner is not running it (2026-11-26 工區 E: a process check was taken for a test run and would have
+  // woken the supervisor on the next one): quoted text, here-document bodies and other commands' arguments are data.
+  const LOOKUPS=["ps aux | grep -E 'buildx|vitest|v12_shoot|playwright' | grep -v grep | head -20",'pgrep -fl vitest',
+    'git commit -m "fix npm test flake"',"rg -n 'sed -i' scripts",'echo "sleep 5 while waiting"',
+    "cat > notes.sh <<'EOF'\nnpm test\nsleep 30\nEOF\nchmod +x notes.sh"];
+  const RUNS={test:['CI=1 npx vitest run src','bash -lc "cd /repo && pytest -q"','timeout 600 make check','python3 /skills/test-run.py --run R'],
+    sleep:['cd "/repo dir" && sleep 30','while true; do curl -s localhost:3000/health; sleep 5; done'],edit:["perl -pi -e 's/a/b/' src/x.ts",'git checkout --theirs -- src/x.ts']};
+  for(const command of LOOKUPS)assert.equal(selfWorkOf(tool('Bash',{command})),null,command);
+  for(const [kind,cmds] of Object.entries(RUNS))for(const command of cmds)assert.equal(selfWorkOf(tool('Bash',{command}))?.kind,kind,command);
 
   // The watcher counts per turn and keeps no paths or commands; the second hand-done call of a turn is the review.
   const binding={executorId:'executor',executorLog:path.join(dir,'executor.jsonl'),createdAt:'2026-11-02T00:00:00Z',dispatchAudit:{enabled:true}};

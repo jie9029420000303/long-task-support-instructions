@@ -51,6 +51,15 @@ test('the mainline\'s own edits, tests and sleeps are found, and documents, stat
   // The mainline's own work: Git, deployment and the dispatch tools.
   for(const cmd of ['git merge --no-ff claude/x','git commit -m "x"','node scripts/dispatch.cjs mark RUN wp P1 {}','./deploy.sh production'])
     assert.deepEqual(clock.selfWorkOf(shell(cmd)),[],cmd);
+  // Looking for a runner is not running it (2026-11-26 工區 E: a process check was taken for a test run and would have
+  // woken the supervisor on the next one): quoted text, here-document bodies and other commands' arguments are data.
+  const LOOKUPS=["ps aux | grep -E 'buildx|vitest|v12_shoot|playwright' | grep -v grep | head -20",'pgrep -fl vitest',
+    'git commit -m "fix npm test flake"',"rg -n 'sed -i' scripts",'echo "sleep 5 while waiting"',
+    "cat > notes.sh <<'EOF'\nnpm test\nsleep 30\nEOF\nchmod +x notes.sh"];
+  const RUNS={test:['CI=1 npx vitest run src','bash -lc "cd /repo && pytest -q"','timeout 600 make check','python3 /skills/test-run.py --run R'],
+    sleep:['cd "/repo dir" && sleep 30','while true; do curl -s localhost:3000/health; sleep 5; done'],edit:["perl -pi -e 's/a/b/' src/x.ts",'git checkout --theirs -- src/x.ts']};
+  for(const cmd of LOOKUPS)assert.deepEqual(clock.selfWorkOf(shell(cmd)),[],cmd);
+  for(const [kind,cmds] of Object.entries(RUNS))for(const cmd of cmds)assert.deepEqual(clock.selfWorkOf(shell(cmd)).map(hit=>hit.kind),[kind],cmd);
   const run='/runs/e',wp='/repo/.codex/long-task/wp';
   const work={hits:['/repo/README.md','/runs/e/state.md',wp+'/P1.md','/repo/evidence/shot.png','/repo/src/app.js'].map(item=>({kind:'edit',item,at:iso(Date.now())}))};
   assert.deepEqual(clock.selfWorkHits(work,run,wp).map(hit=>hit.item),['/repo/src/app.js']);
