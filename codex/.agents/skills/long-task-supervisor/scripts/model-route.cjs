@@ -2,106 +2,111 @@
 // This resolver never switches a chat. Only explicit requests and observed tool inventories
 // determine the role, model and supported reasoning level.
 const fs=require('node:fs');
-const {keyOf}=require('./model-fallback.cjs');
+const {keyOf,subscriptionOpenAI,stopIndex,MAINLINE_STOPS,SUBAGENT_STOPS}=require('./model-fallback.cjs');
 const {efforts,identity,available,latest}=require('./model-catalog.cjs');
-const roles={executor:'high',general:'medium',ui:'low'};
-// A Sonnet general worker (A check, B technical, C research) starts at High (Jay 2026-11-23「子代理sonnet 改為high」:
-// AA rates Sonnet High 41.5 overall and 25.7% on coding, Medium 30.8 and 11.0%). GPT workers keep Medium and
-// interface work keeps Low. The failure step starts from this level, so a Sonnet package goes High, then max.
-const sonnetGeneral='high';
-const baseline=(role,model)=>role==='general'&&identity(model)?.tier==='sonnet'?sonnetGeneral:roles[role];
-// After an unsuccessful delivery (Jay 2026-11-23 21:50, 23:03): the first raises the same model two reasoning steps,
-// at most max, in a new subagent (followup_task cannot change the effort); the second goes to research at xhigh and
-// the research returns to the second attempt's subagent with the count reset. A reset never lowers the effort. There
-// is no model change and no mainline takeover: the cycle repeats until the criterion passes. rework.cjs keeps the count.
-const CEILING='max',RESEARCH='xhigh';
+const openrouter=()=>require('./openrouter-route.cjs');
+// The executor plans, dispatches and judges the work: it runs at xhigh (Jay 2026-11-26 decision 1). Workers start at
+// Medium on every closed model now that the mainline is stronger (decision 9, replacing 2026-11-23's Sonnet High);
+// interface work keeps Low. Open-source routes are pinned at max by OpenCodex.
+const roles={executor:'xhigh',general:'medium',ui:'low'};
+const baseline=role=>roles[role];
+// Unsuccessful deliveries of one criterion, counted without reset (Jay 2026-11-26 decision 33; rework.cjs keeps the
+// count): the 1st, 3rd and 5th go back to the subagent that delivered, at the same model and effort (followup_task keeps
+// its context and its trail of the error). The 2nd and 4th go to research first; then the 2nd opens a new subagent two
+// efforts higher (an open-source model cannot go higher, so it moves to the next open-source stop: DeepSeek to Muse), and
+// the 4th opens one on the executor's own model and effort. The 6th goes to research and then to Jay (no model here).
+const CEILING='max',RESEARCH='xhigh',RAISE_AT=2,MAINLINE_AT=4,JAY_AT=6;
+const isOpen=id=>openrouter().choices.some(route=>route.model===id);
+// The models of a role's order that this inventory offers, front first.
+function orderOf(role,catalog,fourth){
+  const stops=role==='executor'?MAINLINE_STOPS:SUBAGENT_STOPS;
+  const closed=stops.map(stop=>{
+    const [kind,provider]=stop.split('|');
+    return kind==='claude'?latest(catalog,'claude',provider,role==='executor'?'opus':'sonnet'):latest(catalog,'gpt',provider,kind);
+  }).filter(Boolean);
+  const open=openrouter().routes(role==='executor'?fourth:null,catalog).map(route=>catalog.find(item=>item.id===route.model)).filter(Boolean);
+  return [...closed,...open];
+}
 function resolve(input) {
   const main=identity(input.supervisorModel);
   if(!input.supervisorModel)throw Error('Provide the observed supervisor model ID');
   if(!Array.isArray(input.roles)||!input.roles.length||input.roles.some(r=>!Object.hasOwn(roles,r)))throw Error('Request known roles');
-  if(!main&&!require('./openrouter-route.cjs').choices.some(r=>r.model===input.executorModel||r.model===input.supervisorModel))return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
+  if(input.errors!==undefined)throw Error('errors 已改為 failures：這條驗收條文目前累計的不合格次數（rework.cjs status 的 failures），0 到 5');
+  if(!main&&!openrouter().choices.some(r=>r.model===input.executorModel||r.model===input.supervisorModel))return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
   const result={family:main?.family||'openrouter',provider:main?.provider||'openrouter/',supervisorModel:input.supervisorModel,roles:{}};
-  let limits={},claudeOk=true,openaiHeld=false;
+  let limits={},openaiHeld=false,floors={};
   if(input.fallback){
-    // The watcher publishes the executor's limits and whether the Claude reserve lets the executor side use the
-    // subscription, and whether the OpenAI subscription is down to its last 2%; before its first reading nothing is
-    // held here and the watcher moves the mainline later.
-    try{const published=JSON.parse(fs.readFileSync(input.fallback,'utf8'));limits=published.limits||{};claudeOk=published.claudeQuota?.executorMayUseClaude!==false;
+    // The watcher publishes the executor side's limits, the ladder floor of each role and whether the OpenAI
+    // subscription is out; before its first reading nothing is held here and the watcher moves the mainline later.
+    try{const published=JSON.parse(fs.readFileSync(input.fallback,'utf8'));limits=published.limits||{};floors=published.ladder?.floors||{};
       openaiHeld=published.openaiQuota?.subscriptionHeld===true;}
     catch(error){if(error.code!=='ENOENT')throw error;} // A new run has no limit ledger yet.
   }
-  const subscriptionGpt=id=>identity(id)?.family==='gpt'&&identity(id).provider==='';
-  const limited=id=>openaiHeld&&subscriptionGpt(id)||Date.parse(limits[keyOf(id)]?.until)>Date.now()||String(id).startsWith('openrouter/')&&Date.parse(limits['openrouter/']?.until)>Date.now();
+  const refused=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now()||isOpen(id)&&Date.parse(limits['openrouter/']?.until)>Date.now();
+  const serving=id=>!refused(id)&&!(openaiHeld&&subscriptionOpenAI(id));
+  const failures=input.failures??0;
+  if(!Number.isInteger(failures)||failures<0)throw Error('failures 是這條驗收條文累計的不合格次數（不歸零），0 以上的整數');
+  if(input.previousEffort!==undefined&&!efforts.includes(input.previousEffort))throw Error('previousEffort must be one of '+efforts.join(', '));
   for(const role of input.roles){
-    const worker=role!=='executor', owner=worker?identity(input.executorModel||input.supervisorModel):main;
+    const worker=role!=='executor', side=worker?'subagent':'executor';
     const catalog=available(input.catalogs?.[worker?'subagent':'executor']||[]);
-    const override=input.overrides?.[role]||{}, errors=worker?(input.errors||0):0;
-    if(!Number.isInteger(errors)||errors<0||errors>1)throw Error('errors is the unsuccessful deliveries since the last reset of this criterion: 0 or 1 (the second goes to research)');
-    const research=worker&&input.research===true;
-    if(research&&errors)throw Error('A research worker starts its own count: omit errors');
-    if(input.previousEffort!==undefined&&!efforts.includes(input.previousEffort))throw Error('previousEffort must be one of '+efforts.join(', '));
+    const override=input.overrides?.[role]||{}, research=worker&&input.research===true, step=worker?failures:0;
     const unavailable=reason=>{result.roles[role]={status:'unavailable',reason};};
+    if(research&&step%2===1){unavailable('研究在第 2、4、6 次不合格後才派：failures 要是偶數');continue;}
+    if(step>=JAY_AT&&!research){unavailable('這條已累計 '+step+' 次不合格：研究登記後由監督在待決帳問 Jay，裁決前不再派這條');continue;}
     const executorModel=input.executorModel||input.supervisorModel;
-    if(worker && require('./openrouter-route.cjs').choices.some(r=>r.model===executorModel)){
-      const requested=override.model||executorModel;
-      const permitted=require('./openrouter-route.cjs').routes(null,catalog).some(r=>r.model===requested);
-      if(requested!==executorModel || !permitted || limited(requested) || (override.effort && override.effort!=='max')){
-        unavailable('The approved upstream must be available in the actual worker inventory');continue;
-      }
-      // OpenCodex pins the open-source routes at max: a raise or a research worker stays there.
-      result.roles[role]={status:'ready',model:requested,effort:'max',basis:'execution-mainline',...(errors||research?{effortAtCeiling:true}:{}),...(errors?{newAgent:true}:{})};
+    // 1st, 3rd and 5th: the same subagent again, same model and effort, with the correction (followup_task).
+    if(step%2===1&&!override.model){
+      if(!input.previousModel||!input.previousEffort){unavailable('交回原子代理重做要附 previousModel 與 previousEffort（它剛才的模型與推理）');continue;}
+      result.roles[role]={status:'ready',model:input.previousModel,effort:input.previousEffort,basis:'same-subagent',reuse:true};
       continue;
     }
-    if(!owner){unavailable('Unknown execution mainline model family');continue;}
-    const tier=owner.family==='claude'?'sonnet':'terra';
-    // Every Claude role on the executor side uses the subscription path; the API key is kept for the supervisor
-    // (Jay 2026-11-21), even when the supervisor itself runs on it.
-    const provider=owner.family==='claude'?'anthropic/':owner.provider;
-    if(worker&&owner.family==='claude'&&!claudeOk&&!override.model){
-      unavailable('Claude 訂閱保留給監督：先不派新的 Claude 子代理，背景程式會把執行主線改用 Sol，之後子代理用 Terra');continue;
-    }
-    let basis=Object.keys(override).length?'explicit-user-override':'role-policy', restoreAfter;
-    // The executor starts on subscription Sonnet under a Claude supervisor, or on Sol while the reserve holds: the
-    // subscription Sol, else the OpenAI API Sol (Jay 2026-11-25).
-    const sol=()=>['','openai-apikey/'].map(account=>latest(catalog,'gpt',account,'sol')).find(x=>x&&!limited(x.id));
-    const start=()=>{
-      if(main.family!=='claude')return catalog.find(x=>x.id===input.supervisorModel);
-      if(claudeOk)return latest(catalog,'claude','anthropic/','sonnet');
-      basis='claude-reserve';return sol()||latest(catalog,'gpt','','sol');
-    };
-    let selected=override.model?catalog.find(x=>x.id===override.model):
-      worker?latest(catalog,owner.family,provider,tier):start();
-    if(selected && identity(selected.id)?.family!==owner.family && worker){unavailable('The worker must be compatible with the execution mainline');continue;}
-    if(selected && limited(selected.id) && !override.model){
-      restoreAfter=limits[keyOf(selected.id)]?.until;
-      const m=identity(selected.id);
-      // Workers never use the Claude API key (Jay 2026-11-21): it is kept for the supervisor.
-      const substitute=m.family==='claude'?[latest(catalog,m.family,'anthropic/',m.tier)].find(x=>x&&!limited(x.id)):null;
-      selected=substitute||(worker?null:sol())||null;basis='rate-limit-fallback';
-    }
+    const order=orderOf(side,catalog,input.fourthExecutorModel);
+    // The ladder floor, never past the last stop that can still serve.
+    const usable=order.filter(item=>serving(item.id));
+    const floorAt=Math.min(floors[side]||0,Math.max(0,...usable.map(item=>stopIndex(item.id,side)??0)));
+    const allowed=usable.filter(item=>(stopIndex(item.id,side)??0)>=floorAt);
+    let basis=Object.keys(override).length?'explicit-user-override':'role-policy', selected, restoreAfter;
+    if(override.model)selected=catalog.find(x=>x.id===override.model);
+    else if(worker&&step===MAINLINE_AT&&!research){
+      // 4th: the executor's own model and effort.
+      selected=catalog.find(x=>x.id===executorModel)||(isOpen(executorModel)?{id:executorModel,efforts:['max']}:null);basis='executor-equivalent';
+    }else if(worker&&step===RAISE_AT&&!research&&input.previousModel&&isOpen(input.previousModel)){
+      // An open-source model cannot raise its effort: the next open-source stop stands for the raise (DeepSeek to Muse).
+      const at=order.findIndex(item=>item.id===input.previousModel);
+      selected=order.slice(at+1).find(item=>isOpen(item.id)&&serving(item.id))||order.find(item=>item.id===input.previousModel);basis='open-source-next';
+    }else if(worker&&step===RAISE_AT&&!research&&input.previousModel&&allowed.some(item=>item.id===input.previousModel)){
+      selected=allowed.find(item=>item.id===input.previousModel);
+    }else selected=allowed[0];
     if(!selected){unavailable('The requested enabled role/model is unavailable in this tool inventory');continue;}
-    const supported=efforts.filter(e=>selected.efforts.includes(e));
-    const base=baseline(role,selected.id);
+    if(!override.model&&order[0]&&selected.id!==order[0].id&&refused(order[0].id))restoreAfter=limits[keyOf(order[0].id)]?.until;
+    if(!override.model&&order[0]&&selected.id!==order[0].id&&basis==='role-policy')basis=floorAt>0?'quota-ladder':'rate-limit-fallback';
+    const open=isOpen(selected.id);
+    const supported=open?['max']:efforts.filter(e=>selected.efforts.includes(e));
     const rank=e=>efforts.indexOf(e);
-    // The level the package last ran at; a reset keeps it.
-    const prior=worker&&input.previousEffort&&rank(input.previousEffort)>rank(base)?input.previousEffort:base;
-    const usable=supported.filter(e=>rank(e)<=rank(CEILING));
-    let effort=override.effort||(research?RESEARCH:prior), ceiling={};
-    if(errors && !override.effort){
+    let effort,extra={};
+    if(override.effort)effort=override.effort;
+    else if(open)effort='max';
+    else if(worker&&step===MAINLINE_AT&&!research)effort=input.executorEffort||roles.executor;
+    else if(research)effort=RESEARCH;
+    else if(worker&&step===RAISE_AT){
+      const prior=input.previousEffort&&rank(input.previousEffort)>rank(baseline(role))?input.previousEffort:baseline(role);
       const want=Math.min(rank(prior)+2,rank(CEILING));
-      effort=usable.filter(e=>rank(e)<=want).at(-1)||prior;
-      ceiling={newAgent:true,...(rank(effort)<=rank(prior)?{effortAtCeiling:true}:{})};
-    }
+      effort=supported.filter(e=>rank(e)<=want).at(-1)||prior;
+      if(rank(effort)<=rank(prior))extra.effortAtCeiling=true;
+    }else effort=baseline(role);
+    if(open&&step===RAISE_AT&&selected.id===input.previousModel)extra.effortAtCeiling=true;
     if(!supported.includes(effort)){unavailable('The selected model does not support '+effort);continue;}
-    result.roles[role]={status:'ready',model:selected.id,effort,basis,...ceiling,...(research?{research:true}:{}),...(restoreAfter?{restoreAfter}:{})};
+    result.roles[role]={status:'ready',model:selected.id,effort,basis,...(worker?{newAgent:true}:{}),...extra,...(research?{research:true}:{}),...(restoreAfter?{restoreAfter}:{})};
   }
   return result;
 }
+// A worker's executorModel and executorEffort come from the calling chat's own rollout, not a stale input.
 function observedInput(input,threadId){
   if(!threadId || !input.roles?.some(role=>role==='general'||role==='ui'))return input;
-  const observed=require('./model-fallback.cjs').settingsOf(threadId)?.model;
-  return observed?{...input,executorModel:observed}:input;
+  const observed=require('./model-fallback.cjs').settingsOf(threadId);
+  return observed?.model?{...input,executorModel:observed.model,...(observed.effort?{executorEffort:observed.effort}:{})}:input;
 }
-module.exports={resolve,observedInput,sonnetGeneral};
+module.exports={resolve,observedInput};
 if(require.main===module){try{console.log(JSON.stringify(resolve(observedInput(JSON.parse(fs.readFileSync(process.argv[2],'utf8')),process.env.CODEX_THREAD_ID)),null,2));}
 catch(error){console.error(error.message);process.exitCode=1;}}

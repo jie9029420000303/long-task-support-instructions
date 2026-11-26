@@ -1,8 +1,10 @@
 // v1.15.0 (Jay 2026-11-25): Jay resumed the OpenAI subscription for his own voice use, and the long tasks moved onto
 // it at once and used its last few percent. What each test pins: the subscription is skipped by every role once every
 // account he has not paused is down to its last 2%, without pausing anything in OpenCodex; the OpenAI API key comes
-// right after the subscription on both sides, with workers on the mainline's own account path; every reading refreshes
-// the subscription quota first; and another conversation's success never brings the subscription back.
+// right after the subscription on both sides; every reading refreshes the subscription quota first; and another
+// conversation's success never brings the subscription back. v1.18.0 (Jay 2026-11-26 decisions 19, 20 and 24): the
+// supervisor and the executor share Opus → Opus API → Sol → Sol API → Terra → Terra API, workers keep their own order
+// whatever the mainline runs, and this reading (8.2% available, step 6) also keeps the executor off its two Claude stops.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
@@ -87,19 +89,18 @@ test('every reading refreshes the Claude and OpenAI subscription quota first, re
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('both sides put the OpenAI API Sol right after the subscription Sol, workers keep the mainline account path, and the floor skips only the subscription',()=>{
+test('both mainline roles put the OpenAI API right after each OpenAI subscription stop, workers keep their own order, and the floor skips only the subscription',()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'openai-chain-'));
   try{
     withEnv({OPENCODEX_MODEL_CATALOG:catalogFile(dir),LONG_TASK_HOME:dir,OPENCODEX_HOME:path.join(dir,'no-opencodex')},()=>{
-      assert.deepEqual(fallback.chainFor(opus,'supervisor'),[opus,paid,sol,apiSol]);
-      assert.deepEqual(fallback.chainFor(sonnet,'executor'),[sonnet,sol,apiSol]);
-      assert.deepEqual(fallback.chainFor(terra,'subagent',sol),[terra]);
-      assert.deepEqual(fallback.chainFor(terra,'subagent',apiSol),[apiTerra],'a worker of the API Sol mainline uses the API Terra');
-      const now=Date.now(),state={claudeQuota:{allowed:false,openai:quota.evaluateOpenAI(reading(now),now)}};
+      for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(opus,role),[opus,paid,sol,apiSol,terra,apiTerra],role);
+      for(const mainline of [sol,apiSol,opus])assert.deepEqual(fallback.chainFor(mainline,'subagent'),[sonnet,'anthropic-apikey/claude-sonnet-5-5',terra,apiTerra],'workers of '+mainline);
+      const now=Date.now(),state={claudeQuota:{step:0,openai:quota.evaluateOpenAI(reading(now),now)}};
       for(const role of ['supervisor','executor','subagent'])assert.equal(fallback.limited(state,sol,now,role),true,role+' skips the subscription Sol');
       assert.equal(fallback.limited(state,terra,now,'subagent'),true);
       assert.equal(fallback.limited(state,apiSol,now,'executor'),false);
-      assert.equal(fallback.next(sonnet,sonnet,'executor',state),apiSol,'below the Claude reserve and at the OpenAI floor the executor goes to the API Sol');
+      assert.equal(fallback.limited(state,opus,now,'executor'),false,'the OpenAI floor does not touch the Claude stops');
+      // With the Claude API out for the month the supervisor's next stop after Opus passes the held subscription Sol.
       state.apiMonth={until:now+DAY};
       assert.equal(fallback.next(opus,opus,'supervisor',state),apiSol);
       // Jay's voice, or any other conversation, keeps using the subscription: its success never lifts the floor.
@@ -112,19 +113,20 @@ test('both sides put the OpenAI API Sol right after the subscription Sol, worker
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
 
-test('model-route gives the executor the API Sol and its workers the API Terra at the floor, and never a subscription Terra',()=>{
+test('model-route gives the executor the API Sol at the floor and workers the API Terra once the Sonnet stops are gone, never a subscription Terra',()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'openai-route-'));
   const file=path.join(dir,'model-fallback.json');
-  const inventory=[sonnet,sol,terra,apiSol,apiTerra].map(id=>({id,efforts:['low','medium','high','xhigh','max']}));
-  save(file,{limits:{},claudeQuota:{executorMayUseClaude:false},openaiQuota:{subscriptionHeld:true}});
+  const efforts=['low','medium','high','xhigh','max'],inventory=[sol,terra,apiSol,apiTerra].map(id=>({id,efforts}));
+  // The executor is kept off its two Claude stops (ladder step 6) and the OpenAI subscription is out.
+  save(file,{limits:{},ladder:{floors:{executor:2,subagent:2}},openaiQuota:{subscriptionHeld:true}});
   try{
     const executor=route.resolve({supervisorModel:opus,roles:['executor'],fallback:file,catalogs:{executor:inventory}});
     assert.equal(executor.roles.executor.model,apiSol);
-    const workers=route.resolve({supervisorModel:opus,executorModel:apiSol,roles:['general'],fallback:file,catalogs:{subagent:inventory}});
-    assert.deepEqual([workers.roles.general.model,workers.roles.general.effort],[apiTerra,'medium']);
-    const stale=route.resolve({supervisorModel:opus,executorModel:sol,roles:['general'],fallback:file,catalogs:{subagent:inventory}});
-    assert.equal(stale.roles.general.status,'unavailable','a mainline still on the subscription Sol waits for the watcher to move it');
-    save(file,{limits:{},claudeQuota:{executorMayUseClaude:false},openaiQuota:{subscriptionHeld:false}});
+    for(const executorModel of [apiSol,sol]){
+      const workers=route.resolve({supervisorModel:opus,executorModel,roles:['general'],fallback:file,catalogs:{subagent:inventory}});
+      assert.deepEqual([workers.roles.general.model,workers.roles.general.effort],[apiTerra,'medium'],'workers of '+executorModel);
+    }
+    save(file,{limits:{},ladder:{floors:{executor:2,subagent:2}},openaiQuota:{subscriptionHeld:false}});
     assert.equal(route.resolve({supervisorModel:opus,roles:['executor'],fallback:file,catalogs:{executor:inventory}}).roles.executor.model,sol);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
@@ -162,7 +164,7 @@ function fixture({executorModel=sol,supervisorModel=opus,quotaData}){
     async stop(){if(child?.exitCode===null){child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}fs.rmSync(root,{recursive:true,force:true});}};
 }
 
-test('an executor on the subscription Sol at the floor is moved to the API Sol with API Terra workers; the supervisor on Opus is left alone',async()=>{
+test('at the OpenAI floor and ladder step 6 the executor on the subscription Sol moves to the API Sol and the supervisor on Opus to the API Terra',async()=>{
   const f=fixture({quotaData:reading(Date.now())});
   try{
     f.start();
@@ -170,14 +172,16 @@ test('an executor on the subscription Sol at the floor is moved to the API Sol w
     const moved=f.calls().find(c=>c.threadId==='executor-qa'&&c.model);
     assert.deepEqual([moved.model,moved.thinking],[apiSol,'high']);
     assert.match(moved.prompt,/OpenAI 訂閱留給 Jay 自己用（prolite 剩 1%/);
-    assert.match(moved.prompt,/openai-apikey\/ 的最新 Terra/);
+    assert.doesNotMatch(moved.prompt,/換到不同家模型/,'the API Sol is the same model family, so workers are not mentioned');
     const record=read(f.statePath).modelSwitch['executor-qa'];
     assert.deepEqual([record.original,record.current],[sol,apiSol],'kept as a move away from the subscription Sol, so it returns after the reset');
     const published=read(path.join(f.run,'model-fallback.json'));
-    assert.deepEqual(published.chain.executor.slice(1,3),[sol,apiSol]);
+    assert.deepEqual(published.chain.executor.slice(2,4),[sol,apiSol]);
     assert.equal(published.openaiQuota.subscriptionHeld,true);
-    assert.ok(!f.calls().some(c=>c.threadId==='supervisor-qa'&&c.model));
-    await until(()=>/OpenAI 訂閱額度：prolite 剩 1%/.test(fs.readFileSync(path.join(f.run,'監督儀表板.md'),'utf8')));
+    // The supervisor steps down two steps before the executor: four stops off, and the subscription Terra is out too.
+    await until(()=>f.calls().some(c=>c.threadId==='supervisor-qa'&&c.model));
+    assert.equal(f.calls().find(c=>c.threadId==='supervisor-qa'&&c.model).model,apiTerra);
+    await until(()=>{try{return /OpenAI 訂閱額度：prolite 剩 1%/.test(fs.readFileSync(path.join(f.run,'監督儀表板.md'),'utf8'));}catch{return false;}});
     await new Promise(resolve=>setTimeout(resolve,1200));
     assert.equal(f.calls().filter(c=>c.threadId==='executor-qa'&&c.model).length,1,'told once');
   }finally{await f.stop();}

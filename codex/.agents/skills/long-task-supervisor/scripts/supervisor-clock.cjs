@@ -48,6 +48,46 @@ function workItem(payload){
   return commandsOf(payload).length?'指令操作':'工具操作';
 }
 const commandKey=command=>'sha256:'+crypto.createHash('sha256').update(command).digest('hex');
+// The mainline plans, dispatches, judges deliveries and submits: Git merges and commits, deployments and the dispatch
+// tools are its own. Editing code or configuration (a merge conflict included), running any test and sleeping to wait
+// belong to subagents (Jay 2026-11-26 decision 31, with no allowance). Each such call of the mainline's own rollout is
+// noted with the files or the command it names; status, work package, evidence and document files are not code.
+const TEST_COMMAND=/(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|npx\s+(?:jest|vitest|playwright\s+test|mocha)\b|pytest\b|python3?\s+-m\s+(?:pytest|unittest)\b|node\s+--test\b|(?:go|cargo|dotnet|swift|mix)\s+test\b|(?:jest|vitest|mocha|phpunit|rspec)\b|playwright\s+test\b|make\s+(?:test|check)\b|(?:mvn|gradle|\.\/gradlew)\b[^;&|]*\btest\b|test-run\.py\b)/;
+// A wait the mainline sets itself: a command that is a sleep (after any cd), or a loop that sleeps between polls. A
+// deployment script's own waiting is not in the command line and is not counted.
+const SLEEP_COMMAND=/^\s*(?:cd\s+[^;&|]+(?:&&|;)\s*)*sleep\s+\d|\b(?:while|until)\b[\s\S]*\bsleep\s+\d/;
+const EDIT_COMMAND=/(?:^|[\s;&|(])(?:sed\s+(?:-[a-zA-Z]*\s+)*-i|perl\s+-[a-zA-Z]*i|git\s+apply\b|git\s+checkout\s+--(?:ours|theirs)\b|git\s+mergetool\b)/;
+function patchFiles(text){
+  return [...String(text||'').matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)\s*(?=\\n|\n|$)/g)].map(match=>match[1].trim());
+}
+function selfWorkOf(payload){
+  const out=[];
+  const input=payload.type==='custom_tool_call'?String(payload.input||''):payload.type==='function_call'?String(payload.arguments||''):'';
+  if(payload.name==='apply_patch'||/apply_patch\s*\(/.test(input))for(const file of patchFiles(input))out.push({kind:'edit',item:file});
+  for(const command of commandsOf(payload)){
+    if(TEST_COMMAND.test(command))out.push({kind:'test',item:command.replace(/\s+/g,' ').trim().slice(0,160)});
+    else if(SLEEP_COMMAND.test(command))out.push({kind:'sleep',item:command.replace(/\s+/g,' ').trim().slice(0,160)});
+    else if(EDIT_COMMAND.test(command))out.push({kind:'edit',item:command.replace(/\s+/g,' ').trim().slice(0,160)});
+  }
+  if(payload.type==='function_call'&&/sleep/i.test(payload.name||''))out.push({kind:'sleep',item:payload.name});
+  else if(payload.type==='custom_tool_call'&&/\bsleep\s*\(|clock__sleep|setTimeout\s*\(\s*\w+\s*,\s*[1-9]\d{4,}/.test(input)&&!commandsOf(payload).length)out.push({kind:'sleep',item:payload.name||'sleep'});
+  return out;
+}
+// Files that are not code or configuration: documents, status and work package files, evidence and anything under the
+// run directory or a work package folder.
+const NOT_CODE=/\.(?:md|markdown|txt|log|png|jpe?g|gif|webp|pdf|csv)$/i;
+function selfWorkHits(work,run,workPackageDirectory){
+  const inside=(file,root)=>Boolean(root)&&path.isAbsolute(file)&&(file===root||file.startsWith(root+path.sep));
+  return (work?.hits||[]).filter(hit=>hit.kind!=='edit'||!(NOT_CODE.test(hit.item)&&!/\s/.test(hit.item)||inside(hit.item,run)||inside(hit.item,workPackageDirectory)||
+    /(?:^|\/)(?:wp|evidence|證據)[^/]*\//i.test(hit.item)));
+}
+function selfWorkPrompt(hits){
+  const name={edit:'改程式或設定',test:'跑測試',sleep:'自己等待'};
+  const lines=hits.slice(0,6).map(hit=>'- '+name[hit.kind]+'：'+hit.item);
+  return 'LONG_TASK_SELF_WORK：背景程式看到本回合主線自己動手：\n'+lines.join('\n')+'\n'+
+    '主線只做 Git 合併與提交、部署、派工、收件判定、狀態與送驗。改程式或設定（含解 Git 衝突）、跑測試都派子代理；等子代理用 wait_agent，等外部結果用有逾時的背景監看。'+
+    '這一則不叫醒監督；本回合再自己動手，背景程式會請監督處理。';
+}
 function safeRejection(item){
   const source=item.source?{path:item.source.path,callId:item.source.callId,outputSha256:item.source.outputSha256}:null;
   return {callId:item.callId,at:item.at,item:'工具操作',...(source?{source}:{})};
@@ -66,7 +106,7 @@ function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   // The clue stores only a source locator and command hash, never the command or output itself.
   parallelTest.track(state,row,commandsOf(payload),sourceFile?{path:sourceFile,offset:sourceOffset}:null,boundAt);
   // Keep only the envelope addressed to this executor; payloads belong to the originating backend.
-  if(row.type==='event_msg' && payload.type==='task_started')state.workerMailTurn={id:payload.turn_id,senders:{}};
+  if(row.type==='event_msg' && payload.type==='task_started'){state.workerMailTurn={id:payload.turn_id,senders:{}};if(Date.parse(at)>=boundAt)state.selfWork={turnId:payload.turn_id||at,hits:[]};}
   if(row.type==='response_item' && payload.type==='agent_message' && payload.recipient==='/root' &&
      /^\/root\/[\w.-]+$/.test(payload.author) && typeof payload.id==='string' && state.workerMailTurn){
     state.workerMailTurn.senders[payload.author]={id:payload.id,at:Date.parse(at)};
@@ -100,6 +140,7 @@ function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
     if(state.platformError&&workAt>state.platformError.since){state.platformErrorHandledSince=state.platformError.since;state.platformError=null;}
   }
   if(row.type==='response_item'&&['custom_tool_call','function_call'].includes(payload.type)){
+    if(state.selfWork&&Date.parse(at)>=boundAt)for(const hit of selfWorkOf(payload))if(state.selfWork.hits.length<20)state.selfWork.hits.push({...hit,at});
     const items=state.callItems||={};items[payload.call_id]=workItem(payload);
     const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);
@@ -394,4 +435,4 @@ function check(run,binding,state,force=false){
     ...(permissionChanged?{permissionChanged}:{}),...(automationFound.length?{automations:automationFound}:{}),...(loggedOut.length?{loggedOut}:{}),...(platformError?{platformError}:{}),
     ...(docBudget?{docBudget}:{}),...(testLeads.length?{parallelTestReview:{tests:testLeads,fingerprint:testFingerprint}}:{})};
 }
-module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince,safeRejection};
+module.exports={overdueTier,check,tickSleep,kernelSleep,paceNow,snapshotOf,executorLog,readExecutor,commandsOf,pollOnly,awakeSince,safeRejection,selfWorkOf,selfWorkHits,selfWorkPrompt};

@@ -116,11 +116,12 @@ function summarize(run,progress,details=false){
 function issues(run,progress){
   const summary=summarize(run,progress,true);if(!summary)return [];
   const result=[];
-  // A criterion held at its second unsuccessful delivery (rework.cjs) shows once per cycle; the executor's research
-  // registration resets it. The supervisor only checks that research is under way, it does not choose the approach.
-  for (const row of require('./rework.cjs').status(run).filter(row=>row.held)) {
-    result.push({kind:'acceptance_rework', affected:[row.criterionId], episode:[row.criterionId, row.cycles],
-      detail:{finding:'同一驗收條文累計兩次不合格，工具已擋下這條的下一次派工與送審。核對執行主線已派研究子代理（或登記不需研究的理由）；做法由執行端決定。',
+  // A criterion held for research (rework.cjs: its 2nd, 4th and 6th unsuccessful delivery, Jay 2026-11-26) shows once
+  // per research point; the count goes on after the study, so the failure count tells the points apart. A criterion
+  // waiting for Jay's ruling wakes the supervisor through the watcher's rework decision instead.
+  for (const row of require('./rework.cjs').status(run).filter(row=>row.held&&!row.waitsForJay)) {
+    result.push({kind:'acceptance_rework', affected:[row.criterionId], episode:[row.criterionId, row.rulings, row.failures],
+      detail:{finding:'同一驗收條文累計第 '+row.failures+' 次不合格，工具已擋下這條的下一次派工與送審。核對執行主線已派研究子代理（或登記不需研究的理由）；做法由執行端決定。',
         criterionId:row.criterionId, failures:row.current}});
   }
   for(const item of summary.items){

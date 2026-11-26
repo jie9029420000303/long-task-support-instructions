@@ -5,7 +5,7 @@ const crypto=require('node:crypto');
 const acceptance=require('./acceptance-audit.cjs');
 const machine=require('./machine.cjs');
 
-const kinds=['ready_capacity','returned_unintegrated','resource_conflict','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn','snapshot_mismatch','untracked_agent','main_work_review','unrecorded_activity_review','planning_review','dependency_ready_review'];
+const kinds=['ready_capacity','returned_unintegrated','resource_conflict','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn','snapshot_mismatch','untracked_agent','self_work','unrecorded_activity_review','planning_review','dependency_ready_review'];
 // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time).
 const DOC_BUDGET_RATIO=1.5;
 const nonEmpty=value=>typeof value==='string'&&value.trim();
@@ -151,17 +151,11 @@ function crossCheck(run,binding,snapshot,state,agents,coverage={}){
       if(!recorded||recorded.list!==wp.list||(wp.list==='inFlight'&&recorded.item.handle!==wp.handle))
         out.push({kind:'work_package_state',id,source:file,wpList:wp.list,snapshotList:recorded?.list||null,
           ...(wp.list==='inFlight'?{wpHandle:wp.handle,snapshotHandle:recorded?.item.handle||null}:{})});
-      const scope=/^\[可修改範圍\][ \t]*([^\n]*(?:\n(?!\[|##)[^\n]*)*)/m.exec(text)?.[1]?.trim();
-      const header=/^\[工作包\]([^\n]*(?:\n(?!\[|##)[^\n]*)*)/m.exec(text)?.[1]||'';
-      if(recorded?.list==='inFlight'&&recorded.item.handle==='main'&&wp.list==='inFlight'&&wp.handle==='main'&&
-        ['working','integrating'].includes(snapshot.activity)&&snapshot.capacity?.verified>agentSeatCount(p.inFlight)&&
-        /類型\s*[=:＝：]\s*B\s*技術/.test(header))
-        out.push({kind:'main_work_needs_review',id,source:file,scopeRecorded:Boolean(scope&&scope!=='無')});
     }
   }
   if(fs.existsSync(path.join(run,'dispatch-write.lock')))incomplete=true;
   if(snapshotBefore!==null)try{if(fs.readFileSync(snapshotFile,'utf8')!==snapshotBefore)incomplete=true;}catch{incomplete=true;}
-  if(incomplete){coverage.workPackages='unknown';coverage.checkedWp.clear();for(let i=out.length-1;i>=0;i--)if(['work_package_state','main_work_needs_review'].includes(out[i].kind))out.splice(i,1);}
+  if(incomplete){coverage.workPackages='unknown';coverage.checkedWp.clear();for(let i=out.length-1;i>=0;i--)if(out[i].kind==='work_package_state')out.splice(i,1);}
   const known=new Set((p.inFlight||[]).map(item=>item.handle));
   // Compacted rollouts can leave an older segment with an unfinished turn; only the newest segment is current.
   const latest=new Map();
@@ -187,12 +181,16 @@ function inspect(run,binding,state){
     issues=derive(snapshot,binding,run);
     agents=require('./pace.cjs').agentRuns(binding);
     for(const lead of crossCheck(run,binding,snapshot,state,agents,coverage)){
-      const type=({active_agent_unlisted:'untracked_agent',main_work_needs_review:'main_work_review',executor_activity_after_empty_snapshot:'unrecorded_activity_review'})[lead.kind]||'snapshot_mismatch';
+      const type=({active_agent_unlisted:'untracked_agent',executor_activity_after_empty_snapshot:'unrecorded_activity_review'})[lead.kind]||'snapshot_mismatch';
       const value=issue(type,[lead.id],lead);
       // Activity timestamps advance during the same turn, but do not make it a new problem.
-      if(['untracked_agent','main_work_review','unrecorded_activity_review'].includes(type))value.key=digest({kind:type,id:lead.id,source:lead.source});
+      if(['untracked_agent','unrecorded_activity_review'].includes(type))value.key=digest({kind:type,id:lead.id,source:lead.source});
       issues.push(value);
     }
+    // The mainline worked with its own hands again after the watcher's note in the same turn (native-watch selfWorkNotice):
+    // the supervisor asks it to hand the work to subagents. It stays until that review is ruled.
+    const own=state.selfWorkEscalated;
+    if(own){const value=issue('self_work',['executor'],{turnId:own.turnId,hits:own.hits,at:own.at});value.key=own.key;issues.push(value);}
     for(const item of acceptance.issues(run,snapshot.acceptance)){const value=issue(item.kind,item.affected,item.detail);value.key=digest({kind:item.kind,affected:item.affected,cases:item.cases,episode:item.episode});issues.push(value);}validSnapshot=true;}catch(error){
     const kind=error.code==='ENOENT'?'snapshot_missing':'snapshot_invalid';
     let sha256=null;try{sha256=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');}catch{}
@@ -206,13 +204,13 @@ function inspect(run,binding,state){
     const item=oldItems[key]||{kind:'source_unknown',affected:[],detail:{},key},source=item.detail?.source;
     if(validSnapshot&&!source)continue;
     let unreadable=!validSnapshot;
-    if(!unreadable&&['snapshot_mismatch','main_work_review'].includes(item.kind))unreadable=!coverage.checkedWp.has(source);
+    if(!unreadable&&item.kind==='snapshot_mismatch')unreadable=!coverage.checkedWp.has(source);
     else if(!unreadable&&item.kind==='untracked_agent'){
       try{const fd=fs.openSync(source,'r');fs.closeSync(fd);unreadable=!agents.some(a=>a.sourceFile===source);}catch{unreadable=true;}
     }else if(!unreadable&&item.kind==='unrecorded_activity_review'){
       try{const fd=fs.openSync(source,'r');fs.closeSync(fd);}catch{unreadable=true;}
     }
-    if(unreadable){unknown.push(key);issues.push({...item,unknown:true});if(['snapshot_mismatch','main_work_review'].includes(item.kind))coverage.workPackages='unknown';}
+    if(unreadable){unknown.push(key);issues.push({...item,unknown:true});if(item.kind==='snapshot_mismatch')coverage.workPackages='unknown';}
   }
   const current=new Set(issues.map(item=>item.key));
   const announced=new Set((prior.announced||[]).filter(key=>current.has(key)));

@@ -30,7 +30,7 @@ test('the shared spec keeps formal releases for the fixed version and lets unrel
   const spec=read('SPEC.md');
   for(const copy of [CX+'goal-orchestrator/references/spec.md',CL+'long-task-orchestrator/references/spec.md'])assert.equal(read(copy),spec,copy);
   for(const marker of ['31. 候選版與定版','不合併發版分支、不打正式版號、不發 Release','先收進缺陷清單','受監督時由監督判定並通知執行端，執行端不自行發版','定版後各做一次',
-    '照條文在定版後做','預發行版本字串','帶版本內容的文件在定版前列為受阻','預估超過 5 分鐘的測試','通過才部署、送驗（正式發版留到定版，見不變量 31）',
+    '照條文在定版後做','預發行版本字串','帶版本內容的文件在定版前列為受阻','跑任何測試','通過才部署、送驗（正式發版留到定版，見不變量 31）',
     '沒有明確推薦的超出契約目標或範圍的變更','連30分鐘都不要等','先由程式複查 3 分鐘','只在監督已逐條寫明每個未通過條文依賴哪個待決事項、且沒有可派工作包時靜音'])
     assert.ok(spec.includes(marker),marker);
   // The old wording released every interim version and waited 30 minutes for an answer.
@@ -68,7 +68,7 @@ test('each supervisor fixes the version itself, decides a recommended out-of-sco
     const runtime=read(p.supervisor+'references/runtime.md');
     for(const marker of ['dependsOn','沒寫或沒寫全就照發','沒有明確推薦的超出契約目標或範圍的變更'])assert.ok(runtime.includes(marker),p.name+': '+marker);
     const formats=read(p.supervisor+'references/formats.md');
-    for(const marker of ['只出中途候選','主線只調度','不等監督答覆','--estimate','候選版與定版：','"dependsOn":[{"id"'])assert.ok(formats.includes(marker),p.name+': '+marker);
+    for(const marker of ['只出中途候選','主線只做切分、派工與收件判定','不等監督答覆','--estimate','候選版與定版：','"dependsOn":[{"id"'])assert.ok(formats.includes(marker),p.name+': '+marker);
     assert.ok(!formats.includes('提問 30 分鐘沒人答'),p.name);
   }
 });
@@ -76,7 +76,7 @@ test('each supervisor fixes the version itself, decides a recommended out-of-sco
 test('each executor ships interim candidates by commit, keeps long tests off the main line and holds versioned documents',()=>{
   for(const p of PLATFORMS){
     const text=read(p.orchestrator+'SKILL.md')+read(p.orchestrator+'references/execution.md');
-    for(const marker of ['這一版只是中途候選','不合併發版分支、不打版號、不發 Release','先收進缺陷清單','主線不自行發版','預估超過 5 分鐘的測試','輸出寫進檔案、主線只讀摘要',
+    for(const marker of ['這一版只是中途候選','不合併發版分支、不打版號、不發 Release','先收進缺陷清單','主線不自行發版','跑任何測試','輸出寫進檔案、主線只讀摘要',
       '定版前列 blocked（kind `dependency`','不等監督答覆','連30分鐘都不要等','已授權的發版動作也只在定版後做一次','--estimate','同時交回多包','照條文在定版後做'])
       assert.ok(text.includes(marker),p.name+': '+marker);
     for(const gone of ['通過才發版、部署、送驗','提問 30 分鐘沒人答','文件排在最後、最終回歸','發布說明等準備工作'])assert.ok(!text.includes(gone),p.name+': '+gone);

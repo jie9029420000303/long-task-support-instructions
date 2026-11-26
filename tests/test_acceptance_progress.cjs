@@ -36,14 +36,18 @@ for(const scripts of roots){
     }finally{f.close();}
   });
   // The retry is always a new package (2,792 live packages, every retry renamed): the count must follow the criterion.
-  test(label+': renamed packages and mixed executor/supervisor failures cannot conceal a criterion failing twice; research starts a new count',()=>{
+  test(label+': renamed packages and mixed executor/supervisor failures cannot conceal a criterion failing twice; research releases the hold without restarting the count',()=>{
     const f=fixture(scripts),audit=require(path.join(scripts,'dispatch-audit.cjs')),state={};
     const rework=()=>audit.inspect(f.run,f.binding,state).issues.filter(i=>i.kind==='acceptance_rework');
     try{f.write();f.fail('pkg-a');assert.equal(rework().length,0,'one failure is not yet a pattern');
       f.fail('pkg-a-retry-renamed','supervisor');const result=audit.inspect(f.run,f.binding,state);const issue=result.newIssues.find(i=>i.kind==='acceptance_rework');assert.ok(issue);assert.deepEqual(issue.affected,['A1']);assert.equal(issue.detail.failures.length,2);
       audit.markAnnounced(state,audit.eventFor(result));f.fail('pkg-a-third');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0,'one cycle is announced once');
-      f.reset();assert.equal(rework().length,0,'registered research resets the count');
-      f.fail('pkg-b');f.fail('pkg-c');assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,1,'the next cycle is a new episode');
+      f.reset();assert.equal(rework().length,0,'registered research releases the hold');
+      // Jay 2026-11-26: the count goes on after the study (three so far). The 4th is the next research point; the 5th
+      // goes back to the same subagent without research.
+      f.fail('pkg-b');const fourth=audit.inspect(f.run,f.binding,state).newIssues;assert.equal(fourth.length,1,'the fourth failure is a new research point');assert.match(fourth[0].detail.finding,/第 4 次/);
+      audit.markAnnounced(state,audit.eventFor(audit.inspect(f.run,f.binding,state)));f.reset();
+      f.fail('pkg-c');assert.equal(rework().length,0,'the fifth failure is redone by the same subagent, no research');
     }finally{f.close();}
   });
   test(label+': withdrawing PASS is actionable and stale advice is cancelled after evidence is restored',()=>{

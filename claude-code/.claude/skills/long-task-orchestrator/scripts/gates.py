@@ -14,8 +14,10 @@ exit 2 把原因交回模型自行修正。絕不用 ask 跳確認框（長任�
   改用 supervise.cjs ask 取全部未決項、以不會停住回合的選擇卡一次列出（2026-10-13 A 開發監督在提問框裡等了
   9 小時 57 分，期間送驗沒人處理）。
 - G1＋G2 PreToolUse(Agent)：派 lt-* 子代理時，工作包要有 [工作區]／[可修改範圍]／[共用資源]；
-  新包從基準檔起跳；本輪不合格 1 次可升到高兩檔（最高 max），2 次先派 xhigh 研究，研究交回後本輪歸零、推論不降回
-  （使用者 2026-11-23 定案，取代錯 3 換模型、錯 4 主線接手）。工作包＝派工提示加上它引用的 wp 檔
+  新包從基準檔起跳；不合格次數累計、研究後不歸零（使用者 2026-11-26 定案，取代 2026-11-23 的升兩檔、研究歸零）：
+  第 1、3、5 次交回原子代理同檔重做（新開也不得升檔）；第 2、4、6 次先派 xhigh 研究，研究登記（工作包寫
+  [研究登記] <次數>）後才能重派：第 2 次升兩檔（最高 max），第 4 次與主線同模型同推理（只有這時可帶 model 參數）；
+  第 6 次研究後交使用者裁決，裁決前不派，裁決後主線把狀態檔次數改回 0。工作包＝派工提示加上它引用的 wp 檔
   （技能規定 prompt 先存成 <狀態目錄>/wp/<id>.md，派工訊息常只引用該檔）。錯誤次數以狀態檔工作包表為準，
   查不到才用派工提示表頭；兩者都查不到就放行加備註，不猜。
 - G1＋G2 也套用到 PreToolUse(Workflow)：長任務一批互不相依的包改交技能附的 long-task-batch 工作流程一次派出，
@@ -35,6 +37,10 @@ from pathlib import Path
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 BASE = {"visual-checker": "medium", "tech-worker": "medium", "researcher": "medium", "ui-tester": "low"}
 RESEARCH = "xhigh"
+STUDY_AT = (2, 4, 6)
+JAY_AT = 6
+MAINLINE_AT = 4
+STUDIED = re.compile(r"^\[研究登記\]\s*(\d+)\s*$", re.M)
 AGENT = re.compile(r"^lt-(visual-checker|tech-worker|researcher|ui-tester)-(low|medium|high|xhigh|max)$")
 PRIOR = re.compile(r"^\[上次推論\]\s*(low|medium|high|xhigh|max)\s*$", re.M)
 REQUIRED = ("[工作區]", "[可修改範圍]", "[共用資源]")
@@ -283,8 +289,6 @@ def check(data, subagent_type, prompt, fallback_id=None):
         return None
     role, tier = match.groups()
     override = (data.get("tool_input") or {}).get("model")
-    if override and override != "sonnet":
-        return "block", "此角色已指定模型；省略會覆寫角色模型的 model 參數，再依工作包派工。"
     prompt = str(prompt or "")
     wps = file_refs(prompt, WP_TAIL)
     work = "\n".join([prompt] + [wp.read_text(encoding="utf-8", errors="replace") for wp in wps])
@@ -300,38 +304,46 @@ def check(data, subagent_type, prompt, fallback_id=None):
             if errors is not None:
                 source = state
                 break
-    # A research package answers its parent's second unsuccessful delivery in this cycle and runs at xhigh.
+    # A research package answers its parent's 2nd, 4th or 6th unsuccessful delivery and runs at xhigh.
     parent = re.search(r"^\[研究來源工作包\]\s*([\w-]+)\s*$", work, re.M)
     if parent:
-        if (role, tier) != ("researcher", RESEARCH):
-            return "block", f"研究工作包派 lt-researcher-{RESEARCH}（研究推論開 xhigh）。"
+        if (role, tier) != ("researcher", RESEARCH) or override and override != "sonnet":
+            return "block", f"研究工作包派 lt-researcher-{RESEARCH}（研究推論開 xhigh），不帶 model 參數。"
         for state in states(data, wps):
             count = table_errors(state.read_text(encoding="utf-8", errors="replace"), parent.group(1))
             if count is not None:
-                if count != 2:
-                    return "block", f"研究對應原工作包本輪第 2 次不合格；狀態檔記 {parent.group(1)} 本輪 {count} 次。"
+                if count not in STUDY_AT:
+                    return "block", f"研究只在原工作包第 2、4、6 次不合格後派；狀態檔記 {parent.group(1)} 累計 {count} 次。"
                 return None
-        return "block", "請在狀態檔工作包表登記研究來源工作包與本輪不合格次數。"
+        return "block", "請在狀態檔工作包表登記研究來源工作包與累計不合格次數。"
     header = PROMPT_ERRORS.search(work)
     header_errors = int(header.group(1)) if header else None
     if errors is None:
         errors = header_errors
     if errors is None:
-        return "note", "派工閘：查不到這個工作包本輪的不合格次數（狀態檔工作包表或派工表頭的「目前錯誤次數」），未檢查起跳檔。"
-    if errors >= 2:
-        return "block", (f"工作包{' ' + package if package else ''}本輪已 {errors} 次不合格：先另派 lt-researcher-{RESEARCH} 上網研究兩次失敗原因"
-                         "（研究工作包寫 [研究來源工作包] 原 id），研究結果交回原子代理，把本輪次數歸零再做。")
-    # A reset keeps the effort the package last ran at ([上次推論]); the first failure of a cycle adds two steps.
+        return "note", "派工閘：查不到這個工作包累計的不合格次數（狀態檔工作包表或派工表頭的「目前錯誤次數」），未檢查起跳檔。"
+    name = f"工作包{' ' + package if package else ''}"
+    studied = [int(m) for m in STUDIED.findall(work)]
+    if errors in STUDY_AT and errors not in studied:
+        return "block", (f"{name}已累計 {errors} 次不合格：先另派 lt-researcher-{RESEARCH} 上網研究失敗原因"
+                         f"（研究工作包寫 [研究來源工作包] 原 id），研究交回後在工作包寫 [研究登記] {errors} 再派新的子代理。")
+    if errors >= JAY_AT:
+        return "block", (f"{name}已累計 {errors} 次不合格、研究也做了：交使用者裁決接下來怎麼做（受監督時監督在待決帳問他），"
+                         "裁決前不派這條；裁決後把狀態檔次數改回 0 再派。")
+    if override and override != "sonnet" and errors != MAINLINE_AT:
+        return "block", "此角色已指定模型；只有第 4 次不合格研究後的重做可用 model 參數改成主線的模型，其他時候省略 model 參數。"
+    # The effort the package last ran at ([上次推論]) or the baseline. The 1st, 3rd and 5th failures go back at that
+    # effort; the 2nd adds two steps after research; the 4th takes the mainline's own effort, up to max.
     prior_match = PRIOR.search(work)
     prior = max(EFFORTS.index(BASE[role]), EFFORTS.index(prior_match.group(1)) if prior_match else 0)
-    allowed = min(prior + 2 * errors, len(EFFORTS) - 1)
+    allowed = {2: min(prior + 2, len(EFFORTS) - 1), MAINLINE_AT: len(EFFORTS) - 1}.get(errors, prior)
     if EFFORTS.index(tier) > allowed:
         # 2026-10-07 GDB：主線只改了工作包檔表頭就派高一檔，被擋時看不出是哪邊記的次數；直接講清楚兩邊各記幾次。
-        where = f"狀態檔工作包表（{source}）記本輪不合格 {errors} 次" if source else f"派工表頭記本輪不合格 {errors} 次"
+        where = f"狀態檔工作包表（{source}）記累計不合格 {errors} 次" if source else f"派工表頭記累計不合格 {errors} 次"
         conflict = (f"；派工提示／工作包檔表頭寫 {header_errors} 次，兩邊不一致：先把狀態檔工作包表改成實際次數再派"
                     if source and header_errors is not None and header_errors != errors else "")
         return "block", (f"lt-{role} 這包{where}，最高派 lt-{role}-{EFFORTS[allowed]}{conflict}："
-                         "新包從基準檔起跳，本輪第 1 次不合格升兩檔、最高 max；研究交回後沿用的推論寫 [上次推論]。")
+                         "新包從基準檔起跳；第 1、3、5 次不合格交回原子代理同檔重做，第 2 次研究後升兩檔、最高 max，研究後重做寫 [上次推論]。")
     return None
 
 

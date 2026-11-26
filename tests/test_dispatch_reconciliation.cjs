@@ -48,30 +48,30 @@ test('brief exposes executor activity after an empty snapshot as a lead',()=>{
  const result=JSON.parse(execFileSync(process.execPath,[path.join(scripts,'supervise.cjs'),'brief',f.run],{env:{...process.env,CODEX_HOME:f.root},encoding:'utf8'}));assert.deepEqual(result.dispatchCrossChecks.map(x=>x.kind),['executor_activity_after_empty_snapshot']);
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
-test('only a grounded technical implementation package prompts main-line review, with scope presence recorded',()=>{
- const f=setup();try{const s=snap();s.activity='working';const file=path.join(f.wp,'BUILD.md');s.packages.inFlight=[{...flight('BUILD','main'),evidence:[file]}];
- const write=(kind,scope)=>fs.writeFileSync(file,`[工作包] id=BUILD；類型=${kind}\n[狀態] {"list":"inFlight","handle":"main"}\n[可修改範圍]\n${scope}\n[共用資源]\n無\n`);
- write('B 技術實作','src/**');assert.deepEqual(audit.crossCheck(f.run,f.binding,s,{},[]).map(x=>x.kind),['main_work_needs_review']);
- write('A 查核','src/**');assert.deepEqual(audit.crossCheck(f.run,f.binding,s,{},[]),[]);write('介面操作','src/**');assert.deepEqual(audit.crossCheck(f.run,f.binding,s,{},[]),[]);write('B 技術','');assert.equal(audit.crossCheck(f.run,f.binding,s,{},[])[0].scopeRecorded,false);
- write('B 技術','src/**');s.capacity.verified=0;assert.deepEqual(audit.crossCheck(f.run,f.binding,s,{},[]),[]);
- }finally{fs.rmSync(f.root,{recursive:true,force:true});}
+// Jay 2026-11-26 decisions 31 and 35: a package header saying the mainline holds a technical package was only a lead.
+// The watcher now reads what the mainline actually did (native-watch selfWorkNotice) and, when it works with its own
+// hands again in the same turn after the note, the supervisor gets one self_work review until it is ruled.
+test('a package the mainline holds is no lead by itself; a repeated self-work in one turn is one dispatch review until it is ruled',()=>{
+ const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const s=snap();s.activity='working';const file=path.join(f.wp,'BUILD.md');s.packages.inFlight=[{...flight('BUILD','main'),evidence:[file]}];
+ fs.writeFileSync(file,'[工作包] id=BUILD；類型=B 技術實作\n[狀態] {"list":"inFlight","handle":"main"}\n[可修改範圍]\nsrc/**\n[共用資源]\n無\n');
+ assert.deepEqual(audit.crossCheck(f.run,f.binding,s,{},[]),[]);
+ save(path.join(f.run,'dispatch.json'),s);
+ const state={selfWorkEscalated:{key:'self-work-t1',turnId:'t1',hits:[{at:new Date().toISOString(),action:'改程式 src/app.js'}],at:new Date().toISOString()}};
+ let r=audit.inspect(f.run,f.binding,state);
+ const found=r.issues.find(x=>x.kind==='self_work');assert.deepEqual([found.affected,found.detail.turnId],[['executor'],'t1']);
+ const event=audit.eventFor(r);assert.equal(event.kind,'dispatch_review');audit.markAnnounced(state,event);
+ assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0,'announced once');
+ delete state.selfWorkEscalated;r=audit.inspect(f.run,f.binding,state);assert.equal(r.resolved.length,1);
+ }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
 });
 test('unrecorded executor activity triggers a deduplicated review without exposing command text',()=>{
  const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const s=snap();save(path.join(f.run,'dispatch.json'),s);const d=new Date(),dir=path.join(f.root,'sessions',String(d.getFullYear()),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0'));fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'rollout-executor.jsonl'),JSON.stringify({type:'session_meta',payload:{id:'executor'}})+'\n'+JSON.stringify({type:'response_item',payload:{type:'function_call',name:'exec_command',arguments:'PRIVATE-COMMAND'}})+'\n');
  const state={lastExecutorWorkAt:Date.now()};let r=audit.inspect(f.run,f.binding,state);assert.deepEqual(r.issues.map(x=>x.kind),['unrecorded_activity_review']);assert.equal(JSON.stringify(r).includes('PRIVATE-COMMAND'),false);audit.markAnnounced(state,audit.eventFor(r));state.lastExecutorWorkAt+=1000;r=audit.inspect(f.run,f.binding,state);assert.equal(r.newIssues.length,0);s.activity='planning';save(path.join(f.run,'dispatch.json'),s);r=audit.inspect(f.run,f.binding,state);assert.equal(r.resolved.length,1);
  }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
 });
-test('grounded B main package reaches dispatch_review and clears when reassigned',()=>{
- const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const s=snap(),file=path.join(f.wp,'BUILD.md');s.packages.inFlight=[{...flight('BUILD','main'),evidence:[file]}];fs.writeFileSync(file,'[工作包] id=BUILD；類型=B 技術實作\n[狀態] {"list":"inFlight","handle":"main"}\n[可修改範圍]\nsrc/**\n[共用資源]\n無\n');save(path.join(f.run,'dispatch.json'),s);const state={};let r=audit.inspect(f.run,f.binding,state);assert.deepEqual(r.issues.map(x=>x.kind),['main_work_review']);assert.equal(audit.eventFor(r).kind,'dispatch_review');audit.markAnnounced(state,audit.eventFor(r));assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0);s.packages.inFlight[0].handle='/root/technical';fs.writeFileSync(file,'[工作包] id=BUILD；類型=B 技術實作\n[狀態] {"list":"inFlight","handle":"/root/technical"}\n[可修改範圍]\nsrc/**\n');save(path.join(f.run,'dispatch.json'),s);r=audit.inspect(f.run,f.binding,state);assert.equal(r.issues.length,0);assert.equal(r.resolved.length,1);
- }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
-});
 test('bound directory reveals an unlisted package without an evidence anchor, including waiting with another agent',()=>{
  const f=setup();try{const s=snap();s.activity='waiting';s.workPackageDirectory=f.wp;s.packages.inFlight=[flight('OTHER','/root/other')];const file=path.join(f.wp,'MISSED.md');fs.writeFileSync(file,'[工作包]\nid=MISSED\n類型:B 技術\n[狀態] {"list":"ready"}\n');save(path.join(f.run,'dispatch.json'),s);const r=audit.inspect(f.run,f.binding,{});assert.equal(r.issues.find(x=>x.kind==='snapshot_mismatch')?.affected[0],'MISSED');assert.equal(r.coverage.workPackages,'available');
  const outside=fs.mkdtempSync(path.join(os.tmpdir(),'outside-wp-'));try{const link=path.join(f.root,'wp-link');fs.symlinkSync(outside,link);s.workPackageDirectory=link;save(path.join(f.run,'dispatch.json'),s);assert.equal(audit.inspect(f.run,f.binding,{}).coverage.workPackages,'unknown');}finally{fs.rmSync(outside,{recursive:true,force:true});}
- }finally{fs.rmSync(f.root,{recursive:true,force:true});}
-});
-test('B main package in original multiline format is a review lead even when its scope is missing',()=>{
- const f=setup();try{const s=snap();s.workPackageDirectory=f.wp;const file=path.join(f.wp,'BUILD.md');s.packages.inFlight=[{...flight('BUILD','main'),evidence:['other']}];fs.writeFileSync(file,'[工作包]\nid=BUILD\n類型:B 技術\n[狀態] {"list":"inFlight","handle":"main"}\n[問題]\n修改技術項目\n');save(path.join(f.run,'dispatch.json'),s);const r=audit.inspect(f.run,f.binding,{});assert.equal(r.issues.find(x=>x.kind==='main_work_review')?.detail.scopeRecorded,false);
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });
 test('unavailable WP source keeps an announced lead unknown until restored and then resolved',()=>{
@@ -126,7 +126,7 @@ for(const mode of ['question'])test('paused run defers renewed dispatch until re
  }finally{if(child&&child.exitCode===null){child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}fs.rmSync(f.root,{recursive:true,force:true});}
 });
 test('in-flight handle differences and completed or archived work are grounded mismatch leads',()=>{
- const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const s=snap(),file=path.join(f.wp,'A.md');s.workPackageDirectory=f.wp;s.packages.inFlight=[{...flight('A','main'),evidence:[file]}];const write=(list,handle)=>fs.writeFileSync(file,'[工作包] id=A；類型=B 技術\n[狀態] '+JSON.stringify({list,...(handle?{handle}:{})})+'\n');write('inFlight','main');save(path.join(f.run,'dispatch.json'),s);const state={};let r=audit.inspect(f.run,f.binding,state),event=audit.eventFor(r);audit.markAnnounced(state,event);
+ const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const s=snap(),file=path.join(f.wp,'A.md');s.workPackageDirectory=f.wp;s.packages.inFlight=[{...flight('A','main'),evidence:[file]}];const write=(list,handle)=>fs.writeFileSync(file,'[工作包] id=A；類型=B 技術\n[狀態] '+JSON.stringify({list,...(handle?{handle}:{})})+'\n');write('inFlight','main');save(path.join(f.run,'dispatch.json'),s);const state={};let r=audit.inspect(f.run,f.binding,state);
  write('inFlight','/root/a');r=audit.inspect(f.run,f.binding,state);let m=r.issues.find(x=>x.kind==='snapshot_mismatch');assert.equal(m.detail.wpHandle,'/root/a');assert.equal(m.detail.snapshotHandle,'main');
  s.packages.inFlight=[];s.packages.ready=[{...ready('A'),evidence:[file]}];save(path.join(f.run,'dispatch.json'),s);for(const list of ['completed','archived']){write(list);r=audit.inspect(f.run,f.binding,state);m=r.issues.find(x=>x.kind==='snapshot_mismatch');assert.equal(m.detail.wpList,list);assert.equal(m.detail.snapshotList,'ready');}
  }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
@@ -137,10 +137,11 @@ test('a corrupt snapshot makes every prior dispatch event unknown until recovery
  }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
 });
 test('writer and audit agree on the package id when its filename is different',()=>{
- const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const file=path.join(f.wp,'alias.md'),base=path.join(f.root,'base.json');fs.writeFileSync(file,'[工作包] id=B；類型=B 技術\n[狀態] {"list":"inFlight","handle":"main"}\n');save(base,{capacity:{verified:3,evidence:['platform']}});save(path.join(f.run,'binding.json'),f.binding);execFileSync(process.execPath,[path.join(scripts,'dispatch.cjs'),'from-wp',f.run,f.root,'--base',base]);const r=audit.inspect(f.run,f.binding,{});assert.equal(r.snapshot.packages.inFlight[0].id,'B');assert.equal(r.issues.some(x=>x.kind==='snapshot_mismatch'),false);assert.equal(r.issues.find(x=>x.kind==='main_work_review').affected[0],'B');
+ const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const file=path.join(f.wp,'alias.md'),base=path.join(f.root,'base.json');fs.writeFileSync(file,'[工作包] id=B；類型=B 技術\n[狀態] {"list":"inFlight","handle":"main"}\n');save(base,{capacity:{verified:3,evidence:['platform']}});save(path.join(f.run,'binding.json'),f.binding);execFileSync(process.execPath,[path.join(scripts,'dispatch.cjs'),'from-wp',f.run,f.root,'--base',base]);const r=audit.inspect(f.run,f.binding,{});assert.equal(r.snapshot.packages.inFlight[0].id,'B');assert.equal(r.issues.some(x=>x.kind==='snapshot_mismatch'),false);
  }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
 });
 test('both platforms keep invalid snapshot content out of review events',()=>{
  const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const file=path.join(f.run,'dispatch.json'),secret='synthetic-private-marker-8g7f6e5d';fs.writeFileSync(file,'{"bad":"'+secret+'", broken');for(const location of [scripts,path.resolve(__dirname,'../claude-code/.claude/skills/long-task-supervisor/scripts')]){const helper=require(path.join(location,'dispatch-audit.cjs')),r=helper.inspect(f.run,f.binding,{}),event=helper.eventFor(r),item=event.issues.find(x=>x.kind==='snapshot_invalid');assert.ok(item);assert.equal(JSON.stringify(event).includes(secret),false);assert.equal(item.detail.source,file);assert.equal(item.detail.sha256,crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'));assert.ok(fs.readFileSync(file,'utf8').includes(secret),'original source remains available for authorized investigation');}
  }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
 });
+

@@ -1005,7 +1005,7 @@ class SharedSpecTests(unittest.TestCase):
             text = "".join(
                 (skill_dir / name).read_text(encoding="utf-8") for name in ("SKILL.md", "references/execution.md")
             )
-            for marker in ("可派即派", "不留空席", "只派一包", "少於可用席位"):
+            for marker in ("可派即派", "一次全部派出", "只派一包", "少於可用席位"):
                 self.assertIn(marker, text, f"{skill_dir.name}: {marker}")
 
     @canonical_only
@@ -1025,7 +1025,6 @@ class SharedSpecTests(unittest.TestCase):
             "執行端只重驗受影響範圍、其連帶範圍及既定必要回歸",
             "未受影響項目的舊證據預設沿用",
             "沿引用與呼叫鏈",
-            "截止時點往後移時",
             "改到共用基礎",
             "判斷不出影響時，重驗該功能段落",
             "所有區段通過後只重測有聯動到的範圍",
@@ -1036,7 +1035,9 @@ class SharedSpecTests(unittest.TestCase):
             "執行端不另跑全套人工回歸",
         ):
             self.assertIn(marker, spec, marker)
-        for gone in ("未變依賴的舊證據只能在契約或最新使用者授權允許", "對最終候選版做一次完整同版回歸", "該範圍整套重驗", "自動化測試每版整套跑", "整套自動化測試只在最終候選版的乾淨匯出跑一次", "分功能段落做一次全套驗收"):
+        for gone in ("未變依賴的舊證據只能在契約或最新使用者授權允許", "對最終候選版做一次完整同版回歸", "該範圍整套重驗", "自動化測試每版整套跑", "整套自動化測試只在最終候選版的乾淨匯出跑一次", "分功能段落做一次全套驗收",
+                     # Jay 2026-11-26: the C research line left this skill, so research cutoff carry-over left the spec too.
+                     "截止時點往後移時"):
             self.assertNotIn(gone, spec, gone)
         codex = REPOSITORY / "codex" / ".agents" / "skills"
         claude = ADAPTER / "skills"

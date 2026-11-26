@@ -14,10 +14,10 @@ const FILE='pending-decisions.json';
 // across four runs, 66 of 92 decisions took the recommendation and 13 more chose the option that asked less of him.
 const KINDS={defer_scope:'推薦延後、不做或少做',restrict:'推薦新增、保留限制或在使用者規則上開例外',manual_alternative:'推薦人手處理且另有自動選項',irreversible:'不可逆（改寫 Git 歷史、未授權的正式部署等）',paid:'付費（開工時沒授權或超出上限的）',delete:'刪除或永久改動既有資料（開發過程產物除外）',credential:'帳號或憑證（開工時沒授權的）',external:'正式對外發送（寄信、對客戶或公開發布；非測試）',
   prohibition:'推翻你的禁令',acceptance:'改驗收條文（新增或加嚴驗收細節、縮窄、列例外、換證據）',user_action:'要你本人操作，或只有你知道的事實',major_change:'超出契約目標或範圍、沒有明確推薦的變更',gate:'你在契約自設的核准關卡',
-  rework_cycle:'同一驗收條文循環兩次仍未通過（通知，執行端照常繼續）'};
+  rework_decision:'同一驗收條文第 6 次不合格、研究也做完，接下來怎麼做（這條暫停，其他工作照常）'};
 // Kinds the supervisor may never decide in his place. acceptance: adding acceptance detail asks Jay first (Jay
-// 2026-11-24「可以要求要增加驗收的細節，但前提是要先問過我」); rework_cycle is his notice, closed only by his answer.
-const MUST_ASK=['defer_scope','restrict','manual_alternative','external','paid','delete','prohibition','user_action','credential','irreversible','gate','acceptance','rework_cycle'];
+// 2026-11-24「可以要求要增加驗收的細節，但前提是要先問過我」); rework_decision (Jay 2026-11-26) is his ruling on a criterion that failed six times, closed only by his answer.
+const MUST_ASK=['defer_scope','restrict','manual_alternative','external','paid','delete','prohibition','user_action','credential','irreversible','gate','acceptance','rework_decision'];
 const FIELDS=['kind','ask','recommend','why','options','criteria'],OPS=['raise','reopen','withdraw','answer','delegate'];
 const KEY=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const need=(ok,message)=>{if(!ok)throw Error(message);};

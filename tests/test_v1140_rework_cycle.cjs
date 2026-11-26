@@ -1,6 +1,6 @@
 // v1.14.0 (Jay 2026-11-23/24, handoff V7 items 1, 5, 6 and 7). Each test pins why the behaviour matters to the run:
-// - a criterion failing twice waits for research, and research or a stated reason starts a new count; every second
-//   cycle reaches Jay through Veda once, never at night (workspace E's I04 failed ten times in 21 hours unstudied);
+// - a criterion waits for research at its 2nd, 4th and 6th failure and for Jay's ruling after the 6th study, which
+//   reaches him through Veda's summary (Jay 2026-11-26; workspace E's I04 failed ten times in 21 hours unstudied);
 // - only the execution mainline writes dispatch state, and every write names its writer (2026-11-21..22 eight
 //   subagents took themselves for the mainline after compaction and four wrote dispatch state);
 // - a model-switch notice says what actually happened and sleep is not counted as silence (2026-11-23 ten notices
@@ -45,60 +45,70 @@ const run=(scripts,script,args,env={})=>spawnSync(process.execPath,[path.join(sc
   env:clean({...process.env,CODEX_THREAD_ID:undefined,CODEX_SESSION_ID:undefined,...env})});
 
 test('both adapters ship the same rework module',()=>{
-  // The count, the hold and the cycle alert must be one rule on both platforms.
+  // The count, the hold and the question to Jay must be one rule on both platforms.
   assert.deepEqual(fs.readFileSync(path.join(CODEX,'rework.cjs')),fs.readFileSync(path.join(CLAUDE,'rework.cjs')));
 });
 
 for(const [platform,scripts] of [['codex',CODEX],['claude',CLAUDE]]){
   const rework=require(path.join(scripts,'rework.cjs'));
   // A small fix (a typo, a setting) needs no research, but the mainline still says why and what caused each failure;
-  // without that record the count could be reset by hand and the hold would mean nothing.
-  test(platform+': waive resets a held criterion only with a reason and one direct cause per failure',t=>{
+  // without that record the hold could be lifted by hand and would mean nothing. The count itself never resets
+  // (Jay 2026-11-26 decision 33), so the next failure is the 3rd and goes back to the same subagent.
+  test(platform+': waive lifts a held criterion only with a reason and one direct cause per failure, and keeps the count',t=>{
     const f=fixture(t,platform);
     const input=value=>{save(f.p('waive.json'),value);return run(scripts,'rework.cjs',['waive',f.root,f.p('waive.json')]);};
     f.fail('P1');
     let r=input({criterionId:'C1',directCauses:['typo'],reason:'typo fix'});
-    assert.equal(r.status,1);assert.match(r.stderr,/累計 2 次/,'one failure is not held, so there is nothing to waive');
+    assert.equal(r.status,1);assert.match(r.stderr,/第 2、4、6 次/,'one failure is not held, so there is nothing to waive');
     f.fail('P1-retry');
     assert.deepEqual(rework.held(rework.rows(f.root),['C1','C2']),['C1']);
     r=input({criterionId:'C1',directCauses:['typo','typo'],reason:' '});assert.equal(r.status,1);assert.match(r.stderr,/reason/);
     r=input({criterionId:'C1',directCauses:['typo'],reason:'typo fix'});assert.equal(r.status,1);assert.match(r.stderr,/directCauses/);
     r=input({criterionId:'C1',directCauses:['wrong column','same typo'],reason:'a setting value, rerun proves it'});
     assert.equal(r.status,0,r.stderr);
-    assert.deepEqual(JSON.parse(r.stdout),{registered:'C1',mode:'waived',cycle:1,alert:false});
-    assert.deepEqual(rework.held(rework.rows(f.root),['C1']),[],'the count starts again');
+    const out=JSON.parse(r.stdout);
+    assert.deepEqual([out.registered,out.mode,out.cycle,out.failures,out.waitsForJay],['C1','waived',1,2,false]);
+    assert.match(out.next,/升兩檔/,'after the 2nd failure and its study the redo goes to a new subagent two efforts up');
+    assert.deepEqual(rework.held(rework.rows(f.root),['C1']),[],'the hold is lifted');
     const status=rework.status(f.root).find(s=>s.criterionId==='C1');
-    assert.deepEqual([status.failures,status.cycles,status.totalFailures],[0,1,2],'history keeps every failure');
+    assert.deepEqual([status.failures,status.studies,status.totalFailures],[2,1,2],'the count is not reset by the study');
   });
 
-  // Jay 2026-11-23「循環兩次後，請Veda通知我」: the second cycle raises one open item, and running the check again does
-  // not raise it twice; the first cycle raises nothing.
-  test(platform+': the second cycle of one criterion raises one rework_cycle item with each cause, once',t=>{
+  // Jay 2026-11-26 decisions 33 and 34: failures 1, 3 and 5 go back to the subagent that delivered; 2 and 4 wait for a
+  // study; the 6th waits for a study and then for Jay. Only then is one rework_decision raised, once, and his ruling
+  // (resume) starts the count again. Raising it earlier would ask Jay about a criterion the cycle can still fix.
+  test(platform+': a criterion waits for Jay only after its 6th failure is studied, and his ruling starts a new count',t=>{
     const f=fixture(t,platform);
-    const cycle=n=>{f.fail('P'+n+'a');f.fail('P'+n+'b');
-      f.journal({kind:'reset',criterionId:'C1',mode:'research',cycle:n,directCauses:['cause '+n+'a','cause '+n+'b'],commonCause:'upstream '+n,solution:'fix '+n,at:new Date().toISOString()});};
-    cycle(1);
-    assert.deepEqual(rework.alerts(f.root,f.binding),[]);
-    assert.deepEqual(withEnv({CODEX_THREAD_ID:'supervisor-chat',CODEX_SESSION_ID:'supervisor-chat',CLAUDE_SESSION_ID:'supervisor-chat'},()=>rework.raiseAlerts(f.root,f.binding,{title:'會計'})),[]);
-    cycle(2);
+    const study=n=>f.journal({kind:'reset',criterionId:'C1',mode:'research',cycle:n,directCauses:['cause '+n],commonCause:'upstream '+n,solution:'fix '+n,at:new Date().toISOString()});
+    const asSupervisor=fn=>withEnv({CODEX_THREAD_ID:'supervisor-chat',CODEX_SESSION_ID:'supervisor-chat',CLAUDE_SESSION_ID:'supervisor-chat'},fn);
+    const row=()=>rework.status(f.root).find(s=>s.criterionId==='C1');
+    const expected=[[1,false,/交回剛交件的子代理/],[2,true,/先派研究子代理/],[3,false,/交回第 3 次/],[4,true,/先派研究子代理/],[5,false,/交回第 5 次/],[6,true,/先派研究子代理/]];
+    for(const [n,heldNow,next] of expected){
+      f.fail('P'+n);
+      assert.equal(row().failures,n);assert.equal(row().held,heldNow,'failure '+n);assert.match(row().next,next,'failure '+n);
+      if(n===2||n===4){study(n/2);assert.equal(row().held,false,'a study lifts the hold at '+n);
+        assert.match(row().next,n===2?/升兩檔/:/執行主線當下的模型/);}
+      assert.deepEqual(rework.alerts(f.root,f.binding),[],'no question to Jay before the 6th study');
+    }
+    study(3);
+    assert.equal(row().held,true);assert.equal(row().waitsForJay,true);assert.match(row().next,/等 Jay 裁決/);
     const [alert]=rework.alerts(f.root,f.binding);
-    assert.equal(alert.cycle,2);assert.equal(alert.total,4);assert.equal(alert.requirement,'report totals match');
-    assert.deepEqual(alert.causes,['cause 1a','cause 1b','cause 2a','cause 2b']);
-    const raise=()=>withEnv({CODEX_THREAD_ID:'supervisor-chat',CODEX_SESSION_ID:'supervisor-chat',CLAUDE_SESSION_ID:'supervisor-chat'},()=>rework.raiseAlerts(f.root,f.binding,{title:'會計'}));
+    assert.equal(alert.failures,6);assert.equal(alert.studies.length,3);assert.equal(alert.requirement,'report totals match');
+    assert.deepEqual(alert.causes,['cause 1','cause 2','cause 3']);
+    const raise=()=>asSupervisor(()=>rework.raiseAlerts(f.root,f.binding,{title:'會計'}));
     assert.deepEqual(raise(),[alert.key]);
-    assert.deepEqual(raise(),[],'the same cycle is raised once');
-    const items=read(f.p('pending-decisions.json')).items.filter(i=>i.kind==='rework_cycle');
+    assert.deepEqual(raise(),[],'the same round is raised once');
+    const items=read(f.p('pending-decisions.json')).items.filter(i=>i.kind==='rework_decision');
     assert.equal(items.length,1);assert.equal(items[0].status,'open');
-    for(const part of ['C1','已循環 2 次','累計不合格 4 次','upstream 1','fix 2','任務：會計'])assert.ok(items[0].ask.includes(part),part);
-  });
-
-  // Like an important mail (Jay 2026-11-24): sent once, held from 00:00 to 08:00 Taipei, and only while open.
-  test(platform+': Veda gets each open cycle item once and never between midnight and 08:00 Taipei',()=>{
-    const items=[{key:'k1',kind:'rework_cycle',status:'open'},{key:'k2',kind:'rework_cycle',status:'answered'},{key:'k3',kind:'acceptance',status:'open'},{key:'k4',kind:'rework_cycle',status:'open'}];
-    const taipei=(h,m)=>Date.UTC(2026,10,24,h-8,m);
-    const sent=new Set(['veda-k4']),due=at=>rework.vedaDue(items,{sent:key=>sent.has(key),now:at}).map(i=>i.key);
-    assert.deepEqual(due(taipei(2,0)),[]);assert.deepEqual(due(taipei(7,59)),[]);
-    assert.deepEqual(due(taipei(8,0)),['k1']);assert.deepEqual(due(taipei(23,30)),['k1']);
+    for(const part of ['情境：','現況：','C1','累計不合格 6 次','upstream 1','fix 3','任務：會計'])assert.ok(items[0].ask.includes(part),part);
+    // Jay rules; his words are kept and the criterion starts again at the 1st failure.
+    save(f.p('resume.json'),{criterionId:'C1',ruling:'改用新的報表格式再做',pendingKey:alert.key});
+    const resumed=run(scripts,'rework.cjs',['resume',f.root,f.p('resume.json')]);
+    assert.equal(resumed.status,0,resumed.stderr);
+    assert.deepEqual([row().failures,row().held,row().rulings,row().totalFailures],[0,false,1,6]);
+    assert.equal(run(scripts,'rework.cjs',['resume',f.root,f.p('resume.json')]).status,1,'a ruling is only taken while the criterion waits for Jay');
+    f.fail('P7');
+    assert.match(row().next,/交回剛交件的子代理/,'the next failure is the 1st of a new count');
   });
 
   // The dispatch tool is the stop, not a prompt line: a subagent's shell carries its own thread ID beside the top
@@ -118,10 +128,10 @@ for(const [platform,scripts] of [['codex',CODEX],['claude',CLAUDE]]){
     assert.deepEqual(rows.at(-1).writer,{thread:'top-1',session:'top-1'});
     // Reading stays open to everyone.
     assert.equal(run(scripts,'dispatch.cjs',['summary',f.root],{CODEX_THREAD_ID:'sub-1',CODEX_SESSION_ID:'top-1'}).status,0);
-    // Research registration resets a count, so it is the mainline's too.
+    // Registering research lifts a hold, so it is the mainline's too.
     f.fail('P1');f.fail('P1b');save(f.p('waive.json'),{criterionId:'C1',directCauses:['a','b'],reason:'setting'});
     const research=run(scripts,'rework.cjs',['waive',f.root,f.p('waive.json')],{CODEX_THREAD_ID:'sub-1',CODEX_SESSION_ID:'top-1'});
-    assert.equal(research.status,1);assert.match(research.stderr,/子代理不能登記研究或歸零/);
+    assert.equal(research.status,1);assert.match(research.stderr,/子代理不能登記研究/);
   });
 
   // A question about changing acceptance has to say which criterion it is stuck on (Jay 2026-11-24, 代決原則), so the
@@ -174,6 +184,7 @@ test('codex: the switch notice names the real cause, and the silent window count
   // The watcher builds its notice from these functions, not a copy of its own.
   const watch=fs.readFileSync(path.join(CODEX,'native-watch.cjs'),'utf8');
   assert.ok(watch.includes('fallback.switchReason(hit,target,SILENT_SWITCH_MS)')&&watch.includes('fallback.restoreReason(')&&!/function switchReason/.test(watch));
-  assert.ok(watch.includes('rework.vedaDue(')&&watch.includes('clock.awakeSince(state,'));
+  assert.ok(watch.includes('rework.alerts(')&&watch.includes('clock.awakeSince(state,'));
 });
+
 
