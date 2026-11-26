@@ -45,6 +45,19 @@ test('the mainline\'s own edits, tests and sleeps are found, and documents, stat
   const patch=file=>({type:'custom_tool_call',name:'apply_patch',input:'*** Begin Patch\n*** Update File: '+file+'\n@@\n-a\n+b\n*** End Patch'});
   const shell=cmd=>({type:'function_call',name:'exec_command',arguments:JSON.stringify({cmd})});
   assert.deepEqual(clock.selfWorkOf(patch('/repo/src/app.js')),[{kind:'edit',item:'/repo/src/app.js'}]);
+  // A patch built in an exec cell names its file in code; the literal end still tells a document from code
+  // (2026-11-27 工區 E: four work package and evidence notes were taken for code edits in one hour).
+  const cell=code=>({type:'custom_tool_call',name:'exec',input:code});
+  const built=[
+    'await tools.apply_patch("*** Begin Patch\\n*** Add File: " + ev + "/V12_v14影響清單_20261126.md\\n" + md + "\\n*** End Patch")',
+    'await tools.apply_patch("*** Begin Patch\\n*** Add File: "+wpDir+"/WP-E-WIRING-C20.md\\n"+body+"\\n*** End Patch")',
+    'await tools.apply_patch("*** Begin Patch\\n*** Add File: " + wpDir + "/" + id + ".md\\n" + body + "\\n*** End Patch")',
+    'await tools.apply_patch("*** Begin Patch\\n*** Add File: " + path + "\\n" + lines + "\\n*** End Patch")',
+    'await tools.apply_patch(`*** Begin Patch\\n*** Add File: ${E}/接線V12_留底介面_20261126.md\\n${doc}\\n*** End Patch`)',
+    'await tools.apply_patch(`*** Begin Patch\\n*** Update File: ${A}sourceReadLedger.ts\\n@@\\n-a\\n+b\\n*** End Patch`)',
+    'await tools.apply_patch("*** Begin Patch\\n*** Add File: /repo/src/q-count.js\\n" + js + "\\n*** End Patch")'];
+  const builtHits={hits:built.flatMap(code=>clock.selfWorkOf(cell(code))).map(hit=>({...hit,at:iso(Date.now())}))};
+  assert.deepEqual(clock.selfWorkHits(builtHits,'/runs/e','/repo/wp').map(hit=>hit.item),['sourceReadLedger.ts','/repo/src/q-count.js']);
   assert.deepEqual(clock.selfWorkOf(shell('cd /repo && npm test')).map(hit=>hit.kind),['test']);
   assert.deepEqual(clock.selfWorkOf(shell('sleep 120')).map(hit=>hit.kind),['sleep']);
   assert.deepEqual(clock.selfWorkOf(shell("sed -i '' 's/a/b/' src/config.json")).map(hit=>hit.kind),['edit']);

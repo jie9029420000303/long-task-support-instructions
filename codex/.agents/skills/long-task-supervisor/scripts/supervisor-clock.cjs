@@ -74,8 +74,13 @@ function commandKind(command){
   if(parts.some(part=>/^sleep\s+\d/.test(part))&&(/^sleep\b/.test(first)||parts.some(part=>/^(?:while|until)\b/.test(part))))return 'sleep';
   return parts.some(part=>EDIT_COMMAND.test(part))?'edit':null;
 }
+// An exec cell often builds the patch text in code ("*** Add File: " + dir + "/x.md\n" or `*** Add File: ${dir}/x.md`), so
+// what follows the marker is code (2026-11-27 工區 E: work package and evidence .md files were taken for code edits). Only
+// the literal end after the last quote or ${...} is known text of the path, and it keeps the extension. A name that is all
+// variables cannot be judged and is left out.
 function patchFiles(text){
-  return [...String(text||'').matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)\s*(?=\\n|\n|$)/g)].map(match=>match[1].trim());
+  return [...String(text||'').matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)\s*(?=\\n|\n|$)/g)]
+    .map(match=>match[1].replace(/^.*["'\x60}]/,'').trim()).filter(Boolean);
 }
 function selfWorkOf(payload){
   const out=[];
