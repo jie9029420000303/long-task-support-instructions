@@ -1,6 +1,6 @@
 # 依監督模型選擇執行與子代理
 
-執行主線預設 Opus xhigh（使用者 2026-11-26：執行主線主責切分、派工與收件判定），監督交辦時用監督選定的完整 ID。子代理照下方子代理順位選模，由背景程式依額度與限速決定當下第一站（使用者 2026-11-26）。唯一例外是執行主線在 OpenAI 訂閱（Sol 訂閱、Terra 訂閱）上：這時子代理一律用 Terra 訂閱，不看子代理降級階梯（使用者 2026-11-27 第 37 項）。各層級內以數字比較版本，只選目前顯示且可呼叫的型號。使用者明確鎖定的角色、推理、費用或帳號限制優先，工具缺少明確指定的能力時記錄該角色受阻。
+執行主線預設 Opus xhigh（使用者 2026-11-26：執行主線主責切分、派工與收件判定），監督交辦時用監督選定的完整 ID。子代理照下方子代理順位選模，由背景程式依額度與限速決定當下第一站（使用者 2026-11-26）。主線在哪一家，子代理都照子代理順位（使用者 2026-11-28 放寬 2026-11-27 第 37 項）。這要靠 OpenCodex 的實驗設定 plaintextV2AgentMessages 開著，ChatGPT 訂閱與其他家才能互讀子代理的任務與過程訊息（2026-11-28 00:16 實測 Opus 派 Terra 訂閱、Sol 訂閱派 DeepSeek 都能交接）。背景程式讀到它沒開或讀不到時，回到第 37 項：執行主線在 OpenAI 訂閱（Sol 訂閱、Terra 訂閱）上時子代理一律用 Terra 訂閱，不看子代理降級階梯。各層級內以數字比較版本，只選目前顯示且可呼叫的型號。使用者明確鎖定的角色、推理、費用或帳號限制優先，工具缺少明確指定的能力時記錄該角色受阻。
 
 | 角色 | 模型 | 基準推理 |
 |---|---|---|
@@ -10,7 +10,7 @@
 
 Sonnet、Terra 一般子代理以 Medium 起跳（使用者 2026-11-26，取代 2026-11-23 的 Sonnet High 起跳），第 2 次不合格研究後升兩檔：Medium 到 xhigh，再升到 max。介面操作從 Low 起跳。開源模型不能升檔，改派開源順位的下一款。
 
-Claude 的 `anthropic/`（訂閱）、`anthropic-apikey/`（API） 代表不同帳號路徑，各是順位上的一站；監督、執行主線與子代理都會用到 API（使用者 2026-11-26，取代 2026-11-21「API 只留給監督」）。舊工作從目前進度接續。監督變更路線時在安全回合邊界更新，保存契約、失敗次數與在途成果。錯誤 `unreadable_encrypted_agent_task` 表示父子交接資料無法在該組合讀取：主線在 OpenAI 訂閱上時，平台把子代理任務加密給 ChatGPT 原生後端，其他家模型都讀不到（2026-11-27 工區 E 與清票派 DeepSeek、Muse、OpenAI API 子代理全被拒，14:42 實測 Sol 訂閱派 Terra 訂閱可交接、派 DeepSeek 重現此錯誤）。
+Claude 的 `anthropic/`（訂閱）、`anthropic-apikey/`（API） 代表不同帳號路徑，各是順位上的一站；監督、執行主線與子代理都會用到 API（使用者 2026-11-26，取代 2026-11-21「API 只留給監督」）。舊工作從目前進度接續。監督變更路線時在安全回合邊界更新，保存契約、失敗次數與在途成果。錯誤 `unreadable_encrypted_agent_task` 表示父子交接資料無法在該組合讀取：plaintextV2AgentMessages 沒開而主線在 OpenAI 訂閱上時，平台把子代理任務加密給 ChatGPT 原生後端，其他家模型都讀不到（2026-11-27 工區 E 與清票派 DeepSeek、Muse、OpenAI API 子代理全被拒，14:42 實測 Sol 訂閱派 Terra 訂閱可交接、派 DeepSeek 重現此錯誤）。
 
 ## 解析及實際呼叫
 
@@ -67,5 +67,5 @@ Claude 的 `anthropic/`（訂閱）、`anthropic-apikey/`（API） 代表不同�
 - 手動選型指定當前使用的模型，包含直接從 Sol 開始，之後仍由背景程式備援。背景程式換過模型之後，使用者又手動改成別的模型（對話設定的時間晚於那次換模型）時，以手動選的模型為新的起點，照順位與降級階梯判斷，不再沿用自己的換模型紀錄（使用者 2026-11-25 選 A；工區 E 13:26 手動改成 Opus，紀錄仍寫 Muse，背景程式因此沒換模型，也沒啟動當時的 Claude 保留）。不在本角色順位上的模型不算手動起點：主線停在開源模型（例如模型自己依已廢止的規則換過去）或 Claude 的其他層級（例如主線停在 Sonnet）、背景程式又沒有它的換模型紀錄時，背景程式以該角色順位第一站為原模型往上換，執行主線與監督都回到 xhigh，之後照同一套規則換回或保留。進行中的回合不會中途換模型，所以這則往上換的通知只在對話閒置時送，同一個回合最多送一次；對話已經設定成上位模型、只等下一回合生效時不送。新回合開始後仍停在原處才會再送，訊息結尾會寫明第幾次通知與重送原因。新 run 的 `modelPolicy` 預設為 `automatic`。只有使用者明確要求固定模型且禁止備援時才用 `locked`。舊 run 的 `modelFallback:false` 視同 locked，經使用者確認恢復自動後才遷移。續接同一任務時繼承既有政策。
 - 開源順位：DeepSeek V4.1 Flash 1017 在前、Muse Ember 在後（使用者 2026-11-26），兩款均須在 OpenCodex 目錄可用、鎖定 max 推理且有合格供應商。OpenCodex 每日依加權成本篩選及排序各模型的供應商，對每次請求套用該模型的名單。技能每次選模讀取目前設定，單一合格端點也可使用，某款沒有合格端點時略過該款；兩款都沒有時儀表板會寫明。舊安裝的 Ambient FP4（DeepSeek）或 Google Vertex Global（Muse）單點設定仍適用。每個角色分別保留等待狀態，背景自動重查各順位，較高順位先恢復即續接。送達回執證明訊息到達，對話由目標模型產生輸出才確認接手。
 - 平台限制（2026-10-11 實測）：所有 OAuth 帳號都被限速時，App 會照 opencodex 給的最早恢復時間，讓當下的回合原地等待；帶 `model` 的訊息會立即改掉該對話的模型設定，但不會中斷正在等待的回合，新模型從下一個回合起生效，排隊的訊息在回合恢復後照常收進去。App 工具沒有中斷別的對話回合的功能，所以已在等待的回合無法提早改用新模型。
-- 子代理：執行端將 `RUN/model-fallback.json` 視為可選限速紀錄，新 run 未遇限速時允許缺檔。在 model-route 輸入加上 `"fallback":"RUN/model-fallback.json"`，會依 `limits`、`ladder.floors` 與 `openaiQuota` 選子代理順位的當下第一站並回傳 `restoreAfter`；`executorModel` 是 OpenAI 訂閱模型時只回 `subscriptionMainlineWorker`（Terra 訂閱，basis `subscription-mainline`），它不能用時回 unavailable，由背景程式把主線換到下一站，換站後再派；`chain` 列出三個角色目前的順位，`ladder` 是降級階梯的階數、可用量與各角色退到第幾站；`supervisorLimits` 是監督自己的紀錄，子代理不看。候選由 model-route 依 OpenCodex 模型目錄與這份紀錄算出，首次派出後照第 1 點核對實際模型。
+- 子代理：執行端將 `RUN/model-fallback.json` 視為可選限速紀錄，新 run 未遇限速時允許缺檔。在 model-route 輸入加上 `"fallback":"RUN/model-fallback.json"`，會依 `limits`、`ladder.floors` 與 `openaiQuota` 選子代理順位的當下第一站並回傳 `restoreAfter`；`plaintextAgentMessages` 是背景程式即時讀到的 OpenCodex 設定（每次讀額度時用 `ocx agent status --json` 讀執行中的服務，OpenCodex 設定或服務重啟後立刻重讀），`enabled` 為 true 時子代理照順位派；不是 true 而 `executorModel` 是 OpenAI 訂閱模型時只回 `subscriptionMainlineWorker`（Terra 訂閱，basis `subscription-mainline`），它不能用時回 unavailable，由背景程式把主線換到下一站，換站後再派；背景程式讀到設定由開變關時通知監督登記待決帳，恢復時再通知一次；`chain` 列出三個角色目前的順位，`ladder` 是降級階梯的階數、可用量與各角色退到第幾站；`supervisorLimits` 是監督自己的紀錄，子代理不看。候選由 model-route 依 OpenCodex 模型目錄與這份紀錄算出，首次派出後照第 1 點核對實際模型。
 - 全部可用路線受限時，由背景程式保留各角色、重查並在恢復時自動續接；其他工作依原授權繼續。

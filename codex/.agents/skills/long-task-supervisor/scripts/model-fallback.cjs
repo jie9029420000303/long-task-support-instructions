@@ -54,10 +54,12 @@ function billingAccount(model){return /^([a-z0-9-]+-apikey\/)/.exec(model||'')?.
 // A mainline on the ChatGPT subscription can hand work only to a ChatGPT subscription worker: the platform encrypts the
 // task for the native backend and any other provider refuses it (2026-11-27 13:58～14:02 工區 E and 清票, and the 14:42
 // test: unreadable_encrypted_agent_task). Its workers use the subscription Terra whatever the subagent ladder says; once
-// that Terra cannot serve, the mainline itself moves on (Jay 2026-11-27 decision 37).
+// that Terra cannot serve, the mainline itself moves on (Jay 2026-11-27 decision 37). This holds only while OpenCodex's
+// plaintextV2AgentMessages is off: with it on, workers of every provider read the task and follow their own order
+// (Jay 2026-11-28, claude-quota.cjs crossFamily).
 function subscriptionWorker(items=catalog.installed()){return catalog.latest(items,'gpt','','terra')?.id||null;}
 function cannotDispatch(state,model,role,now=Date.now()){
-  if(role!=='executor'||!subscriptionOpenAI(model))return false;
+  if(role!=='executor'||!subscriptionOpenAI(model)||require('./claude-quota.cjs').crossFamily(state))return false;
   const worker=subscriptionWorker();
   return Boolean(worker)&&refused(state,worker,now,'subagent');
 }
@@ -486,6 +488,7 @@ function publish(run,state,now=Date.now(),fourth=null){
   const limits=Object.fromEntries(live.filter(([key])=>!key.startsWith('supervisor|')).map(([key,item])=>[plainKey(key),entry(item)]));
   const supervisorLimits=Object.fromEntries(live.filter(([key])=>key.startsWith('supervisor|')).map(([key,item])=>[plainKey(key),entry(item)]));
   const quota=state.claudeQuota,describe=require('./claude-quota.cjs').describeOpenAI,ladder=ladderOf(state,now,fourth);
+  const crossFamily=require('./claude-quota.cjs').crossFamily(state);
   const body={chain:Object.fromEntries(Object.entries(ladder.roles).map(([role,item])=>[role,item.order])),
     limits,supervisorLimits,...(state.apiMonth?{apiMonth:{until:new Date(state.apiMonth.until).toISOString(),basis:state.apiMonth.basis}}:{}),
     ...(quota?{ladder:{step:ladder.step,available:ladder.available,thresholds:ladder.thresholds,fiveHourStep:ladder.fiveHourStep,
@@ -493,10 +496,12 @@ function publish(run,state,now=Date.now(),fourth=null){
       first:Object.fromEntries(Object.entries(ladder.roles).map(([role,item])=>[role,item.first])),
       summary:require('./claude-quota.cjs').describe(quota),readAt:new Date(quota.at).toISOString()}}:{}),
     ...(quota?.openai?{openaiQuota:{subscriptionHeld:quota.openai.held,floor:quota.openai.floor,summary:describe(quota),readAt:new Date(quota.at).toISOString()}}:{}),
-    ...(subscriptionWorker()?{subscriptionMainlineWorker:subscriptionWorker()}:{}),
+    ...(quota?.plaintext?{plaintextAgentMessages:{enabled:quota.plaintext.enabled,summary:require('./claude-quota.cjs').describePlaintext(quota),readAt:new Date(quota.at).toISOString()}}:{}),
+    ...(!crossFamily&&subscriptionWorker()?{subscriptionMainlineWorker:subscriptionWorker()}:{}),
     ...(openRoutes('executor',fourth).length?{}:{openSourceWarning:'開源備援目前沒有可用模型（OpenCodex 設定或價格上限未通過）'}),
     ...(fourth?{fourthExecutorModel:fourth}:{}),
-    rule:'監督與執行主線用同一條順位，子代理用自己的順位（chain）。各角色在自己被拒或降級階梯（ladder）讓它離開前面幾站時往下換：階數每多一階子代理退一站，監督晚兩階、執行主線再晚兩階才開始退；ladder.first 是各角色目前能用的第一站。OpenAI 訂閱到停用線或只剩 2% 以下時所有角色跳過訂閱 GPT。執行主線在 OpenAI 訂閱（Sol、Terra）上時，子代理一律派 subscriptionMainlineWorker（Terra 訂閱），不看子代理降級階梯；它不能用時背景程式先把主線換到下一站。',
+    rule:'監督與執行主線用同一條順位，子代理用自己的順位（chain）。各角色在自己被拒或降級階梯（ladder）讓它離開前面幾站時往下換：階數每多一階子代理退一站，監督晚兩階、執行主線再晚兩階才開始退；ladder.first 是各角色目前能用的第一站。OpenAI 訂閱到停用線或只剩 2% 以下時所有角色跳過訂閱 GPT。'+(crossFamily?'子代理不論主線用哪一家都照子代理順位派（plaintextAgentMessages 開著）。':
+      '執行主線在 OpenAI 訂閱（Sol、Terra）上時，子代理一律派 subscriptionMainlineWorker（Terra 訂閱），不看子代理降級階梯；它不能用時背景程式先把主線換到下一站（plaintextAgentMessages 沒有開著）。'),
     updatedAt:new Date(now).toISOString()};
   const file=path.join(run,'model-fallback.json');
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);

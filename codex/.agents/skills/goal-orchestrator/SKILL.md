@@ -92,7 +92,7 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 
 ## 模型
 
-主線沿用使用者實際選定的模型，監督交辦時執行主線使用同一完整 ID（預設 Opus xhigh）。依[模型路由](../long-task-supervisor/references/model-routing.md)從當回合派工工具的可見清單解析。子代理照子代理順位 Sonnet（Claude 訂閱）→ Sonnet（Claude API）→ Terra（OpenAI 訂閱）→ Terra（OpenAI API）→ DeepSeek → Muse，由背景程式依額度與限速決定當下第一站；主線在 OpenAI 訂閱（Sol、Terra）上時子代理一律用 Terra 訂閱，派其他家會被平台拒絕；一般包以 medium 起跳（開源固定 max），介面包以 low 起跳，明列 model 與 reasoning_effort。介面子代理需具備所需瀏覽器、視覺與實際操作能力。Goal 續跑／恢復沿用已鎖定模型，另有使用者新選擇或原模型失效時重新解析。精確指定與成本限制以使用者授權為準。角色缺少可用模型時，只標記該角色受阻並繼續其他工作。限速處置與恢復沿用既有流程。
+主線沿用使用者實際選定的模型，監督交辦時執行主線使用同一完整 ID（預設 Opus xhigh）。依[模型路由](../long-task-supervisor/references/model-routing.md)從當回合派工工具的可見清單解析。子代理照子代理順位 Sonnet（Claude 訂閱）→ Sonnet（Claude API）→ Terra（OpenAI 訂閱）→ Terra（OpenAI API）→ DeepSeek → Muse，由背景程式依額度與限速決定當下第一站；主線在哪一家都照這條順位（使用者 2026-11-28，靠 OpenCodex 的 plaintextV2AgentMessages）；背景程式讀到這個設定沒開時，主線在 OpenAI 訂閱（Sol、Terra）上的子代理只能用 Terra 訂閱；一般包以 medium 起跳（開源固定 max），介面包以 low 起跳，明列 model 與 reasoning_effort。介面子代理需具備所需瀏覽器、視覺與實際操作能力。Goal 續跑／恢復沿用已鎖定模型，另有使用者新選擇或原模型失效時重新解析。精確指定與成本限制以使用者授權為準。角色缺少可用模型時，只標記該角色受阻並繼續其他工作。限速處置與恢復沿用既有流程。
 
 ## 檢查與證據
 
