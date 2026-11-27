@@ -3,7 +3,9 @@
 // available share of the subscriptions that can run the high tier: every Claude account and every OpenAI account whose
 // plan can run Sol (prolite), weighted by plan. Each account's own threshold (OpenCodex 自訂門檻) is its stop line:
 // what lies above it is kept for Jay, so the available share is Σ weight×max(0, line − weekly used) ÷ Σ weight×line
-// (no line counts as 100). Every 7 points under 50% is one more step for all roles together: the subagents move one
+// (no line counts as 100). Each threshold under 50% is one more step for all roles together, the thresholds closer
+// together the nearer the share is to empty (50, 35, 24, 16, 10, 6, 3, 1, Jay 2026-11-27 「從50%開始 越降越快 ... 越靠近
+// 沒有 收得越緊 不然就盡量寬鬆 用高階一點的模型」; it was every 7 points before): the subagents move one
 // stop down their order per step, the supervisor two steps later and the executor two steps after that, so the most
 // important roles keep the front of their order longest. While every Claude account that can still serve this week
 // has used 80% of its five-hour window, the ladder is one step lower until that window resets.
@@ -14,7 +16,7 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const {execFile}=require('node:child_process');
-const LADDER=[50,43,36,29,22,15,8,1], FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000, OPENAI_FLOOR=2;
+const LADDER=[50,35,24,16,10,6,3,1], FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000, OPENAI_FLOOR=2;
 // How many steps later than the subagents each role starts stepping down (decision 24).
 const LADDER_DELAY={subagent:0,supervisor:2,executor:4};
 // Max 20x counts four shares, Max 5x and OpenAI prolite one (Q48 A, decision 17); another plan (OpenAI free cannot run

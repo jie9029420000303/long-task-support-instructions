@@ -22,10 +22,10 @@ const opus='anthropic/claude-opus-5-5',opusApi='anthropic-apikey/claude-opus-5-5
 const MINUTE=60000,HOUR=60*MINUTE,DAY=24*HOUR;
 async function until(check,ms=15000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('Timed out');}
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-// Available share 19.8% (no stop lines): ladder step 5, so the executor keeps away from its first stop only.
+// Available share 9% (no stop lines): ladder step 5, so the executor keeps away from its first stop only.
 const reading=now=>({accounts:[
   {provider:'anthropic',label:'max-20x',plan:'max_20x',paused:false,quota:{weeklyPercent:100,weeklyResetAt:now+2*DAY,fiveHourPercent:0,fiveHourResetAt:now+3*HOUR}},
-  {provider:'anthropic',label:'max-5x',plan:'max_5x',paused:false,quota:{weeklyPercent:1,weeklyResetAt:now+5*DAY,fiveHourPercent:24,fiveHourResetAt:now+2*HOUR}},
+  {provider:'anthropic',label:'max-5x',plan:'max_5x',paused:false,quota:{weeklyPercent:55,weeklyResetAt:now+5*DAY,fiveHourPercent:24,fiveHourResetAt:now+2*HOUR}},
   {provider:'openai',label:'not-claude',plan:'pro',paused:false,quota:{weeklyPercent:10,weeklyResetAt:now+DAY}}]});
 
 // The watcher switched the executor from Sonnet to Sol two hours ago; a minute ago Jay set the chat to Opus by hand.
