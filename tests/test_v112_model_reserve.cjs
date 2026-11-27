@@ -105,7 +105,8 @@ test('quota is read every 30 minutes and once just after an account reset; a tes
 test('the supervisor and the executor share one order with the Claude API on it, and a month cap learned by one run is skipped by every run',()=>{
   const home=fs.mkdtempSync(path.join(os.tmpdir(),'api-month-'));
   try{
-    withEnv({OPENCODEX_MODEL_CATALOG:catalogFixture,LONG_TASK_HOME:home},()=>{
+    // No OpenCodex settings: the catalog is read live against them (v1.21.3), and this machine's switch off gpt-6.1-terra.
+    withEnv({OPENCODEX_MODEL_CATALOG:catalogFixture,LONG_TASK_HOME:home,OPENCODEX_HOME:path.join(home,'no-opencodex')},()=>{
       for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(role),[opus,paid,sol,terra],role);
       assert.deepEqual(fallback.chainFor('subagent'),[sonnet,'anthropic-apikey/claude-sonnet-5-5',terra],'workers have the Claude API too');
       const first={},second={},until=Date.now()+9*DAY;

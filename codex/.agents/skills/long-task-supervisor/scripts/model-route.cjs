@@ -3,7 +3,7 @@
 // determine the role, model and supported reasoning level.
 const fs=require('node:fs');
 const {keyOf,billingAccount,subscriptionOpenAI,stopIndex,MAINLINE_STOPS,SUBAGENT_STOPS}=require('./model-fallback.cjs');
-const {efforts,identity,available,latest}=require('./model-catalog.cjs');
+const {efforts,identity,available,latest,installed}=require('./model-catalog.cjs');
 const openrouter=()=>require('./openrouter-route.cjs');
 // The executor plans, dispatches and judges the work: it runs at xhigh (Jay 2026-11-26 decision 1). Workers start at
 // Medium on every closed model now that the mainline is stronger (decision 9, replacing 2026-11-23's Sonnet High);
@@ -112,11 +112,20 @@ function resolve(input) {
   }
   return result;
 }
+// The tools list only part of the routed models: on 2026-11-27 spawn_agent showed the first 16, so workspace E's Opus
+// mainline never saw Terra and its workers fell from Sonnet straight to DeepSeek, while the watcher, reading the whole
+// OpenCodex catalog, published Terra as their first stop. The CLI adds that catalog, so both choose from the same models.
+function withInstalled(catalogs={}){
+  const all=installed(), idOf=item=>item.id||item.slug;
+  const merged=list=>[...(list||[]),...all.filter(item=>!(list||[]).some(listed=>idOf(listed)===idOf(item)))];
+  return {...catalogs,subagent:merged(catalogs.subagent),executor:merged(catalogs.executor)};
+}
 // A worker's executorModel and executorEffort come from the calling chat's own rollout, not a stale input.
 function observedInput(input,threadId){
-  if(!threadId || !input.roles?.some(role=>role==='general'||role==='ui'))return input;
+  const full={...input,catalogs:withInstalled(input.catalogs)};
+  if(!threadId || !input.roles?.some(role=>role==='general'||role==='ui'))return full;
   const observed=require('./model-fallback.cjs').settingsOf(threadId);
-  return observed?.model?{...input,executorModel:observed.model,...(observed.effort?{executorEffort:observed.effort}:{})}:input;
+  return observed?.model?{...full,executorModel:observed.model,...(observed.effort?{executorEffort:observed.effort}:{})}:full;
 }
 module.exports={resolve,observedInput};
 if(require.main===module){try{console.log(JSON.stringify(resolve(observedInput(JSON.parse(fs.readFileSync(process.argv[2],'utf8')),process.env.CODEX_THREAD_ID)),null,2));}

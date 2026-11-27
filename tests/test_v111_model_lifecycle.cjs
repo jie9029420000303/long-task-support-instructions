@@ -79,7 +79,9 @@ function sandbox(t,{state={},preferred,policy}={}) {
   const quota = (id,used,{window=10080,reset=Math.floor(Date.now()/1000)+86400,slot='primary',limit='codex'}={}) => line(rollout(id),{
     timestamp:now(),type:'event_msg',payload:{type:'token_count',rate_limits:{limit_id:limit,[slot]:{used_percent:used,window_minutes:window,resets_at:reset}}}
   });
-  return {quota,context,catalog,run,env,rollout,config:path.join(proxyHome,'config.json'),state:()=>read(stateFile),
+  // What OpenCodex offers: model-route adds this catalog to the tool list it is given (v1.21.3).
+  const offer = ids => write(catalog,{models:ids.map(id=>({slug:id,visibility:'list',supported_reasoning_levels:[{effort:'high'},{effort:'max'}]}))});
+  return {quota,context,catalog,offer,run,env,rollout,config:path.join(proxyHome,'config.json'),state:()=>read(stateFile),
     resolveWorker(input,threadId){
       const file=path.join(root,'worker-input.json');
       write(file,input);
@@ -204,13 +206,17 @@ test('a fourth-route 429 continues the same executor on the other eligible model
 test('the dispatch resolver gives an open-source worker DeepSeek first at max whatever the executor runs, and nothing it cannot offer',t=>{
   const f=sandbox(t);
   const inventory=fourths.map(id=>({id,efforts:['max']}));
+  f.offer(fourths);
   assert.equal(f.resolveWorker({supervisorModel:sol,executorModel:sol,roles:['general'],catalogs:{subagent:inventory}}).status,'unavailable','under the subscription Sol');
   for(const model of [...fourths,'openai-apikey/'+sol]){
     const input={supervisorModel:sol,executorModel:model,roles:['general'],catalogs:{subagent:inventory}};
     const worker=f.resolveWorker(input);
     assert.deepEqual([worker.status,worker.model,worker.effort],['ready',deepseek,'max'],'under '+model);
+    f.offer([muse]);
     assert.equal(f.resolveWorker({...input,catalogs:{subagent:[{id:muse,efforts:['max']}]}}).model,muse,'Muse when DeepSeek is not offered');
+    f.offer([]);
     assert.equal(f.resolveWorker({...input,catalogs:{subagent:[]}}).status,'unavailable');
+    f.offer(fourths);
   }
 });
 
@@ -228,6 +234,7 @@ test('at the 4th failure the worker takes the model the executor actually runs, 
 test('workers follow the refreshed supplier list and never select an empty or inconsistent route',t=>{
   const f=sandbox(t),config=read(f.config),rules=config.providers.openrouter.modelOpenRouterRouting;
   const raw='deepseek/deepseek-v4.1-flash-1017',model=deepseek;
+  f.offer([model]);
   const worker=rule=>{
     rules[raw]=rule;write(f.config,config);
     return f.resolveWorker({supervisorModel:sol,executorModel:model,roles:['general'],catalogs:{subagent:[{id:model,efforts:['max']}]}});

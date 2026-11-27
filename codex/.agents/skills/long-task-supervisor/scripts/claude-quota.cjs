@@ -15,6 +15,8 @@
 // (Jay 2026-11-25「能否在剩下2%時長任務就跳過openai帳號，但不用切暫停」, 2026-11-26 decision 26).
 const fs=require('node:fs');
 const path=require('node:path');
+const os=require('node:os');
+const crypto=require('node:crypto');
 const {execFile}=require('node:child_process');
 const LADDER=[50,35,24,16,10,6,3,1], FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000, OPENAI_FLOOR=2;
 // How many steps later than the subagents each role starts stepping down (decision 24).
@@ -211,15 +213,32 @@ function temporary(run){
   const tmp=real(process.env.LONG_TASK_TEMP_ROOT||require('node:os').tmpdir()),at=real(run);
   return at===tmp||at.startsWith(tmp+require('node:path').sep);
 }
-// Reads every 30 minutes and once just after any account reset (Q51 C). force reads at once: the watcher reads again
+// The OpenCodex settings a reading and the routes depend on: account labels (「共用」), stop lines, the providers and
+// models switched on, and the model catalog. Their fingerprint is taken on every pass and a change reads at once
+// (Jay 2026-11-27「這個技能對opencodex裡面的各類相關設定應該要有即時掌握的機制 ... 要固化成程式程序」): a stop line or a
+// label changed at 23:00 used to wait for the next 30-minute reading. Credentials are left out, so a token refresh does
+// not count; the catalog counts by its size and time, since it is 1.6 MB.
+function settingsFingerprint(){
+  const home=process.env.OPENCODEX_HOME||path.join(os.homedir(),'.opencodex');
+  const json=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
+  const auth=json(path.join(home,'auth.json'));
+  const accounts=provider=>(auth?.[provider]?.accounts||[]).map(({id,alias,autoSwitchThresholdOverride})=>({id,alias,autoSwitchThresholdOverride}));
+  const codexHome=process.env.CODEX_HOME||path.join(os.homedir(),'.codex');
+  const catalog=[process.env.OPENCODEX_MODEL_CATALOG,path.join(codexHome,'opencodex-catalog.json')].filter(Boolean).map(file=>{
+    try{const stat=fs.statSync(file);return [file,stat.size,stat.mtimeMs];}catch{return [file,null];}
+  });
+  const settings={anthropic:accounts('anthropic'),chatgpt:accounts('chatgpt'),config:json(path.join(home,'config.json')),catalog};
+  return crypto.createHash('sha256').update(JSON.stringify(settings)).digest('hex');
+}
+// Reads every 30 minutes, once just after any account reset (Q51 C) and whenever the OpenCodex settings change. force reads at once: the watcher reads again
 // right before it switches a chat, so a reset nobody announced (a reset offer, or one the provider made itself) counts
 // in that switch (Jay 2026-11-27 decision 45). Returns true when the decision changed.
 async function refresh(state,now=Date.now(),run=null,{force=false}={}){
-  const known=state.claudeQuota;
-  if(!force&&known&&now<known.nextReadAt)return false;
+  const known=state.claudeQuota, settings=settingsFingerprint();
+  if(!force&&known&&now<known.nextReadAt&&known.settings===settings)return false;
   if(!process.env.LONG_TASK_CLAUDE_QUOTA_FILE&&run&&temporary(run)){
     state.claudeQuota={at:now,step:0,available:null,unconfigured:true,ladder:LADDER,accounts:[],
-      openai:evaluateOpenAI(null,now),nextReadAt:now+READ_EVERY_MS};
+      openai:evaluateOpenAI(null,now),nextReadAt:now+READ_EVERY_MS,settings};
     return !known||!known.unconfigured;
   }
   // The ledger is read before OpenCodex, so a pause the other run just made shows in this reading.
@@ -237,6 +256,7 @@ async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   const resets=[result.nextResetAt,result.openai.resetAt].filter(at=>Number.isFinite(at)&&at>now);
   result.nextResetAt=resets.length?Math.min(...resets):null;
   result.nextReadAt=nextReadAt(result,now);
+  result.settings=settings;
   const changed=!known||known.step!==result.step||known.openai?.held!==result.openai.held||actions.length>0;
   state.claudeQuota=result;
   return changed;
