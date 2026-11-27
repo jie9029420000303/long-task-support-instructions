@@ -6,9 +6,9 @@
 // never counted. The supervisor writes each criterion's expectation when the case opens, from the previous version's
 // same case, production, the requirement documents or Jay's words, and proxies one with its basis when none exists. It is
 // the supervisor's plan beside the locked contract, like the segment table; raising or removing one needs Jay's words.
-// A real run is an attempt row in acceptance-history.jsonl. One that took longer than its case's expectation cannot pass:
-// the run counts once per criterion and candidate revision toward the rework count (rework.cjs), and the supervisor
-// cannot accept the criterion while the latest run of a case is too slow or missing.
+// A real run is an attempt row in acceptance-history.jsonl. One that took longer than its case's expectation cannot pass,
+// and a run that failed, too slow or unfinished, counts once per criterion and candidate revision toward the rework count
+// (rework.cjs); the supervisor cannot accept the criterion while the latest run of a case is too slow or missing.
 'use strict';
 const fs=require('node:fs'),path=require('node:path');
 const contract=require('./contract-state.cjs');
@@ -63,19 +63,19 @@ function write(run,binding,input,known){
   return {recorded:true,file,criteria:Object.keys(next),...(looser.length?{loosened:looser}:{})};
 }
 const minutesOf=row=>(Date.parse(row.finishedAt)-Date.parse(row.startedAt))/60000;
-// The verdict a new attempt adds, or null. A run over its limit cannot be recorded as PASS; FAIL counts once per
-// criterion and revision. BLOCKED and INCONCLUSIVE say nothing about the work, as for formal runs.
+// The verdict a new attempt adds, or null. A run over its limit cannot be recorded as PASS; a FAIL, too slow or
+// unfinished (decision 47), counts once per criterion and revision, and not again when the same attempt already counted
+// as a formal run. BLOCKED and INCONCLUSIVE say nothing about the work, as for formal runs.
 function judge(criteria,row,history,at=new Date().toISOString()){
   const expectation=criteria[row.criterionId];
   if(!expectation)return null;
-  const minutes=minutesOf(row),limit=limitOf(expectation,row.caseId);
-  if(minutes<=limit)return null;
-  const where=row.criterionId+' 的案例 '+row.caseId+' 實跑 '+round(minutes)+' 分，超過效率預期 '+limit+' 分（'+expectation.basis+'）';
-  need(row.outcome!=='PASS',where+'：這次不能記 PASS，改記 FAIL（程式會計入這條的不合格次數）');
+  const minutes=minutesOf(row),limit=limitOf(expectation,row.caseId),slow=minutes>limit;
+  const where=row.criterionId+' 的案例 '+row.caseId+' 實跑 '+round(minutes)+' 分'+(slow?'，超過效率預期 '+limit+' 分（'+expectation.basis+'）':'，沒有完成：'+row.reason);
+  need(!slow||row.outcome!=='PASS',where+'：這次不能記 PASS，改記 FAIL（程式會計入這條的不合格次數）');
   if(row.outcome!=='FAIL')return null;
-  if(history.some(r=>r.kind==='verdict'&&r.source==='efficiency'&&r.criterionId===row.criterionId&&r.revision===row.revision))return null;
+  if(history.some(r=>r.kind==='verdict'&&(r.attemptId===row.id||r.source==='efficiency'&&r.criterionId===row.criterionId&&r.revision===row.revision)))return null;
   return {kind:'verdict',criterionId:row.criterionId,outcome:'FAIL',source:'efficiency',attemptId:row.id,caseId:row.caseId,revision:row.revision,
-    minutes:round(minutes),limit,reason:where,at};
+    ...(row.packageId?{packageId:row.packageId}:{}),minutes:round(minutes),limit,reason:where,at};
 }
 // Whether a criterion with an expectation may pass: every case named in it, and every case run so far, has a latest run
 // that passed within its limit. Returns the problems, empty when it may pass.
@@ -109,7 +109,7 @@ function recordRun(run,binding,input){
   const started=contract.exactTime(input.startedAt),finished=contract.exactTime(input.finishedAt);
   need(started!==null&&contract.notLater(finished)&&finished>=started,'startedAt、finishedAt 要是實際開始與結束時間（含日期、時間與時區，不晚於現在）');
   const row={kind:'attempt',criterionId:input.criterionId,id:text(input.id)?input.id:input.caseId+'@'+input.startedAt,caseId:input.caseId,revision:input.revision,
-    outcome:input.outcome,reason:input.reason,evidence:input.evidence,startedAt:input.startedAt,finishedAt:input.finishedAt};
+    outcome:input.outcome,reason:input.reason,evidence:input.evidence,startedAt:input.startedAt,finishedAt:input.finishedAt,...(text(input.packageId)?{packageId:input.packageId}:{})};
   const rows=history(run),prior=rows.find(r=>r.kind==='attempt'&&r.criterionId===row.criterionId&&r.id===row.id);
   if(prior){need(JSON.stringify(prior)===JSON.stringify(row),'這筆實跑已登記過、內容不同：'+row.id);return {recorded:row.id,duplicate:true};}
   const verdict=judge(expectations(run),row,rows);

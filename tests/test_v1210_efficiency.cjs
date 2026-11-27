@@ -51,7 +51,7 @@ for(const [platform,scripts] of Object.entries(PLATFORMS)){
     assert.deepEqual(efficiency.write(f.root,f.binding,{criteria:{C1:{...table.C1,cases:{A:30}}},authority},known).loosened,['C1']);
   });
 
-  test(platform+': a run over its limit cannot be PASS, and a slow FAIL counts once per criterion and revision',()=>{
+  test(platform+': a run over its limit cannot be PASS, and a slow or unfinished FAIL counts once per criterion and revision',()=>{
     const criteria={C1:table.C1};
     assert.equal(efficiency.judge(criteria,attempt('A',13),[]),null,'within the limit adds nothing');
     assert.throws(()=>efficiency.judge(criteria,attempt('A',15)),/不能記 PASS/);
@@ -60,6 +60,11 @@ for(const [platform,scripts] of Object.entries(PLATFORMS)){
     assert.deepEqual([verdict.source,verdict.limit,verdict.minutes],['efficiency',20,25],'a case without its own limit takes the criterion\'s');
     assert.equal(efficiency.judge(criteria,attempt('A',16,'FAIL'),[verdict]),null,'the same revision already counted');
     assert.ok(efficiency.judge(criteria,attempt('A',16,'FAIL','r2'),[verdict]),'a new revision counts again');
+    // Decision 47: a run that did not finish fails its criterion even within the time.
+    const unfinished=efficiency.judge(criteria,attempt('A',5,'FAIL','r3'),[]);
+    assert.match(unfinished.reason,/沒有完成/);
+    const formal={kind:'verdict',criterionId:'C1',outcome:'FAIL',source:'formal',attemptId:attempt('A',5,'FAIL','r4').id};
+    assert.equal(efficiency.judge(criteria,attempt('A',5,'FAIL','r4'),[formal]),null,'a formal run already counted this attempt');
   });
 
   test(platform+': the criterion may pass only when the latest run of every case passed within its limit',()=>{
@@ -74,7 +79,7 @@ for(const [platform,scripts] of Object.entries(PLATFORMS)){
 
   test(platform+': the mainline records a slow run and the criterion is then held from acceptance',t=>{
     const f=fixture(t,platform);efficiency.write(f.root,f.binding,{criteria:table},known);
-    const input={criterionId:'C1',caseId:'A',revision:'r1',outcome:'FAIL',reason:'7 份未讀完',evidence:[f.p('source')],startedAt:at(0),finishedAt:at(120)};
+    const input={criterionId:'C1',caseId:'A',revision:'r1',packageId:'P1',outcome:'FAIL',reason:'7 份未讀完',evidence:[f.p('source')],startedAt:at(0),finishedAt:at(120)};
     save(f.p('run.json'),input);
     const sub=cli('efficiency.cjs',['run',f.root,f.p('run.json')],{CODEX_THREAD_ID:'sub-1',CODEX_SESSION_ID:'top-1'});
     assert.equal(sub.status,1);assert.match(sub.stderr,/子代理不能登記實跑/);
@@ -85,6 +90,8 @@ for(const [platform,scripts] of Object.entries(PLATFORMS)){
     assert.deepEqual(rows.map(r=>r.kind+':'+(r.source||'')),['attempt:','verdict:efficiency']);
     const rework=require(path.join(scripts,'rework.cjs'));
     assert.equal(rework.tally(rows).get('C1').failures.length,1,'the slow run is one failure of C1');
+    assert.deepEqual(rework.verdictRows(f.root,f.binding,{id:'P1',verdict:{kind:'fail',reason:'too slow',criteria:['C1']},before:{acceptanceIds:['C1']}}),[],
+      'the mainline judging the same package failed does not count the slow run twice');
     save(f.p('dispatch.json'),{packages:{inFlight:[{id:'P1',acceptanceIds:['C1'],submission:{revision:'r1',manifest:'m'}}]}});
     const event={kind:'submission',revision:'r1',manifest:'m'};
     assert.throws(()=>rework.scope(f.root,f.binding,event,{disposition:'reply',packageRulings:[{id:'P1',accepted:['C1'],remaining:[]}]}),/C1 不能採認/);
