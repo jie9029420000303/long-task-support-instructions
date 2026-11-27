@@ -186,6 +186,7 @@ function save(run,binding,value){
   review?.validateSnapshot(value,previous,run,binding);
   formal.dispatchCheck(run,value,previous);
   rework.dispatchCheck(run,value,previous);
+  require('./efficiency.cjs').dispatchCheck(run,value,previous);
   acceptance.record(run,value.acceptance,output);
   fs.writeFileSync(temporary,JSON.stringify(value,null,2)+'\n',{flag:'wx'});
   fs.renameSync(temporary,output);

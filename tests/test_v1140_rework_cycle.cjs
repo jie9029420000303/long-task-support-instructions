@@ -130,8 +130,14 @@ for(const [platform,scripts] of [['codex',CODEX],['claude',CLAUDE]]){
     assert.equal(run(scripts,'dispatch.cjs',['summary',f.root],{CODEX_THREAD_ID:'sub-1',CODEX_SESSION_ID:'top-1'}).status,0);
     // Registering research lifts a hold, so it is the mainline's too.
     f.fail('P1');f.fail('P1b');save(f.p('waive.json'),{criterionId:'C1',directCauses:['a','b'],reason:'setting'});
-    const research=run(scripts,'rework.cjs',['waive',f.root,f.p('waive.json')],{CODEX_THREAD_ID:'sub-1',CODEX_SESSION_ID:'top-1'});
-    assert.equal(research.status,1);assert.match(research.stderr,/子代理不能登記研究/);
+    // Waiving research takes the supervisor's approval (Jay 2026-11-27 decision 49): neither a subagent nor the mainline
+    // can register it, only the bound supervisor.
+    const bySub=run(scripts,'rework.cjs',['waive',f.root,f.p('waive.json')],{CODEX_THREAD_ID:'sub-1',CODEX_SESSION_ID:'top-1',CLAUDE_SESSION_ID:'sub-1'});
+    assert.equal(bySub.status,1);assert.match(bySub.stderr,/「不需研究」要監督核可/);
+    const byMain=run(scripts,'rework.cjs',['waive',f.root,f.p('waive.json')],{CODEX_THREAD_ID:'top-1',CODEX_SESSION_ID:'top-1',CLAUDE_SESSION_ID:'top-1'});
+    assert.equal(byMain.status,1);assert.match(byMain.stderr,/「不需研究」要監督核可/);
+    const bySupervisor=run(scripts,'rework.cjs',['waive',f.root,f.p('waive.json')],{CODEX_THREAD_ID:'supervisor-chat',CODEX_SESSION_ID:'supervisor-chat',CLAUDE_SESSION_ID:'supervisor-chat'});
+    assert.equal(bySupervisor.status,0,bySupervisor.stderr);
   });
 
   // A question about changing acceptance has to say which criterion it is stuck on (Jay 2026-11-24, 代決原則), so the

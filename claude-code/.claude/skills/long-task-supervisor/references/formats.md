@@ -46,4 +46,5 @@
 - 時間條件用直接觸發或縮短時間驗（監督代決，不問使用者）；不自排「幾點以後」；驗收收尾附上線後觀察清單（含條文沒寫也不重要、記成代決的問題）。
 - 候選版與定版：執行端為中途候選發正式版時請它改以 commit 部署；真實環境情境在同一個候選走完一輪、沒有要改程式的新缺陷與未決新需求時，用 reply 通知定版；定版後才正式發版與寫帶版本內容的文件，候選上的真實環境結果依影響清單沿用，契約寫明同一版本的項目照條文在定版後做。
 - 區段表：`supervise.cjs segments RUN <檔>`，檔案 `{"segments":[{"id":"S1","title":"…","criteria":["A1","A2"],"dependsOn":[]}]}`；區段送驗用逐包裁決的 `accepted` 採認通過的條文。所有區段通過後只重測聯動範圍，再依技能 `templates/` 的範本寫真人QA驗收腳本，交付後登記 `user_action` 等驗收結果（見 acceptance「結案與真人QA」）。
+- 效率預期：`supervise.cjs efficiency RUN <檔>`（監督寫，檔案 `{"criteria":{"I23":{"maxMinutes":14,"cases":{"PDS26020017":14},"basis":"…"}}}`，調高或移除要附使用者原話 `authority`）。實跑由執行主線登記 `efficiency.cjs run RUN <檔>`（criterionId、caseId、revision、startedAt、finishedAt、outcome、reason、evidence），實跑包的時程基準用 `efficiency.cjs baseline RUN --criterion <ID> --cases <A,B>`，目前內容用 `efficiency.cjs show RUN`（見 acceptance「效率預期」）。
 - 登記要問使用者的事時，同一則回覆點名執行端接著做的不相關工作；等使用者核准的 wait 填 `"dependsOn":[{"id":"條文 ID","pendingKey":"待決 key","reason":"為何依賴"}]`，涵蓋每個未通過條文且沒有可派工作包，才會靜音閒置與整點提醒。

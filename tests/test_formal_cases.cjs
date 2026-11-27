@@ -79,7 +79,7 @@ for (const scripts of roots) {
     Object.assign(newPackage.packages.inFlight[0],{id:'P3',caseIds:['suite-2'],caseMap:{'suite-2':'2'}});
     assert.match(dispatch(newPackage,1).stderr,/C1 已累計 2 次不合格，P3 先不派/);
     const experiment=p('experiment');fs.writeFileSync(experiment,'Confirmed example');
-    const research={criterionId:'C1',directCauses:['receipt a: FAIL','receipt b: FAIL'],commonCause:'same candidate defect',workPackage:'P2',excluded:'different target excluded',
+    const research={criterionId:'C1',directCauses:['receipt a: FAIL','receipt b: FAIL'],commonCause:'same candidate defect',workPackage:'P2',excluded:'different target excluded',environment:'fixture host, temp RUN',software:'node test runner',
       sources:[{url:'https://example.org/test',checkedAt:'2025-01-01T00:00:00Z'}],experiment,experimentPassed:true,solution:'use revised candidate'};
     write(p('research.json'),{...research,experimentPassed:false});
     assert.match(call('rework.cjs',['research',root,p('research.json')],1).stderr,/experiment/);

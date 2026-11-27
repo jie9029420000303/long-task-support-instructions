@@ -15,7 +15,7 @@ exit 2 把原因交回模型自行修正。絕不用 ask 跳確認框（長任�
   9 小時 57 分，期間送驗沒人處理）。
 - G1＋G2 PreToolUse(Agent)：派 lt-* 子代理時，工作包要有 [工作區]／[可修改範圍]／[共用資源]；
   新包從基準檔起跳；不合格次數累計、研究後不歸零（使用者 2026-11-26 定案，取代 2026-11-23 的升兩檔、研究歸零）：
-  第 1、3、5 次交回原子代理同檔重做（新開也不得升檔）；第 2、4、6 次先派 xhigh 研究，研究登記（工作包寫
+  第 1、3、5 次交回原子代理同檔重做（新開也不得升檔）；第 2、4、6 次先派研究（主線的模型與 effort，2026-11-27 決策 50），研究登記（工作包寫
   [研究登記] <次數>）後才能重派：第 2 次升兩檔（最高 max），第 4 次與主線同模型同推理（只有這時可帶 model 參數）；
   第 6 次研究後交使用者裁決，裁決前不派，裁決後主線把狀態檔次數改回 0。工作包＝派工提示加上它引用的 wp 檔
   （技能規定 prompt 先存成 <狀態目錄>/wp/<id>.md，派工訊息常只引用該檔）。錯誤次數以狀態檔工作包表為準，
@@ -36,10 +36,10 @@ from pathlib import Path
 
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 BASE = {"visual-checker": "medium", "tech-worker": "medium", "researcher": "medium", "ui-tester": "low"}
-RESEARCH = "xhigh"
 STUDY_AT = (2, 4, 6)
 JAY_AT = 6
 MAINLINE_AT = 4
+RESEARCH_AGENT = "研究工作包派 lt-researcher-<主線的 effort>，Agent 的 model 參數填主線的模型；研究範圍含開發與測試驗收環境條件、使用的套件與軟體背景"
 STUDIED = re.compile(r"^\[研究登記\]\s*(\d+)\s*$", re.M)
 AGENT = re.compile(r"^lt-(visual-checker|tech-worker|researcher|ui-tester)-(low|medium|high|xhigh|max)$")
 PRIOR = re.compile(r"^\[上次推論\]\s*(low|medium|high|xhigh|max)\s*$", re.M)
@@ -304,11 +304,12 @@ def check(data, subagent_type, prompt, fallback_id=None):
             if errors is not None:
                 source = state
                 break
-    # A research package answers its parent's 2nd, 4th or 6th unsuccessful delivery and runs at xhigh.
+    # A research package answers its parent's 2nd, 4th or 6th unsuccessful delivery and runs on the mainline's own model
+    # and effort (Jay 2026-11-27 decision 50; it ran on lt-researcher-xhigh, a Sonnet definition, before).
     parent = re.search(r"^\[研究來源工作包\]\s*([\w-]+)\s*$", work, re.M)
     if parent:
-        if (role, tier) != ("researcher", RESEARCH) or override and override != "sonnet":
-            return "block", f"研究工作包派 lt-researcher-{RESEARCH}（研究推論開 xhigh），不帶 model 參數。"
+        if role != "researcher":
+            return "block", RESEARCH_AGENT + "。"
         for state in states(data, wps):
             count = table_errors(state.read_text(encoding="utf-8", errors="replace"), parent.group(1))
             if count is not None:
@@ -325,7 +326,7 @@ def check(data, subagent_type, prompt, fallback_id=None):
     name = f"工作包{' ' + package if package else ''}"
     studied = [int(m) for m in STUDIED.findall(work)]
     if errors in STUDY_AT and errors not in studied:
-        return "block", (f"{name}已累計 {errors} 次不合格：先另派 lt-researcher-{RESEARCH} 上網研究失敗原因"
+        return "block", (f"{name}已累計 {errors} 次不合格：先另派研究子代理（{RESEARCH_AGENT}）上網研究失敗原因"
                          f"（研究工作包寫 [研究來源工作包] 原 id），研究交回後在工作包寫 [研究登記] {errors} 再派新的子代理。")
     if errors >= JAY_AT:
         return "block", (f"{name}已累計 {errors} 次不合格、研究也做了：交使用者裁決接下來怎麼做（受監督時監督在待決帳問他），"

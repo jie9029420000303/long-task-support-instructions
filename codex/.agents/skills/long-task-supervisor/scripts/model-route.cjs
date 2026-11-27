@@ -15,7 +15,9 @@ const baseline=role=>roles[role];
 // its context and its trail of the error). The 2nd and 4th go to research first; then the 2nd opens a new subagent two
 // efforts higher (an open-source model cannot go higher, so it moves to the next open-source stop: DeepSeek to Muse), and
 // the 4th opens one on the executor's own model and effort. The 6th goes to research and then to Jay (no model here).
-const CEILING='max',RESEARCH='xhigh',RAISE_AT=2,MAINLINE_AT=4,JAY_AT=6;
+// The research itself runs on the executor's own model and effort (Jay 2026-11-27 decision 50; it ran at xhigh on the
+// subagent ladder before, which put workspace E's research on DeepSeek at ladder step 4).
+const CEILING='max',RAISE_AT=2,MAINLINE_AT=4,JAY_AT=6;
 const isOpen=id=>openrouter().choices.some(route=>route.model===id);
 // The models of a role's order that this inventory offers, front first.
 function orderOf(role,catalog,fourth){
@@ -73,8 +75,8 @@ function resolve(input) {
     const allowed=usable.filter(item=>(stopIndex(item.id,side)??0)>=floorAt);
     let basis=Object.keys(override).length?'explicit-user-override':'role-policy', selected, restoreAfter;
     if(override.model)selected=catalog.find(x=>x.id===override.model);
-    else if(worker&&step===MAINLINE_AT&&!research){
-      // 4th: the executor's own model and effort.
+    else if(worker&&(step===MAINLINE_AT||research)){
+      // The 4th, and every research: the executor's own model and effort.
       selected=catalog.find(x=>x.id===executorModel)||(isOpen(executorModel)?{id:executorModel,efforts:['max']}:null);basis='executor-equivalent';
     }else if(worker&&step===RAISE_AT&&!research&&input.previousModel&&isOpen(input.previousModel)){
       // An open-source model cannot raise its effort: the next open-source stop stands for the raise (DeepSeek to Muse).
@@ -94,8 +96,7 @@ function resolve(input) {
     let effort,extra={};
     if(override.effort)effort=override.effort;
     else if(open)effort='max';
-    else if(worker&&step===MAINLINE_AT&&!research)effort=input.executorEffort||roles.executor;
-    else if(research)effort=RESEARCH;
+    else if(worker&&(step===MAINLINE_AT||research))effort=input.executorEffort||roles.executor;
     else if(worker&&step===RAISE_AT){
       const prior=input.previousEffort&&rank(input.previousEffort)>rank(baseline(role))?input.previousEffort:baseline(role);
       const want=Math.min(rank(prior)+2,rank(CEILING));

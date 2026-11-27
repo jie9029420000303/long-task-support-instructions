@@ -99,7 +99,7 @@ function effective(run,binding){
 // time and source hash, the effective contract hash stays the same, and Jay's open questions stay open. 2026-10-13 the
 // GDB move to Claude rebuilt a contract from the effective view instead and left Jay's grants behind (among them
 // 「代我回答所有執行對話」); the new supervisor then sent Jay five decision cards in 7.5 hours.
-const CARRIED=['contract.json','contract-amendments.jsonl','source-relocations.json','pending-decisions.json','segments.json'];
+const CARRIED=['contract.json','contract-amendments.jsonl','source-relocations.json','pending-decisions.json','segments.json','efficiency.json'];
 function inherit(previous,allowedRoots){
   need(typeof previous==='string'&&path.isAbsolute(previous)&&fs.existsSync(path.join(previous,'binding.json')),'inheritFrom must be the absolute path of an existing run');
   need(Array.isArray(allowedRoots),'Invalid allowed roots');

@@ -21,7 +21,7 @@
 └── agents/                         十二個子代理定義（4 角色 × 3 個 effort 檔）
     ├── lt-visual-checker-{medium,high,xhigh}.md   A 線視覺查核（唯讀＋瀏覽器）
     ├── lt-tech-worker-{medium,high,xhigh}.md      B 線技術實作（可編輯，git 寫入被 hook 擋）
-    ├── lt-researcher-{medium,high,xhigh}.md       不合格查因與解卡研究（唯讀＋WebFetch／WebSearch／瀏覽器；只能把來源快照存進 evidence/）
+    ├── lt-researcher-{medium,high,xhigh,max}.md       不合格查因與解卡研究（唯讀＋WebFetch／WebSearch／瀏覽器；只能把來源快照存進 evidence/）
     └── lt-ui-tester-{low,medium,high}.md          介面真實操作蒐證（唯讀＋瀏覽器）
 ```
 
@@ -46,7 +46,7 @@
 | 狀態保存 | Goal 物件 | `.claude/long-task/<slug>/state.md` | 需靠檔案，對話壓縮後以檔案為準 |
 | 主線模型 | 監督目前實際選定的模型 | 與監督同型的 session 模型 | 技能不能切換主模型；Codex 不以舊型號字串阻塞相容主線 |
 | 一般子代理 | 不論主線模型，依 Sonnet（訂閱→API）→ Terra（訂閱→API）→ DeepSeek → Muse，基準 medium（使用者 2026-11-26 定案） | `sonnet` @ medium | 以當回合派工工具核對可用性，鎖定時記實際模型與替代原因；Sonnet 基準 high 只改 Codex 版，Claude Code 版仍從 medium 起跳 |
-| 研究子代理（不合格查因、解卡研究） | 一般子代理 @ xhigh，指令約束「不決策、不改正式文件」 | `lt-researcher-{medium,high,xhigh}`：`tools` 無 Edit／Write／Agent，Bash 只能把來源快照寫進 evidence/；互斥議題以 `[共用資源] 議題:<slug>` 交給 `scope-overlap.py` 擋同議題並行 | 正式文件的 Write／Edit 只有主線做得到；子代理靠 WebFetch 讀來源，JS 渲染頁才用 Browser pane（受序列化限制） |
+| 研究子代理（不合格查因、解卡研究） | 不合格查因用主線的模型與 effort，解卡研究用一般子代理 @ xhigh，指令約束「不決策、不改正式文件」 | `lt-researcher-{medium,high,xhigh,max}`：`tools` 無 Edit／Write／Agent，Bash 只能把來源快照寫進 evidence/；互斥議題以 `[共用資源] 議題:<slug>` 交給 `scope-overlap.py` 擋同議題並行 | 正式文件的 Write／Edit 只有主線做得到；子代理靠 WebFetch 讀來源，JS 渲染頁才用 Browser pane（受序列化限制） |
 | 介面子代理 | 具瀏覽器／視覺能力中總成本最低者 @ Low | `sonnet` @ low | 未選 Haiku 4.5（不支援 effort 層級，會讓升檔失效） |
 | 升一檔 | 同模型改推理值 | 改派下一檔的 Agent 定義（effort 只能寫在定義檔） | 需 12 個定義檔；缺檔屬執行阻塞 |
 | 子代理不得 Git | 指令約束 | `tools` 排除 Agent／Edit／Write（依角色）＋ PreToolUse hook 擋 git/gh 寫入 | hook 只擋 Bash 內的 git／gh，其他不可逆操作仍靠指令與 CLAUDE.md |
