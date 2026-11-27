@@ -940,7 +940,10 @@ async function handleRateLimits({fresh=false}={}) {
   let dirty=fallback.migrateLimits(state);
   if(fallback.syncApiMonth(state,run))dirty=true;
   if(fallback.syncUnsupported(state,run))dirty=true;
-  if(await quota.refresh(state,Date.now(),run))dirty=true;
+  // A new reading is published even when the decision stays, so model-fallback.json shows the current share and
+  // thresholds (after v1.21.1 it kept the old thresholds' text until a step changed).
+  const readBefore=state.claudeQuota?.at;
+  if(await quota.refresh(state,Date.now(),run)||state.claudeQuota?.at!==readBefore)dirty=true;
   // A supervisor shared with another run is moved by one watcher only (model-fallback.cjs supervisorOwner). This one
   // leaves it alone: its own open switch of that supervisor is closed and nothing of it is queued or judged here.
   const ownsSupervisor=fallback.supervisorOwner(run,binding.supervisorId);

@@ -87,8 +87,11 @@ function verdictRows(run,binding,{id,verdict,before,tagIds,handle,at=new Date().
   need(text(verdict.reason),where+'：'+VERDICTS[verdict.kind]+'要寫 reason（fail 寫具體指正，external 寫是哪個外部原因）');
   if(verdict.kind==='external')return [];
   // A failed formal or real run of this package already counted itself (formalFailure, efficiency.cjs); judging the
-  // same delivery again does not count the one failure twice.
-  const counted=new Set(rows(run).filter(r=>r.kind==='verdict'&&['formal','efficiency'].includes(r.source)&&r.packageId===id).map(r=>r.criterionId));
+  // same delivery again does not count the one failure twice. Nor does collecting the same failed delivery twice: a
+  // package that stays in flight for its redo can be collected again with the same verdict.
+  const reason=verdict.reason.trim();
+  const counted=new Set(rows(run).filter(r=>r.kind==='verdict'&&r.packageId===id&&(['formal','efficiency'].includes(r.source)||
+    r.source==='executor'&&r.handle===(handle||null)&&r.reason===reason)).map(r=>r.criterionId));
   return criteriaFor(run,binding,verdict.criteria,before.acceptanceIds||tagIds,where).filter(criterionId=>!counted.has(criterionId)).map(criterionId=>({kind:'verdict',criterionId,outcome:'FAIL',source:'executor',
     packageId:id,handle:handle||null,reason:verdict.reason.trim(),at}));
 }

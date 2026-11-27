@@ -364,3 +364,18 @@ test('the watcher puts a supervisor moved for consecutive failures back on Opus 
   }finally{await f.stop();}
 });
 
+
+// v1.21.2 (Jay 2026-11-27「A」): every new reading is published, also when the step stays. After v1.21.1 the run's
+// model-fallback.json kept the old thresholds' text because the share stayed on step 1.
+test('a new quota reading is published even when the ladder step stays',async()=>{
+  const f=fixture({quotaData:reading(Date.now(),{big:40})});
+  const old=Date.now()-31*MINUTE,state=read(f.statePath);
+  state.claudeQuota={at:old,step:0,available:99,ladder:[50,43,36,29,22,15,8,1],accounts:[],openai:{held:false,floor:2,accounts:[]},nextReadAt:old+30*MINUTE};
+  save(f.statePath,state);
+  save(path.join(f.run,'model-fallback.json'),{ladder:{step:0,available:99,thresholds:[50,43,36,29,22,15,8,1]},updatedAt:new Date(old).toISOString()});
+  try{
+    f.start();
+    await until(()=>peek(path.join(f.run,'model-fallback.json'))?.ladder?.available===57);
+    assert.deepEqual(read(path.join(f.run,'model-fallback.json')).ladder.thresholds,quota.LADDER);
+  }finally{await f.stop();}
+});

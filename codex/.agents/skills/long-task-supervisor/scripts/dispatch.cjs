@@ -42,9 +42,12 @@ function collected(file){
   if(missing.length)throw Error('RESULT_JSON evidence does not exist: '+missing.join(', '));
   return {state,updates,ruling:input.ruling,verdict:input.verdict};
 }
-// A delivery from a subagent: the package leaves flight from a subagent handle and no supervisor ruling is applied.
+// A delivery from a subagent: the package leaves flight from a subagent handle, or is judged failed and stays in flight
+// to go back to the same subagent (the 1st, 3rd and 5th failure, decision 33), and no supervisor ruling is applied.
+// Before, only leaving flight counted: on workspace E the mainline collected WP-E-WIRING-C59 as failed and in flight at
+// 20:15 on 2026-11-27, the count stayed at 2, and the redo went to a new subagent instead of the same one.
 const fromSubagent=(before,result)=>before.list==='inFlight'&&typeof before.handle==='string'&&before.handle!=='main'&&
-  !before.handle.startsWith('resource:')&&result.state.list!=='inFlight'&&!result.ruling;
+  !before.handle.startsWith('resource:')&&(result.state.list!=='inFlight'||result.verdict?.kind==='fail')&&!result.ruling;
 // Fewer bookkeeping calls (Jay 2026-11-12; A WebRPA's main line made 516 collect and 150 estimate calls in five days,
 // 160 collects within 3 minutes of another and 81 estimates next to a mark, each call carrying its whole context):
 // collect takes several packages in one validated write, and mark --estimate fills the in-flight baseline with the

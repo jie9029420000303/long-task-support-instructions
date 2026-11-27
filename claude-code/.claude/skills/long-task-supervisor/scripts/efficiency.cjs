@@ -69,7 +69,8 @@ const minutesOf=row=>(Date.parse(row.finishedAt)-Date.parse(row.startedAt))/6000
 function judge(criteria,row,history,at=new Date().toISOString()){
   const expectation=criteria[row.criterionId];
   if(!expectation)return null;
-  const minutes=minutesOf(row),limit=limitOf(expectation,row.caseId),slow=minutes>limit;
+  // Minutes to one decimal, as the criteria state them: 841 seconds is 14.0 minutes and meets a 14.0 limit.
+  const minutes=minutesOf(row),limit=limitOf(expectation,row.caseId),slow=round(minutes)>limit;
   const where=row.criterionId+' 的案例 '+row.caseId+' 實跑 '+round(minutes)+' 分'+(slow?'，超過效率預期 '+limit+' 分（'+expectation.basis+'）':'，沒有完成：'+row.reason);
   need(!slow||row.outcome!=='PASS',where+'：這次不能記 PASS，改記 FAIL（程式會計入這條的不合格次數）');
   if(row.outcome!=='FAIL')return null;
@@ -90,7 +91,7 @@ function blockers(criteria,history,criterionId){
   for(const caseId of cases){
     const row=latest.get(caseId),limit=limitOf(expectation,caseId);
     if(!row)out.push(criterionId+' 的案例 '+caseId+' 沒有實跑紀錄');
-    else if(row.outcome!=='PASS'||minutesOf(row)>limit)out.push(criterionId+' 的案例 '+caseId+' 最近一次實跑 '+row.outcome+'、'+round(minutesOf(row))+' 分（效率預期 '+limit+' 分）');
+    else if(row.outcome!=='PASS'||round(minutesOf(row))>limit)out.push(criterionId+' 的案例 '+caseId+' 最近一次實跑 '+row.outcome+'、'+round(minutesOf(row))+' 分（效率預期 '+limit+' 分）');
   }
   return out;
 }

@@ -33,7 +33,7 @@
 
 - **開案寫入**：監督建契約時，替每條含真實實跑的條文寫效率預期，內容是每個案例實跑的上限分鐘、參考值與出處。參考值依序取前版同案例實測、正式站實測、需求文件或使用者原話，都沒有時由監督代決並寫依據。隨 `init` 的 `efficiency` 寫入，或用 `supervise.cjs efficiency RUN FILE`，檔案 `{"criteria":{"I23":{"maxMinutes":14,"cases":{"PDS26020017":14},"basis":"參考值與出處"}}}`（`cases` 沒列的案例用 `maxMinutes`）。進行中的任務補寫或調嚴由監督直接寫，不問使用者。調高或移除要附使用者原話 `authority`（格式同契約修訂），否則程式拒收。
 - **登記實跑**：每次實跑由執行主線登記一筆，用 `efficiency.cjs run RUN INPUT.json`（criterionId、caseId、revision、startedAt、finishedAt、outcome、reason、evidence，有工作包時加 packageId），或照原本的正式實測（`formal-case.cjs`）與派工快照的 `lastAttempt`。沒讀完記 FAIL。
-- **程式判定**：實跑超過該案例上限不能記 PASS，要記 FAIL。超時或沒讀完的 FAIL 由程式計入這條的不合格次數，同一條文同一候選版只計一次，主線再判同一工作包不合格也不重複計，BLOCKED、INCONCLUSIVE 不計。監督採認這條，或派工快照把這條改成 PASS 時，程式要求效率預期列出的每個案例和跑過的每個案例，最近一次實跑都是 PASS 且在上限內。
+- **程式判定**：實跑分鐘數取到小數一位（841 秒算 14.0 分），超過該案例上限不能記 PASS，要記 FAIL。超時或沒讀完的 FAIL 由程式計入這條的不合格次數，同一條文同一候選版只計一次，主線再判同一工作包不合格也不重複計，BLOCKED、INCONCLUSIVE 不計。監督採認這條，或派工快照把這條改成 PASS 時，程式要求效率預期列出的每個案例和跑過的每個案例，最近一次實跑都是 PASS 且在上限內。
 - **做不到時**：照不合格循環處理，第 6 次研究後由使用者裁決。進行中不另外為效率問使用者，也不靠改大時程基準或放大逾時上限讓實跑跑完。實跑包的時程基準用效率預期（見 dispatch 的 `efficiency.cjs baseline`）。
 
 ## 換版與有效證據
