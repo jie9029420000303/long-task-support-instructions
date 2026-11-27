@@ -36,16 +36,19 @@ function resolve(input) {
   if(input.errors!==undefined)throw Error('errors 已改為 failures：這條驗收條文目前累計的不合格次數（rework.cjs status 的 failures），0 到 5');
   if(!main&&!openrouter().choices.some(r=>r.model===input.executorModel||r.model===input.supervisorModel))return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
   const result={family:main?.family||'openrouter',provider:main?.provider||'openrouter/',supervisorModel:input.supervisorModel,roles:{}};
-  let limits={},openaiHeld=false,floors={};
+  let limits={},openaiHeld=false,floors={},apiMonth=null;
   if(input.fallback){
     // The watcher publishes the executor side's limits, the ladder floor of each role and whether the OpenAI
     // subscription is out; before its first reading nothing is held here and the watcher moves the mainline later.
     try{const published=JSON.parse(fs.readFileSync(input.fallback,'utf8'));limits=published.limits||{};floors=published.ladder?.floors||{};
-      openaiHeld=published.openaiQuota?.subscriptionHeld===true;}
+      openaiHeld=published.openaiQuota?.subscriptionHeld===true;apiMonth=published.apiMonth||null;}
     catch(error){if(error.code!=='ENOENT')throw error;} // A new run has no limit ledger yet.
   }
   const refused=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now()||isOpen(id)&&Date.parse(limits['openrouter/']?.until)>Date.now()||
-    Boolean(billingAccount(id))&&Date.parse(limits[billingAccount(id)]?.until)>Date.now();
+    Boolean(billingAccount(id))&&Date.parse(limits[billingAccount(id)]?.until)>Date.now()||
+    // The Claude API out for the month, as the watcher skips it (model-fallback.cjs refused). Before, workers were still
+    // routed to it: workspace E's C67 went to the Sonnet API at 22:18 on 2026-11-27 and was refused at once.
+    keyOf(id)==='anthropic-apikey/'&&Date.parse(apiMonth?.until)>Date.now();
   const serving=id=>!refused(id)&&!(openaiHeld&&subscriptionOpenAI(id));
   const failures=input.failures??0;
   if(!Number.isInteger(failures)||failures<0)throw Error('failures 是這條驗收條文累計的不合格次數（不歸零），0 以上的整數');
