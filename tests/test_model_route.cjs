@@ -48,9 +48,11 @@ test('every role takes the Claude API key as its second stop',()=>{
  const r=resolve({supervisorModel:opus,roles:['executor','general'],catalogs:{executor:[item(apiOpus),item(sol)],subagent:[item(apiSonnet),item(terra)]}});
  assert.deepEqual(pick(r),{executor:[apiOpus,'xhigh'],general:[apiSonnet,'medium']});
 });
-// Decision 20: workers follow their own order whatever the mainline runs; a Sol mainline still gets Sonnet first.
-test('workers follow the subagent order whatever the mainline runs, and never fall to Haiku',()=>{
- assert.equal(resolve({...base(),executorModel:sol,catalogs:{executor:[item(sol)],subagent:[item(sonnet),item(terra)]}}).roles.general.model,sonnet);
+// Decision 20: workers follow their own order whatever the mainline runs, except under a mainline on the ChatGPT
+// subscription, which can only hand work to the subscription Terra (2026-11-27 decision 37).
+test('workers follow the subagent order, a mainline on the ChatGPT subscription gets the subscription Terra, and none falls to Haiku',()=>{
+ assert.equal(resolve({...base(),executorModel:sol,catalogs:{executor:[item(sol)],subagent:[item(sonnet),item(terra)]}}).roles.general.model,terra);
+ assert.equal(resolve({...base(),executorModel:opus,catalogs:{executor:[item(opus)],subagent:[item(sonnet),item(terra)]}}).roles.general.model,sonnet);
  const catalog=[item('gpt-6.9-terra'),item('gpt-6.10-terra'),{...item('gpt-7.0-terra'),visibility:'hide'},item('anthropic/claude-haiku-5-5')];
  assert.equal(resolve({supervisorModel:opus,executorModel:sol,roles:['general'],catalogs:{subagent:catalog}}).roles.general.model,'gpt-6.10-terra','the visible numerically latest Terra');
  assert.equal(resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[item('anthropic/claude-haiku-5-5')]}}).roles.general.status,'unavailable');

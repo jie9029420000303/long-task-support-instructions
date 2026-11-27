@@ -275,7 +275,8 @@ test('a refusal whose named reset already passed keeps the model and continues t
 test('a refusal for a model the chat already left is ignored, but a chat back on that model is switched again',async()=>{
   // The executor was moved from Opus to the Opus API, its next stop on the shared order (decision 19).
   const record={role:'executor',original:opus,current:paid,effort:'high',since:Date.now()-60000,until:Date.now()+3600000,restored:null};
-  const stale=fixture({executorModel:paid,state:{modelSwitch:{'executor-qa':{...record}}}});
+  // The stale chat has already answered on the Opus API: a later Opus refusal is a worker's or a compaction's.
+  const stale=fixture({executorModel:paid,state:{modelSwitch:{'executor-qa':{...record,respondedAt:Date.now()-30000}}}});
   const back=fixture({executorModel:opus,state:{modelSwitch:{'executor-qa':{...record}}}});
   try{
     stale.start();back.start();

@@ -14,6 +14,7 @@ const FALLBACK_MS=5*60*60*1000;
 const FAILURE_COUNT=3,FAILURE_SPAN_MS=60000,FAILURE_COOLDOWN_MS=30*60000,OPENROUTER_COOLDOWN_MS=15*60000;
 const FAILURE_BASIS='連續失敗（非額度），暫停此順位 30 分鐘',OPENROUTER_BASIS='開源順位短暫限速，15 分鐘後再試',SILENT_BASIS='切換後沒有成功回應，暫停此順位 30 分鐘';
 const UNSUPPORTED_BASIS='目前的帳號不支援這個模型，5 小時後再試';
+const BILLING_BASIS='API 儲值用完，這台電腦所有工區 5 小時後再試';
 const catalog=require('./model-catalog.cjs');
 // The OpenAI subscription first, then the OpenAI API key (Jay 2026-11-25「兩邊都排，順位接在openai月訂閱戶後面」).
 const GPT_ACCOUNTS=['','openai-apikey/'];
@@ -45,6 +46,20 @@ function plainKey(key){const at=key.indexOf('|');return at<0?key:key.slice(at+1)
 const OPENROUTER_ACCOUNT='openrouter/';
 function subscriptionClaude(model){const m=catalog.identity(model);return m?.family==='claude'&&m.provider==='anthropic/';}
 function subscriptionOpenAI(model){const m=catalog.identity(model);return m?.family==='gpt'&&m.provider==='';}
+// OpenCodex marks an API key whose prepaid balance is used up as billing_exhausted (2026-11-27: openai-apikey answered
+// HTTP 429 with it 49 times). Every model on that key is out for every role of every run on this Mac, and the key is
+// tried again after five hours (Jay 2026-11-27 decision 36:「全區共用可以，但不要等我儲值…還是五小時重試」).
+function billingAccount(model){return /^([a-z0-9-]+-apikey\/)/.exec(model||'')?.[1]||null;}
+// A mainline on the ChatGPT subscription can hand work only to a ChatGPT subscription worker: the platform encrypts the
+// task for the native backend and any other provider refuses it (2026-11-27 13:58～14:02 工區 E and 清票, and the 14:42
+// test: unreadable_encrypted_agent_task). Its workers use the subscription Terra whatever the subagent ladder says; once
+// that Terra cannot serve, the mainline itself moves on (Jay 2026-11-27 decision 37).
+function subscriptionWorker(items=catalog.installed()){return catalog.latest(items,'gpt','','terra')?.id||null;}
+function cannotDispatch(state,model,role,now=Date.now()){
+  if(role!=='executor'||!subscriptionOpenAI(model))return false;
+  const worker=subscriptionWorker();
+  return Boolean(worker)&&refused(state,worker,now,'subagent');
+}
 // A route the quota reading holds back, for as long as the reading says so: the OpenAI subscription for every role once
 // each account Jay has not paused is at its line or its last 2% (Jay 2026-11-25, 2026-11-26 decision 26), and every
 // stop in front of the role's ladder floor. A success of another conversation never ends either.
@@ -84,6 +99,20 @@ function sharedFile(run,name){
   return path.join(require('./notify.cjs').home(),name);
 }
 const apiMonthFile=run=>sharedFile(run,'anthropic-api-month.json');
+// Two runs can share one supervisor chat (工區 D and 清票 share 01a1da3b). Only one watcher moves its model: the run that
+// holds the supervisor's entry, refreshed on every pass and taken over once it is ten minutes old (Jay 2026-11-27
+// decision 39). Entries of supervisors no watcher has touched for a day are dropped.
+const SUPERVISOR_LEASE_MS=10*60000;
+function supervisorOwner(run,supervisorId,now=Date.now()){
+  const file=sharedFile(run,'supervisor-route-owner.json');
+  let all={};try{all=JSON.parse(fs.readFileSync(file,'utf8'));}catch{}
+  const owner=all[supervisorId];
+  if(owner&&owner.run!==run&&now-owner.at<SUPERVISOR_LEASE_MS)return false;
+  for(const [id,item] of Object.entries(all))if(now-item.at>=24*60*60*1000)delete all[id];
+  all[supervisorId]={run,at:now};
+  try{fs.mkdirSync(path.dirname(file),{recursive:true});const temp=file+'.'+process.pid+'.tmp';fs.writeFileSync(temp,JSON.stringify(all)+'\n');fs.renameSync(temp,file);}catch{}
+  return true;
+}
 function syncApiMonth(state,run,now=Date.now()){
   let shared=null;try{shared=JSON.parse(fs.readFileSync(apiMonthFile(run),'utf8'));}catch{}
   const best=[state.apiMonth,shared].filter(item=>item&&item.until>now).sort((a,b)=>b.until-a.until)[0]||null;
@@ -99,13 +128,14 @@ function recordApiMonth(state,run,until,basis,now=Date.now()){
 }
 // A model the serving account cannot run (model_unavailable) is skipped by every run on both sides until its pause
 // ends, or once the route has served a request since (Jay 2026-11-25 Q4 A: 工區 E moved its executor to Sol at 12:02
-// although 工區 D and 清票 had both been refused there by the free account).
+// although 工區 D and 清票 had both been refused there by the free account). An API key out of balance is kept here the
+// same way under its provider path, with its own basis.
 const unsupportedFile=run=>sharedFile(run,'model-unavailable.json');
 function readUnsupported(run){try{return JSON.parse(fs.readFileSync(unsupportedFile(run),'utf8'));}catch{return {};}}
-function recordUnsupported(run,route,since,until){
+function recordUnsupported(run,route,since,until,basis=UNSUPPORTED_BASIS){
   const all=readUnsupported(run),file=unsupportedFile(run);
   if(all[route]?.since>=since)return;
-  all[route]={since,until};
+  all[route]={since,until,...(basis===UNSUPPORTED_BASIS?{}:{basis})};
   try{fs.mkdirSync(path.dirname(file),{recursive:true});const temp=file+'.'+process.pid+'.tmp';fs.writeFileSync(temp,JSON.stringify(all)+'\n');fs.renameSync(temp,file);}catch{}
 }
 function syncUnsupported(state,run,now=Date.now()){
@@ -115,7 +145,8 @@ function syncUnsupported(state,run,now=Date.now()){
     for(const side of ['supervisor','executor']){
       const key=side+'|'+route,known=state.rateLimits?.[key];
       if(known?.until>now)continue;
-      (state.rateLimits||={})[key]={since:item.since,model:route,files:[],until:item.until,basis:UNSUPPORTED_BASIS,cooldown:'unsupported'};
+      const billing=item.basis===BILLING_BASIS;
+      (state.rateLimits||={})[key]={since:item.since,model:route,files:[],until:item.until,basis:billing?BILLING_BASIS:UNSUPPORTED_BASIS,cooldown:billing?'billing':'unsupported'};
       changed=true;
     }
   }
@@ -149,10 +180,12 @@ function openRoutes(role,preference=null){
 function refused(state,model,now,role){
   if(state.rateLimits?.[limitKey(role,model)]?.until>now)return true;
   if(String(model||'').startsWith('openrouter/')&&state.rateLimits?.[OPENROUTER_ACCOUNT]?.until>now)return true;
+  const account=billingAccount(model);
+  if(account&&state.rateLimits?.[limitKey(role,account)]?.until>now)return true;
   return keyOf(model)==='anthropic-apikey/'&&state.apiMonth?.until>now;
 }
 function limited(state,model,now=Date.now(),role='executor'){
-  return refused(state,model,now,role)||held(state,model,role,now);
+  return refused(state,model,now,role)||held(state,model,role,now)||cannotDispatch(state,model,role,now);
 }
 function availableFourth(config){
   const routes=require('./openrouter-route.cjs').routes(config);
@@ -250,7 +283,7 @@ function recovered(state,now=Date.now()){
   let changed=false;
   for(const [key,item] of Object.entries(state.rateLimits||{})){
     const failed=item.basis===FAILURE_BASIS;
-    if(item.basis===SILENT_BASIS||failed&&!key.startsWith('supervisor|'))continue;
+    if(item.basis===SILENT_BASIS||item.basis===BILLING_BASIS||failed&&!key.startsWith('supervisor|'))continue;
     const at=failed?backFromFailure(plainKey(key)):back(plainKey(key));
     if(at>item.since&&item.until>now){item.until=now;item.basis=ROUTE_BASIS;changed=true;}
   }
@@ -312,7 +345,7 @@ function checkQuotaTurn(check,owner){
   }
 }
 const hitOf=(owner,row)=>({...owner,model:row.requestedModel||row.model,at:Number(row.timestamp)||Date.now(),status:row.status,
-  ...(connectionReset(row)?{connectionReset:true}:{}),...(unsupported(row)?{unsupported:true}:{}),
+  ...(connectionReset(row)?{connectionReset:true}:{}),...(unsupported(row)?{unsupported:true}:{}),...(row.upstreamCondition==='billing_exhausted'&&billingAccount(row.requestedModel||row.model)?{billing:true}:{}),
   error:String(row.upstreamError||row.errorCode||row.status).slice(0,200)});
 function readRange(file,from,to){
   const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(to-from);
@@ -354,6 +387,9 @@ function scan(state,threads){
       latest.set(row.conversationId+'\u0000'+keyOf(model),row);
       const owner=owners.get(row.conversationId),switched=state.modelSwitch?.[owner.threadId];
       if(switched&&!switched.respondedAt&&model===switched.current&&at>=switched.since&&row.status>=200&&row.status<300&&row.usage?.outputTokens>0)switched.respondedAt=at;
+      // A request of the model the chat was switched away from, failing after the switch: the chat did not take it.
+      if(switched&&!switched.respondedAt&&at>=switched.since&&model!==switched.current&&model===(switched.from||switched.original)&&
+        row.status>=400&&row.status!==499&&!(switched.oldRouteFailedAt>=at))switched.oldRouteFailedAt=at;
       // Consecutive non-quota failures of one mainline on one model; a success of that thread on that model clears them.
       if(owner.role!=='subagent'){
         if(row.status>=200&&row.status<300){if(failures[owner.threadId]?.model===model)delete failures[owner.threadId];}
@@ -460,9 +496,10 @@ function publish(run,state,now=Date.now(),fourth=null){
       first:Object.fromEntries(Object.entries(ladder.roles).map(([role,item])=>[role,item.first])),
       summary:require('./claude-quota.cjs').describe(quota),readAt:new Date(quota.at).toISOString()}}:{}),
     ...(quota?.openai?{openaiQuota:{subscriptionHeld:quota.openai.held,floor:quota.openai.floor,summary:describe(quota),readAt:new Date(quota.at).toISOString()}}:{}),
+    ...(subscriptionWorker()?{subscriptionMainlineWorker:subscriptionWorker()}:{}),
     ...(openRoutes('executor',fourth).length?{}:{openSourceWarning:'開源備援目前沒有可用模型（OpenCodex 設定或價格上限未通過）'}),
     ...(fourth?{fourthExecutorModel:fourth}:{}),
-    rule:'監督與執行主線用同一條順位，子代理用自己的順位（chain）。各角色在自己被拒或降級階梯（ladder）讓它離開前面幾站時往下換：階數每多一階子代理退一站，監督晚兩階、執行主線再晚兩階才開始退；ladder.first 是各角色目前能用的第一站。OpenAI 訂閱到停用線或只剩 2% 以下時所有角色跳過訂閱 GPT。',
+    rule:'監督與執行主線用同一條順位，子代理用自己的順位（chain）。各角色在自己被拒或降級階梯（ladder）讓它離開前面幾站時往下換：階數每多一階子代理退一站，監督晚兩階、執行主線再晚兩階才開始退；ladder.first 是各角色目前能用的第一站。OpenAI 訂閱到停用線或只剩 2% 以下時所有角色跳過訂閱 GPT。執行主線在 OpenAI 訂閱（Sol、Terra）上時，子代理一律派 subscriptionMainlineWorker（Terra 訂閱），不看子代理降級階梯；它不能用時背景程式先把主線換到下一站。',
     updatedAt:new Date(now).toISOString()};
   const file=path.join(run,'model-fallback.json');
   fs.writeFileSync(file+'.tmp',JSON.stringify(body,null,2)+'\n');fs.renameSync(file+'.tmp',file);
@@ -474,6 +511,7 @@ function switchReason(hit,target,silentMs){
   if(!hit)return '前面的順位 '+target+' 已可再用：';
   if(hit.connectionReset)return 'OpenCodex 連線中斷（OpenCodex 自己回 429，不是額度被拒）：';
   if(hit.unsupported)return '目前的帳號不支援 '+hit.model+'（OpenCodex 回 model_unavailable）：';
+  if(hit.billing)return 'API 儲值用完（OpenCodex 回 billing_exhausted），這台電腦所有工區 5 小時內都跳過這組 API：';
   if(hit.silent)return '切換後 '+Math.round(silentMs/60000)+' 分鐘（不含電腦睡眠）沒有成功回應：';
   if(hit.failure)return '目前模型連續出錯（'+String(hit.error||'').slice(0,80)+'）：';
   if(hit.status===402)return 'OpenRouter 餘額不足：';
@@ -486,9 +524,11 @@ function restoreReason(limit){
   if(basis===FAILURE_BASIS||basis===SILENT_BASIS||limit?.cooldown==='failure')return '原模型的失敗暫停已結束。';
   if(basis===OPENROUTER_BASIS)return '原模型的短暫限速已結束。';
   if(basis===UNSUPPORTED_BASIS||limit?.cooldown==='unsupported')return '原模型已可再用。';
+  if(basis===BILLING_BASIS||limit?.cooldown==='billing')return 'API 儲值暫停已滿 5 小時，重新試用。';
   return '額度已恢復。';
 }
-module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,UNSUPPORTED_BASIS,OPENROUTER_ACCOUNT,
+module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,UNSUPPORTED_BASIS,BILLING_BASIS,OPENROUTER_ACCOUNT,
+  billingAccount,subscriptionWorker,cannotDispatch,supervisorOwner,
   modelPolicy,finalReviewer,solRoutes,MAINLINE_STOPS,SUBAGENT_STOPS,stopIndex,floorIndex,ladderOf,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,subscriptionOpenAI,held,refused,migrateLimits,syncApiMonth,recordApiMonth,
   recordUnsupported,syncUnsupported,
   chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish,switchReason,restoreReason};

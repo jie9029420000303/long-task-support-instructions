@@ -199,11 +199,13 @@ test('a fourth-route 429 continues the same executor on the other eligible model
 });
 
 // Jay 2026-11-26 decision 20: a worker keeps its own order whatever the mainline runs, so an open-source worker takes
-// DeepSeek first at max even under a Muse mainline, and only a model this inventory offers.
+// DeepSeek first at max even under a Muse mainline, and only a model this inventory offers. A mainline on the ChatGPT
+// subscription is the exception (2026-11-27 decision 37): it can only hand work to the subscription Terra.
 test('the dispatch resolver gives an open-source worker DeepSeek first at max whatever the executor runs, and nothing it cannot offer',t=>{
   const f=sandbox(t);
   const inventory=fourths.map(id=>({id,efforts:['max']}));
-  for(const model of [...fourths,sol]){
+  assert.equal(f.resolveWorker({supervisorModel:sol,executorModel:sol,roles:['general'],catalogs:{subagent:inventory}}).status,'unavailable','under the subscription Sol');
+  for(const model of [...fourths,'openai-apikey/'+sol]){
     const input={supervisorModel:sol,executorModel:model,roles:['general'],catalogs:{subagent:inventory}};
     const worker=f.resolveWorker(input);
     assert.deepEqual([worker.status,worker.model,worker.effort],['ready',deepseek,'max'],'under '+model);

@@ -32,6 +32,9 @@ const EDIT_TOOLS=['Edit','Write','MultiEdit','NotebookEdit'];
 // Not code or configuration: documents, status and work package files, evidence and the task's own state folders.
 const NOT_CODE=/\.(?:md|markdown|txt|log|png|jpe?g|gif|webp|pdf|csv)$/i;
 const OWN_FILES=/(?:^|\/)(?:wp|evidence|證據)[^/]*\/|\/\.(?:claude|codex)\/long-task\//i;
+// A collect result written for the dispatch tool ("status":{"list":…} or "verdict":{…}) is its data wherever it is put
+// (Jay 2026-11-27 decision 41).
+const DISPATCH_RESULT=/"status"\s*:\s*\{\s*"list"\s*:|"verdict"\s*:\s*\{/;
 // A supervisor run folder (event, research and decision inputs live there) holds binding.json and contract.json.
 function inRun(file){
   for(let dir=path.dirname(file),depth=0;depth<8&&dir!==path.dirname(dir);dir=path.dirname(dir),depth++)
@@ -43,7 +46,8 @@ function selfWorkOf(block){
   const input=block.input||{};
   if(EDIT_TOOLS.includes(block.name)){
     const file=input.file_path||input.notebook_path||input.path;
-    return typeof file==='string'&&!NOT_CODE.test(file)&&!OWN_FILES.test(file)&&!(path.isAbsolute(file)&&inRun(file))?{kind:'edit',item:file}:null;
+    const result=typeof file==='string'&&/\.json$/i.test(file)&&DISPATCH_RESULT.test(String(input.content??input.new_string??''));
+    return typeof file==='string'&&!NOT_CODE.test(file)&&!OWN_FILES.test(file)&&!result&&!(path.isAbsolute(file)&&inRun(file))?{kind:'edit',item:file}:null;
   }
   if(block.name!=='Bash'||typeof input.command!=='string')return null;
   const kind=commandKind(input.command);

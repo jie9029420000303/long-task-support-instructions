@@ -158,7 +158,8 @@ class CodexDispatchContractTests(unittest.TestCase):
         skill = (self.SKILL / "SKILL.md").read_text(encoding="utf-8")
         template = (self.SKILL / "templates" / "state.md").read_text(encoding="utf-8")
         # Jay 2026-11-26: subagents follow their own chain regardless of the mainline model.
-        self.assertIn("子代理不論主線用哪個模型，都照子代理順位", skill)
+        self.assertIn("子代理照子代理順位", skill)
+        self.assertIn("主線在 OpenAI 訂閱（Sol、Terra）上時子代理一律用 Terra 訂閱", skill)
         self.assertIn("介面子代理需具備所需瀏覽器", skill)
         self.assertIn("Goal 續跑／恢復沿用已鎖定模型", skill)
         for row in (

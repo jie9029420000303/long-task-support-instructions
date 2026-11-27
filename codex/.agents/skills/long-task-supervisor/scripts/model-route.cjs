@@ -2,7 +2,7 @@
 // This resolver never switches a chat. Only explicit requests and observed tool inventories
 // determine the role, model and supported reasoning level.
 const fs=require('node:fs');
-const {keyOf,subscriptionOpenAI,stopIndex,MAINLINE_STOPS,SUBAGENT_STOPS}=require('./model-fallback.cjs');
+const {keyOf,billingAccount,subscriptionOpenAI,stopIndex,MAINLINE_STOPS,SUBAGENT_STOPS}=require('./model-fallback.cjs');
 const {efforts,identity,available,latest}=require('./model-catalog.cjs');
 const openrouter=()=>require('./openrouter-route.cjs');
 // The executor plans, dispatches and judges the work: it runs at xhigh (Jay 2026-11-26 decision 1). Workers start at
@@ -42,7 +42,8 @@ function resolve(input) {
       openaiHeld=published.openaiQuota?.subscriptionHeld===true;}
     catch(error){if(error.code!=='ENOENT')throw error;} // A new run has no limit ledger yet.
   }
-  const refused=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now()||isOpen(id)&&Date.parse(limits['openrouter/']?.until)>Date.now();
+  const refused=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now()||isOpen(id)&&Date.parse(limits['openrouter/']?.until)>Date.now()||
+    Boolean(billingAccount(id))&&Date.parse(limits[billingAccount(id)]?.until)>Date.now();
   const serving=id=>!refused(id)&&!(openaiHeld&&subscriptionOpenAI(id));
   const failures=input.failures??0;
   if(!Number.isInteger(failures)||failures<0)throw Error('failures 是這條驗收條文累計的不合格次數（不歸零），0 以上的整數');
@@ -55,16 +56,20 @@ function resolve(input) {
     if(research&&step%2===1){unavailable('研究在第 2、4、6 次不合格後才派：failures 要是偶數');continue;}
     if(step>=JAY_AT&&!research){unavailable('這條已累計 '+step+' 次不合格：研究登記後由監督在待決帳問 Jay，裁決前不再派這條');continue;}
     const executorModel=input.executorModel||input.supervisorModel;
+    // A mainline on the ChatGPT subscription can only hand work to the subscription Terra, whatever the subagent ladder
+    // says (Jay 2026-11-27 decision 37; any other provider refuses the encrypted task).
+    // The mainline's model as the caller observed it (observedInput reads it from the calling chat's rollout).
+    const subscriptionMainline=worker&&subscriptionOpenAI(input.executorModel);
     // 1st, 3rd and 5th: the same subagent again, same model and effort, with the correction (followup_task).
     if(step%2===1&&!override.model){
       if(!input.previousModel||!input.previousEffort){unavailable('交回原子代理重做要附 previousModel 與 previousEffort（它剛才的模型與推理）');continue;}
       result.roles[role]={status:'ready',model:input.previousModel,effort:input.previousEffort,basis:'same-subagent',reuse:true};
       continue;
     }
-    const order=orderOf(side,catalog,input.fourthExecutorModel);
+    const order=subscriptionMainline?[latest(catalog,'gpt','','terra')].filter(Boolean):orderOf(side,catalog,input.fourthExecutorModel);
     // The ladder floor, never past the last stop that can still serve.
     const usable=order.filter(item=>serving(item.id));
-    const floorAt=Math.min(floors[side]||0,Math.max(0,...usable.map(item=>stopIndex(item.id,side)??0)));
+    const floorAt=subscriptionMainline?0:Math.min(floors[side]||0,Math.max(0,...usable.map(item=>stopIndex(item.id,side)??0)));
     const allowed=usable.filter(item=>(stopIndex(item.id,side)??0)>=floorAt);
     let basis=Object.keys(override).length?'explicit-user-override':'role-policy', selected, restoreAfter;
     if(override.model)selected=catalog.find(x=>x.id===override.model);
@@ -78,9 +83,11 @@ function resolve(input) {
     }else if(worker&&step===RAISE_AT&&!research&&input.previousModel&&allowed.some(item=>item.id===input.previousModel)){
       selected=allowed.find(item=>item.id===input.previousModel);
     }else selected=allowed[0];
+    if(!selected&&subscriptionMainline){unavailable('主線在 ChatGPT 訂閱上只能派 Terra 訂閱子代理，Terra 訂閱目前不能用或不在派工清單：背景程式會把主線換到下一站，換站後再派這包');continue;}
     if(!selected){unavailable('The requested enabled role/model is unavailable in this tool inventory');continue;}
     if(!override.model&&order[0]&&selected.id!==order[0].id&&refused(order[0].id))restoreAfter=limits[keyOf(order[0].id)]?.until;
     if(!override.model&&order[0]&&selected.id!==order[0].id&&basis==='role-policy')basis=floorAt>0?'quota-ladder':'rate-limit-fallback';
+    if(subscriptionMainline&&basis==='role-policy')basis='subscription-mainline';
     const open=isOpen(selected.id);
     const supported=open?['max']:efforts.filter(e=>selected.efforts.includes(e));
     const rank=e=>efforts.indexOf(e);
