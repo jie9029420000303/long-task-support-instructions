@@ -17,9 +17,9 @@
 
 ## 連續兩次未過
 
-正式實測 FAIL 由 `formal-case.cjs` 自動計入該案例的驗收條文（`rework.cjs`，和子代理交付的不合格算同一個計數，同一份交付不重複計；INCONCLUSIVE、BLOCKED 不計）。條文有效率預期時，實跑超過該案例上限不能記 PASS，記 FAIL 後同一條文同一候選版只計一次（見 acceptance「效率預期」）。同一條文累計到第 2、4、6 次，`select` 把它的案例列進 `held`（reason `research`），`run` 不發下一次許可；其他條文的案例照常。執行主線派研究子代理（用執行主線當下的模型與推理），自行安排小實驗並選定解法；實驗仍遵守本案授權、禁令與原驗收條文。監督在送驗時查核證據，或在研究交回後逾期未見後續工作包或進展時督促執行端。
+正式實測 FAIL 由 `formal-case.cjs` 自動計入該案例的驗收條文（`rework.cjs`，和子代理交付的不合格算同一個計數，同一份交付不重複計；INCONCLUSIVE、BLOCKED 不計）。條文有效率預期時，實跑超過該案例上限不能記 PASS，記 FAIL 後同一條文同一候選版只計一次（見 acceptance「效率預期」）。同一條文累計到第 2、4、6 次，`select` 把它的案例列進 `held`（reason `research`），`run` 不發下一次許可；其他條文的案例照常。執行主線派研究子代理（用執行主線當下的模型與推理）上網搜尋可行方案並唯讀分析，主線選定方案，研究後重做的工作包第一步做驗證小實驗；實驗仍遵守本案授權、禁令與原驗收條文。監督在送驗時查核證據，或在研究交回後逾期未見後續工作包或進展時督促執行端。
 
-以 `node scripts/rework.cjs research RUN RESEARCH.json` 登記以下內容，登記後解除擋下（次數不歸零；第 6 次另等使用者裁決）。查不到可用解法也照實登記，保留該案受阻原因，繼續其他工作。錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證時，執行主線把理由交監督核可，由監督用 `node scripts/rework.cjs waive RUN WAIVE.json` 登記，寫 criterionId、directCauses 與 reason。
+以 `node scripts/rework.cjs research RUN RESEARCH.json` 登記以下內容，登記後解除擋下（次數不歸零；第 6 次另等使用者裁決）。查不到可用方案時寫 notFound 照實登記，保留該案受阻原因，繼續其他工作。錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證時，執行主線把理由交監督核可，由監督用 `node scripts/rework.cjs waive RUN WAIVE.json` 登記，寫 criterionId、directCauses 與 reason。
 
 | 欄位 | 填寫內容 |
 |---|---|
@@ -28,8 +28,11 @@
 | excluded | 已排除的原因 |
 | environment | 開發與測試驗收環境的條件：主機、規格、容器、資料、權限與限制 |
 | software | 用到的套件與軟體：名稱、版本與已知限制 |
-| sources | 每筆含外部來源 url 與具時區的查閱時間 checkedAt |
-| experiment、experimentPassed | 小實驗結果檔的絕對路徑及實際通過結果 |
-| solution、workPackage | 執行主線選定的解法及已登記在派工表的後續工作包 ID |
+| researchAgent | 研究子代理的代號：Codex 的 /root/... 路徑或子代理對話 ID，Claude Code 的 agent ID |
+| sources | 研究子代理搜到的外部網址（每筆 url）；查閱時間由程式從研究子代理的執行紀錄取 |
+| candidates | 候選方案，每項寫 approach（做法）、conditions（適用條件）、risks（風險）與 sources（依據的網址，要列在 sources 裡） |
+| selected、selectionReason | 照抄選定候選方案的 approach，以及為什麼選它 |
+| notFound | 查不到可行方案時才寫：查了哪些地方、為什麼都不可行（candidates 留空） |
+| workPackage | 已登記在派工表的後續工作包 ID |
 
-程式核對紀錄、欄位與檔案，只有執行主線能登記（子代理呼叫會被擋下）。證據是否支持解法，由執行主線在整合時及監督在送驗時查核。
+程式核對紀錄、欄位與研究子代理的執行紀錄（要有網路搜尋，來源要出現在第一次搜尋之後，候選方案要有依據來源），只有執行主線能登記（子代理呼叫會被擋下）。證據是否支持解法，由執行主線在整合時及監督在送驗時查核。
