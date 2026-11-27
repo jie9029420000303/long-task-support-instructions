@@ -9,6 +9,7 @@ const pace = require('./pace.cjs');
 const pending = require('./pending-decisions.cjs');
 const login = require('./login-check.cjs');
 const segments = require('./segments.cjs');
+const efficiency = require('./efficiency.cjs');
 const [command, runArg, other] = process.argv.slice(2);
 const run = runArg && path.resolve(runArg);
 const now = () => new Date().toISOString();
@@ -51,6 +52,8 @@ function init() {
   // The supervisor's segment table may come with the contract (Jay 2026-11-25); it is checked before the run exists.
   const criterionIds = (inherited ? contractState.effective(inherited.run, inherited.binding) : contract).criteria.map(item => item.id);
   if (input.segments !== undefined) segments.validate(input.segments, criterionIds);
+  // Efficiency expectations of the real-run criteria, written at opening like the segment table (Jay 2026-11-27).
+  if (input.efficiency !== undefined) efficiency.validate(input.efficiency?.criteria, new Set(criterionIds));
   // Every login the task uses was checked before Jay was asked anything (start step 1); the same list goes into the
   // run here, so the hourly check never starts empty (the 2026-10-13 v117 run had no login list at all).
   need(Array.isArray(input.loginSites), 'loginSites is required: the login list checked at start step 1 with login-check.cjs, or [] when the task uses no login');
@@ -64,6 +67,7 @@ function init() {
   else write(path.join(run, 'contract.json'), input.contract);
   login.write(run, input.loginSites);
   if (input.segments !== undefined) segments.write(run, input.segments, criterionIds);
+  if (input.efficiency !== undefined) efficiency.write(run, {allowedRoots:input.allowedRoots}, input.efficiency, new Set(criterionIds));
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
   fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   const binding = {
@@ -394,6 +398,14 @@ function relocateSources() {
   validateContract(contract, {run, binding});
   return {run, relocated:manifest.entries.length, manifest:path.join(run, 'source-relocations.json')};
 }
+// The supervisor writes each real-run criterion's efficiency expectation (Jay 2026-11-27 decision 46); raising or
+// removing one needs Jay's words (efficiency.cjs).
+function efficiencyTable() {
+  const {binding} = load(), state = read(path.join(run, 'daemon-state.json'));
+  contractState.supervisorOnly(binding);
+  need(!fs.existsSync(path.join(run, 'STOP')) && !['accepted', 'stopped'].includes(state.phase), 'Stopped or accepted run cannot be changed');
+  return efficiency.write(run, binding, read(other), new Set(contractState.effective(run, binding).criteria.map(item => item.id)));
+}
 // The supervisor writes or adjusts the segment table; the mainline proposes changes by question (Jay 2026-11-25 3A).
 function segmentTable() {
   const {binding} = load(), state = read(path.join(run, 'daemon-state.json'));
@@ -424,11 +436,12 @@ try {
     : command === 'relocate-sources' ? relocateSources()
     : command === 'attach-dispatch' ? attachDispatch()
     : command === 'segments' ? segmentTable()
+    : command === 'efficiency' ? efficiencyTable()
     : command === 'dispatch-preflight' ? dispatchPreflight()
     : command === 'stop' ? stop()
     : command === 'pause' ? pause()
     : command === 'resume' ? resume()
-    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, pending RUN FILE, ask RUN, shown RUN KEY..., relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN'); })();
+    : (() => { throw Error('Commands: init RUN INPUT, status RUN, brief RUN, context RUN EVENT_ID, authorization RUN, decision RUN FILE, pending RUN FILE, ask RUN, shown RUN KEY..., relocate-sources RUN FILE, attach-dispatch RUN, segments RUN FILE, efficiency RUN FILE, dispatch-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN'); })();
   Promise.resolve(result).then(value => console.log(JSON.stringify(value)), error => { console.error(error.message); process.exitCode = 1; });
 } catch (error) {
   console.error(error.message);

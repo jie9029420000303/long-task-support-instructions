@@ -12,7 +12,7 @@ argument-hint: "[目標描述 | 續接 | 狀態]"
 
 監督綁定完成後，收到精確 run 路徑時，提問、阻塞及送驗依監督 runtime 的[原生事件交接](../long-task-supervisor/references/runtime.md#原生事件交接)：先以唯一 ID 保存完整事件，`handoff.cjs prepare` 取得持久收件收據（前一事件未決時本事件排隊、回 `queued:true`，照常續做其他工作）及唯一傳訊資格，才使用桌面原生工具送一次短訊並記 receipt；最終回覆使用其 `finalEventLine`，不重複手寫事件或雜湊。送達不明先對帳，STOP 不重啟；純等待不發保活短訊。未安全接入的舊 run 仍用原事件格式，不自行改 run。
 
-監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，更新指定 run 的 `dispatch.json`：工作包狀態一變（派出、收回、受阻、完成、封存），用監督技能 `dispatch.cjs mark <RUN> <狀態目錄> <id> '<狀態 JSON>'` 一個指令同時改 `wp/<id>.md` 的 `[狀態]` 行，並由全部工作包檔重產快照，不手寫快照 JSON、不另寫產生器；容量、驗收逐條與文件時間預算等其他欄位用 `--base <JSON 絕對路徑>` 帶入（第一份必帶，之後沿用上一份），要整份重寫時才用 `dispatch.cjs write`。只記實際工作包、代理 handle、已核實容量與排他資源；每個在途包附 AI 時程基準（派出時在 `mark` 加 `--estimate <模型>[:<預估輸出 token>[:<工具分鐘>]]` 同一步填入，或由監督技能 `scripts/pace.cjs estimate` 產生；測試、主機程序等非代理工作填本場實測時長；同一包換新階段或範圍擴大時當下重估、寫入新基準，不沿用前一階段的基準），等待事件的 `waitMinutes` 用等待中各包的剩餘基準；真實測試資源（主機排查名額、測試身分）宣告 `capacity.resources` 與各包 `uses`；包一做完就從在途移出；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。受監督時另依[執行協定](references/execution.md#受監督驗收的進度與重測)「受監督時另外做到」標 `acceptanceIds`、處理重做凍結與平台錯誤（含限速）。未綁定監督的單對話任務不需此快照。
+監督綁定完成後，依[派工快照協定](../long-task-supervisor/references/dispatch.md)在拆包、派出、收回／整合、依賴或資源變化及等待前，更新指定 run 的 `dispatch.json`：工作包狀態一變（派出、收回、受阻、完成、封存），用監督技能 `dispatch.cjs mark <RUN> <狀態目錄> <id> '<狀態 JSON>'` 一個指令同時改 `wp/<id>.md` 的 `[狀態]` 行，並由全部工作包檔重產快照，不手寫快照 JSON、不另寫產生器；容量、驗收逐條與文件時間預算等其他欄位用 `--base <JSON 絕對路徑>` 帶入（第一份必帶，之後沿用上一份），要整份重寫時才用 `dispatch.cjs write`。只記實際工作包、代理 handle、已核實容量與排他資源；每個在途包附 AI 時程基準（派出時在 `mark` 加 `--estimate <模型>[:<預估輸出 token>[:<工具分鐘>]]` 同一步填入，或由監督技能 `scripts/pace.cjs estimate` 產生；跑有效率預期驗收條文的實跑包用監督技能 `scripts/efficiency.cjs baseline` 以條文效率預期產生，其他測試、主機程序等非代理工作用前一次同類工作的實測單位耗時乘規模；同一包換新階段或範圍擴大時當下重估、寫入新基準，不沿用前一階段的基準），等待事件的 `waitMinutes` 用等待中各包的剩餘基準；真實測試資源（主機排查名額、測試身分）宣告 `capacity.resources` 與各包 `uses`；包一做完就從在途移出；先執行可做的工作，再向監督回報，不能為等待快照核准停住。收到 `dispatch_review` 指示時先查最新狀態，已完成或失效的指示不重做；結果一回來就核對並補派，不等整批。受監督時另依[執行協定](references/execution.md#受監督驗收的進度與重測)「受監督時另外做到」標 `acceptanceIds`、處理重做凍結與平台錯誤（含限速）。未綁定監督的單對話任務不需此快照。
 
 **時程以 AI 實測速度估**：完成時間、等待分鐘與進度是否落後，一律用「預估輸出 token ÷ 本場同模型子代理實測每秒輸出 token（各包輸出 token ÷ 經過時間的中位數），加上已量測的工具時間」推估，不用人類開發經驗。使用者問還要多久時，逐段列出依據與還沒實測的部分。
 
@@ -114,10 +114,11 @@ argument-hint: "[目標描述 | 續接 | 狀態]"
 | 主線 | 使用者選定的 session 模型；受監督時與監督同型（預設 Opus） | session effort（建議 `xhigh`） | — |
 | 一般子代理：A 視覺查核 | `sonnet` | medium → xhigh；研究交回後最高 max | `lt-visual-checker-medium` / `-high` / `-xhigh` / `-max` |
 | 一般子代理：B 技術實作 | `sonnet` | medium → xhigh；研究交回後最高 max | `lt-tech-worker-medium` / `-high` / `-xhigh` / `-max` |
-| 研究子代理（不合格查因、解卡研究） | `sonnet` | 固定 xhigh | `lt-researcher-xhigh` |
+| 研究子代理（不合格查因） | 主線的模型（Agent 的 `model` 參數） | 主線的 effort | `lt-researcher-<主線 effort>` |
+| 研究子代理（監督派的解卡研究） | `sonnet` | 固定 xhigh | `lt-researcher-xhigh` |
 | 介面子代理：前台真實操作 | `sonnet` | low → high；研究交回後最高 max | `lt-ui-tester-low` / `-medium` / `-high` / `-xhigh` / `-max` |
 
-- 單派與 Workflow 以 agentType 選擇鎖定模型及推理的角色定義，全部是 Sonnet。升檔與研究的次序見[不合格交付與研究](references/execution.md#不合格交付與研究)：第 1、3、5 次不合格交回原子代理同檔重做，第 2、4、6 次先派 `lt-researcher-xhigh` 研究；第 2 次研究後升兩檔，第 4 次研究後用主線的模型（Agent 的 `model` 參數，派工閘只在這時放行）與主線 effort 對應的定義。
+- 單派與 Workflow 以 agentType 選擇鎖定模型及推理的角色定義，全部是 Sonnet。升檔與研究的次序見[不合格交付與研究](references/execution.md#不合格交付與研究)：第 1、3、5 次不合格交回原子代理同檔重做，第 2、4、6 次先派研究（主線 effort 對應的 `lt-researcher-*`，帶主線的 `model`）；第 2 次研究後升兩檔，第 4 次研究後用主線的模型（Agent 的 `model` 參數，派工閘只在這時與研究包放行）與主線 effort 對應的定義。
 - **新工作包一律從基準檔起跳**（一般 medium、介面 low），不得因預估難度直接派 `-high`／`-xhigh`；覺得太難就拆包，不升檔。
 - `sonnet` 別名依供應商解析（Anthropic API＝Sonnet 5；Bedrock／Vertex／AWS 平台另有版本）；鎖定時把當時實際解析結果與時間記入狀態檔。
 - 受監督時依實際監督主線的選定模型與授權啟動，使用者選模優先。技能記錄實際模型與推理。
@@ -144,7 +145,7 @@ argument-hint: "[目標描述 | 續接 | 狀態]"
 
 唯一實機或需排時窗者，正式派工前先在目標機一次核對投送檔、腳本語法、目錄及回執格式，把全部缺漏一起交回；正式實測 FAIL 計入該案例的驗收條文。受監督時見[正式案例與目標機回執](../long-task-supervisor/references/formal-cases.md)。
 
-**不合格交付**（使用者 2026-11-23 定案，2026-11-26 改為六次循環）：收件判定採用、品質不合格或非子代理責任三選一；品質不合格累計、研究後不歸零。第 1、3、5 次：指正用 `SendMessage` 交回原子代理同檔重做。第 2、4 次：派工閘擋下重派，先派 `lt-researcher-xhigh` 找直接原因與共同上游原因並登記；第 2 次研究後開新子代理升兩檔，第 4 次研究後開新子代理用主線的模型與推理。第 6 次：研究後交使用者裁決（受監督時監督在待決帳問他），裁決前只停這條。主線全程不接手。完整規則、指令與欄位只寫在[不合格交付與研究](references/execution.md#不合格交付與研究)。
+**不合格交付**（使用者 2026-11-23 定案，2026-11-26 改為六次循環）：收件判定採用、品質不合格或非子代理責任三選一；品質不合格累計、研究後不歸零。第 1、3、5 次：指正用 `SendMessage` 交回原子代理同檔重做。第 2、4 次：派工閘擋下重派，先派研究子代理（主線 effort 對應的 `lt-researcher-*`，Agent 的 `model` 參數填主線的模型）找直接原因與共同上游原因並登記，免研究要監督核可；第 2 次研究後開新子代理升兩檔，第 4 次研究後開新子代理用主線的模型與推理。第 6 次：研究後交使用者裁決（受監督時監督在待決帳問他），裁決前只停這條。主線全程不接手。完整規則、指令與欄位只寫在[不合格交付與研究](references/execution.md#不合格交付與研究)。
 
 ## 待決事項（不阻塞主線）
 

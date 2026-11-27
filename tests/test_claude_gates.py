@@ -149,7 +149,7 @@ class DispatchGateTests(unittest.TestCase):
         self.assertIn("最高派 lt-tech-worker-medium", result.stderr)
         result = self.dispatch("lt-tech-worker-xhigh", WP.format(errors=2), rows=(("WP-1", 2),))
         self.assertEqual(2, result.returncode)
-        self.assertIn("lt-researcher-xhigh", result.stderr)
+        self.assertIn("lt-researcher-<主線的 effort>", result.stderr)
 
     def test_research_raises_two_steps_and_the_count_goes_on(self):
         # 研究登記後次數不歸零：第 2 次研究後升兩檔；第 3 次交回同檔；第 4 次研究後才能用主線的模型與推理。
@@ -178,28 +178,30 @@ class DispatchGateTests(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("交使用者裁決", result.stderr)
 
-    def test_research_package_runs_at_xhigh_only_after_the_second_fourth_or_sixth_failure(self):
+    def test_research_package_runs_on_the_mainline_effort_only_after_the_second_fourth_or_sixth_failure(self):
         package = WP.format(errors=0).replace("WP-1", "RESEARCH")
         prompt = package + "\n[研究來源工作包] WP-1"
         rows = (("WP-1", 2), ("RESEARCH", 0))
-        self.assertEqual(0, self.dispatch("lt-researcher-xhigh", prompt, rows=rows).returncode)
-        # 研究推論固定 xhigh：低了找不到原因，max 的花費留給升檔重做。
-        self.assertEqual(2, self.dispatch("lt-researcher-high", prompt, rows=rows).returncode)
-        self.assertEqual(2, self.dispatch("lt-researcher-max", prompt, rows=rows).returncode)
+        # 2026-11-27 決策 50：研究用執行主線當下的模型與推理，主線推理是哪一檔就派哪一檔的研究代理，可帶 model。
+        for effort in ("high", "xhigh", "max"):
+            self.assertEqual(0, self.dispatch("lt-researcher-" + effort, prompt, rows=rows).returncode, effort)
+        result = self.dispatch("lt-tech-worker-xhigh", prompt, rows=rows)
+        self.assertEqual(2, result.returncode, "a research package goes to a researcher definition")
+        self.assertIn("lt-researcher-<主線的 effort>", result.stderr)
         # 第 1、3 次不合格還輪不到研究，先交回原子代理重做；第 4 次又輪到研究。
         self.assertEqual(2, self.dispatch("lt-researcher-xhigh", prompt, rows=(("WP-1", 1),)).returncode)
         self.assertEqual(2, self.dispatch("lt-researcher-xhigh", prompt, rows=(("WP-1", 3),)).returncode)
         self.assertEqual(0, self.dispatch("lt-researcher-xhigh", prompt, rows=(("WP-1", 4), ("RESEARCH", 0))).returncode)
-        tool = {"subagent_type": "lt-researcher-xhigh", "model": "haiku", "prompt": prompt}
+        tool = {"subagent_type": "lt-researcher-xhigh", "model": "opus", "prompt": prompt}
         gate = Gate([user(SKILL_ROW)], state(rows=rows))
         self.addCleanup(gate.close)
-        self.assertEqual(2, gate.run(hook_event_name="PreToolUse", tool_name="Agent", tool_input=tool).returncode)
+        self.assertEqual(0, gate.run(hook_event_name="PreToolUse", tool_name="Agent", tool_input=tool).returncode, "the mainline's model rides on the call")
 
     def test_state_table_is_authoritative_over_the_prompt_header(self):
         # 主線在派工表頭少寫錯誤次數時，以狀態檔為準，避免藉表頭把第 2 次不合格的包當新包、跳過研究重派。
         result = self.dispatch("lt-tech-worker-xhigh", WP.format(errors=0), rows=(("WP-1", 2),))
         self.assertEqual(2, result.returncode)
-        self.assertIn("lt-researcher-xhigh", result.stderr)
+        self.assertIn("lt-researcher-<主線的 effort>", result.stderr)
 
     def test_unknown_error_count_passes_with_a_note_instead_of_guessing(self):
         result = self.dispatch("lt-tech-worker-high", WP.format(errors=0).replace("目前錯誤次數=0；", ""), rows=None)
@@ -274,7 +276,7 @@ class StateLocationTests(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("最高派 lt-tech-worker-medium", result.stderr)
         self.write(errors=2)
-        self.assertIn("lt-researcher-xhigh", self.dispatch("lt-tech-worker-xhigh").stderr)
+        self.assertIn("lt-researcher-<主線的 effort>", self.dispatch("lt-tech-worker-xhigh").stderr)
 
     def test_question_gate_reads_the_state_file_this_session_works_on(self):
         # 任務已 PASS 的對話要能正常問使用者；找不到狀態檔就會把它當進行中而擋下。

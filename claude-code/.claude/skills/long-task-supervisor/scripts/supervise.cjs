@@ -13,6 +13,7 @@ const pace = require('./pace.cjs');
 const pending = require('./pending-decisions.cjs');
 const login = require('./login-check.cjs');
 const segments = require('./segments.cjs');
+const efficiency = require('./efficiency.cjs');
 const { queued: handoffQueue } = require('./handoff-lib.cjs');
 const [command, runArgument, inputArgument] = process.argv.slice(2);
 const run = runArgument && path.resolve(runArgument);
@@ -105,6 +106,8 @@ function init() {
   // The supervisor's segment table may come with the contract (Jay 2026-11-25); it is checked before the run exists.
   const criterionIds = (inherited ? contractState.effective(inherited.run, inherited.binding) : contract).criteria.map(item => item.id);
   if (input.segments !== undefined) segments.validate(input.segments, criterionIds);
+  // Efficiency expectations of the real-run criteria, written at opening like the segment table (Jay 2026-11-27).
+  if (input.efficiency !== undefined) efficiency.validate(input.efficiency?.criteria, new Set(criterionIds));
   const visible = visibleSupervisor(input.supervisorId,input.projectRoot,input.executorId);
   const supervisorLog = visible.log;
   need(desktopLog(supervisorLog),'Supervisor is not a Claude Desktop conversation');
@@ -125,6 +128,7 @@ function init() {
   else save(path.join(run, 'contract.json'), contract);
   login.write(run, input.loginSites);
   if (input.segments !== undefined) segments.write(run, input.segments, criterionIds);
+  if (input.efficiency !== undefined) efficiency.write(run, {allowedRoots:input.allowedRoots}, input.efficiency, new Set(criterionIds));
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
   fs.copyFileSync(path.join(__dirname, '..', 'references', 'formats.md'), path.join(run, '格式摘要.md'));
   fs.writeFileSync(path.join(run, 'executor-prompt.txt'),
@@ -187,6 +191,14 @@ function executorQueue() {
 // Everything one wake needs, in one call: the event, whether the watcher runs, pace against baselines, the
 // executor's latest words and the dispatch picture. A wake that reads this instead of probing file by file
 // re-reads its long conversation context fewer times (Jay 2026-10-07: about 3M cached tokens per check).
+// The supervisor writes each real-run criterion's efficiency expectation (Jay 2026-11-27 decision 46); raising or
+// removing one needs Jay's words (efficiency.cjs).
+function efficiencyTable() {
+  const {binding} = load(), state = read(path.join(run, 'daemon-state.json'));
+  contractState.supervisorOnly(binding);
+  need(!fs.existsSync(path.join(run, 'STOP')) && !['accepted', 'stopped'].includes(state.phase), 'Stopped or accepted run cannot be changed');
+  return efficiency.write(run, binding, read(inputArgument), new Set(contractState.effective(run, binding).criteria.map(item => item.id)));
+}
 // The supervisor writes or adjusts the segment table; the mainline proposes changes by question (Jay 2026-11-25 3A).
 function segmentTable() {
   const {binding} = load(), state = read(path.join(run, 'daemon-state.json'));
@@ -467,9 +479,9 @@ function progressPreflight(){const {binding}=load(),state=read(path.join(run,'da
       :command==='pending'?pendingChange():command==='ask'?(load(),pending.ask(run))
       // Jay hears about the batch on his phone too (Jay 2026-10-29), one push per batch.
       :command==='shown'?await pending.pushShown(run,pending.shown(run,process.argv.slice(4),{binding:load().binding}),'Claude 的監督對話')
-      :command==='segments'?segmentTable():command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
+      :command==='segments'?segmentTable():command==='efficiency'?efficiencyTable():command==='attach-dispatch'?attachDispatch():command==='dispatch-preflight'?dispatchPreflight()
       :command==='progress-preflight'?progressPreflight()
-      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision-preflight RUN FILE EVENT_HASH CONTRACT_HASH STATE_HASH_OR_DASH, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
+      :(()=>{throw Error('Commands: init RUN INPUT, status RUN [--wait-active SECONDS], brief RUN, context RUN EVENT_ID, authorization RUN, decision-preflight RUN FILE EVENT_HASH CONTRACT_HASH STATE_HASH_OR_DASH, decision RUN FILE, pending RUN CHANGE.json, ask RUN, shown RUN KEY..., amend RUN FILE, effective-contract RUN, attach-acceptance RUN FILE, relocate-sources RUN FILE, segments RUN FILE, efficiency RUN FILE, attach-dispatch RUN, dispatch-preflight RUN EVENT_ID, progress-preflight RUN EVENT_ID, pause RUN QUOTE, resume RUN [QUOTE], stop RUN QUOTE; start the desktop watcher in App background Bash');})();
     console.log(JSON.stringify(value));
   } catch(error) {console.error(error.message);process.exitCode=1;}
 })();

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Unsuccessful deliveries counted per acceptance criterion (Jay 2026-11-23「接受你的固化方法」). The model judges
 // each delivery; this file keeps the count and holds the criterion where the cycle needs a step first (Jay 2026-11-26
-// decision 33): the count never resets; at the 2nd and the 4th failure the criterion waits for research (or a reason
-// research is not needed); at the 6th it waits for research and then for Jay's ruling, registered with resume, which
+// decision 33): the count never resets; at the 2nd and the 4th failure the criterion waits for research (or the
+// supervisor's reason research is not needed, decision 49); at the 6th it waits for research and then for Jay's ruling, registered with resume, which
 // starts a new count. Before it the count lived in a hand-kept header column on a
 // package that is renamed for every retry: of 2,792 live packages the 65 that carried the column all read 0, and
 // workspace E's criterion I04 failed ten times in 21 hours without research. A supervisor's "not passed this time"
@@ -44,7 +44,7 @@ const held=(history,ids=[])=>{const t=tally(history);return [...new Set(ids)].fi
 function nextStep(t){
   const n=t.failures.length;
   if(waitsForJay(t))return '研究已登記，等 Jay 裁決（監督在待決帳問他）；裁決後用 rework.cjs resume 登記他的原話';
-  if(waitsForStudy(t))return '先派研究子代理（推理 xhigh，研究工作包不列這條），研究交回用 rework.cjs research 登記';
+  if(waitsForStudy(t))return '先派研究子代理（用執行主線當下的模型與推理；研究範圍含開發與測試驗收環境條件、使用的套件與軟體背景；研究工作包不列這條），研究交回用 rework.cjs research 登記';
   return ['照常派工',
     '交回剛交件的子代理，同模型同推理重做，附這次的具體指正',
     '研究已登記：開新的子代理，推理升兩檔（開源模型改派下一款開源），附研究結果與前兩次的錯誤摘要',
@@ -96,7 +96,8 @@ function verdictRows(run,binding,{id,verdict,before,tagIds,handle,at=new Date().
 // mainline running the case itself has no delivery to judge. INCONCLUSIVE and BLOCKED say nothing about the work.
 function formalFailure(run,permit,attempt,at=new Date().toISOString()){
   if(attempt.outcome!=='FAIL')return;
-  if(rows(run).some(r=>r.kind==='verdict'&&r.source==='formal'&&r.attemptId===permit.id))return;
+  // The same attempt may already have counted as too slow (efficiency.cjs); one run is one failure.
+  if(rows(run).some(r=>r.kind==='verdict'&&r.attemptId===permit.id))return;
   append(run,[{kind:'verdict',criterionId:permit.criterionId,outcome:'FAIL',source:'formal',packageId:permit.workPackage,attemptId:permit.id,reason:attempt.reason,at}]);
 }
 const entries=snapshot=>Object.entries(snapshot?.packages||{}).flatMap(([list,items])=>(Array.isArray(items)?items:[]).map(item=>({list,item})));
@@ -117,6 +118,12 @@ function scope(run,binding,event,decision){
     const row=supplied.find(r=>r.id===item.id),named=new Set([...row.accepted,...(row.failed||[]),...row.remaining]);
     const missing=(item.acceptanceIds||[]).filter(id=>!named.has(id));
     need(!missing.length,item.id+' 的驗收條文要逐條分到採認、這次未過或還沒做完：還沒分的有 '+missing.join('、'));
+  }
+  // A criterion with an efficiency expectation is accepted only on runs within it (efficiency.cjs, Jay 2026-11-27).
+  const efficiency=require('./efficiency.cjs'),expected=efficiency.expectations(run),history=rows(run);
+  for(const r of supplied)for(const id of r.accepted||[]){
+    const problems=efficiency.blockers(expected,history,id);
+    need(!problems.length,id+' 不能採認，實跑沒達到效率預期：'+problems.join('；')+'。改列在 failed（這次未過）或 remaining');
   }
   if(decision.disposition==='reject')need(supplied.some(r=>(r.failed||[]).length),'退件要指出這次未過的驗收條文：在逐包裁決的 failed 列出條文 ID');
 }
@@ -142,7 +149,7 @@ function dispatchCheck(run,snapshot,previous){
     if(!entering&&!submitting)continue;
     const stop=held(history,item.acceptanceIds),t=tally(history);
     need(!stop.length,stop.map(id=>'驗收條文 '+id+' 已累計 '+t.get(id).failures.length+' 次不合格，'+item.id+(submitting?' 先不送審':' 先不派')+'：'+nextStep(t.get(id))).join('；')+
-      (stop.some(id=>!waitsForJay(t.get(id)))?'。確定不需研究時用 rework.cjs waive 登記理由':''));
+      (stop.some(id=>!waitsForJay(t.get(id)))?'。確定不需研究時把理由交監督核可，由監督用 rework.cjs waive 登記':''));
   }
 }
 function registered(run,binding,id){
@@ -150,9 +157,16 @@ function registered(run,binding,id){
   return fs.existsSync(file)&&entries(read(file)).some(({item})=>item.id===id);
 }
 // 關卡二 (Jay 2026-11-23): research lists the direct cause of each failure and their common upstream cause, besides
-// the four outputs of 2026-11-19 (failure evidence, excluded causes, dated outside sources, a passing experiment).
+// the four outputs of 2026-11-19 (failure evidence, excluded causes, dated outside sources, a passing experiment), and
+// (Jay 2026-11-27 decision 50) the development and test/acceptance environment conditions and the packages and software
+// involved. Skipping research needs the supervisor (decision 49): on workspace E the mainline itself waived the 2nd
+// failure of I07 and of I23, and no research subagent was ever dispatched; I23 was a performance cause, not a typo.
 function reset(run,binding,mode,input,at=new Date().toISOString()){
-  mainlineOnly('登記研究');
+  if(mode==='research')mainlineOnly('登記研究');
+  else{
+    try{contract.supervisorOnly(binding);}
+    catch{throw Error('「不需研究」要監督核可：執行主線把理由用 question 事件交監督，監督同意後由監督執行 rework.cjs waive（Jay 2026-11-27 決策 49）');}
+  }
   const history=rows(run),t=tally(history).get(input?.criterionId);
   need(text(input?.criterionId)&&t&&waitsForStudy(t),'只有等研究的驗收條文能登記（第 '+STUDY_AT.join('、')+' 次不合格後）：'+(input?.criterionId||'（沒寫 criterionId）')+' 目前 '+(t?.failures.length||0)+' 次'+(t&&studied(t)?'，這次已登記過':''));
   // The failures this study covers: those since the previous study.
@@ -163,14 +177,14 @@ function reset(run,binding,mode,input,at=new Date().toISOString()){
     directCauses:causes.map(c=>c.trim()),at};
   if(mode==='research'){
     need(text(input.commonCause),'commonCause 要寫各次失敗共同的上游原因');
-    need(['excluded','solution','workPackage','experiment'].every(k=>text(input[k]))&&input.experimentPassed===true&&fs.statSync(input.experiment,{throwIfNoEntry:false})?.isFile()&&
+    need(['excluded','environment','software','solution','workPackage','experiment'].every(k=>text(input[k]))&&input.experimentPassed===true&&fs.statSync(input.experiment,{throwIfNoEntry:false})?.isFile()&&
       Array.isArray(input.sources)&&input.sources.length&&input.sources.every(x=>/^https?:\/\//.test(x?.url)&&contract.exactTime(x.checkedAt)!==null),
-      '研究登記要有：excluded（已排除原因）、sources（外部網址＋含時區的查閱時間）、experiment（通過的小實驗證據檔）與 experimentPassed:true、solution（採用的解法）、workPackage（照研究重做的工作包）');
+      '研究登記要有：excluded（已排除原因）、environment（開發與測試驗收環境的條件：主機、規格、容器、資料、權限與限制）、software（用到的套件與軟體：名稱、版本與已知限制）、sources（外部網址＋含時區的查閱時間）、experiment（通過的小實驗證據檔）與 experimentPassed:true、solution（採用的解法）、workPackage（照研究重做的工作包）');
     need(registered(run,binding,input.workPackage),'workPackage '+input.workPackage+' 還沒登記在派工表');
-    Object.assign(row,{commonCause:input.commonCause.trim(),excluded:input.excluded,sources:input.sources,experiment:input.experiment,solution:input.solution,workPackage:input.workPackage});
+    Object.assign(row,{commonCause:input.commonCause.trim(),excluded:input.excluded,environment:input.environment.trim(),software:input.software.trim(),sources:input.sources,experiment:input.experiment,solution:input.solution,workPackage:input.workPackage});
   }else{
-    need(text(input.reason),'不需研究要寫 reason：為什麼這兩次不合格不必上網研究（例：補做實測就能佐證）');
-    row.reason=input.reason.trim();
+    need(text(input.reason),'不需研究要寫 reason：為什麼這兩次不合格不必上網研究（只限錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證）');
+    row.reason=input.reason.trim();row.by='supervisor';
     if(text(input.commonCause))row.commonCause=input.commonCause.trim();
   }
   append(run,[row]);

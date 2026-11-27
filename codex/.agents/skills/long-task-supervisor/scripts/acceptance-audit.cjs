@@ -74,6 +74,14 @@ function record(run,progress,snapshotFile=path.join(run,'dispatch.json')){
     const state=states.get(item.id);
     if(state?.status!==item.status||state?.revision!==progress.revision)add.push({kind:'status',criterionId:item.id,status:item.status,revision:progress.revision,evidence:item.evidence});
   }
+  // Efficiency expectations (efficiency.cjs, Jay 2026-11-27): a run over its limit counts as a failure of its criterion,
+  // and a criterion with an expectation turns PASS only when the latest run of every case passed within its limit.
+  const efficiency=require('./efficiency.cjs'),criteria=efficiency.expectations(run);
+  for(const row of add.filter(r=>r.kind==='attempt')){const verdict=efficiency.judge(criteria,row,[...rows,...add]);if(verdict)add.push(verdict);}
+  for(const row of add.filter(r=>r.kind==='status'&&r.status==='PASS'&&states.get(r.criterionId)?.status!=='PASS')){
+    const problems=efficiency.blockers(criteria,[...rows,...add],row.criterionId);
+    need(!problems.length,row.criterionId+' 還不能記 PASS：'+problems.join('；'));
+  }
   checkCurrentPasses([...rows,...add],progress);
   // Persist each completed result before replacing the current snapshot; retry is idempotent.
   if(add.length)fs.appendFileSync(path.join(run,'acceptance-history.jsonl'),add.map(row=>JSON.stringify(row)).join('\n')+'\n');

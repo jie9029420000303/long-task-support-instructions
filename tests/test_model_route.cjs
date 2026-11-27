@@ -37,7 +37,7 @@ test('the six-step rework loop: same subagent, research, two steps up, mainline-
  assert.deepEqual([fourth.model,fourth.effort,fourth.basis,fourth.newAgent],[opus,'xhigh','executor-equivalent',true]);
  assert.match(claude({failures:6}).general.reason,/Jay/);
  const research=claude({failures:2,research:true}).general;
- assert.deepEqual([research.model,research.effort,research.research],[sonnet,'xhigh',true]);
+ assert.deepEqual([research.model,research.effort,research.research],[opus,'xhigh',true],'research runs on the mainline\'s own model and effort');
  assert.equal(claude({failures:3,research:true}).general.status,'unavailable','research only at the 2nd, 4th and 6th');
  assert.throws(()=>claude({errors:1}),/failures/,'the old reset-based field is refused rather than misread');
  assert.throws(()=>claude({failures:-1}),/failures/);
