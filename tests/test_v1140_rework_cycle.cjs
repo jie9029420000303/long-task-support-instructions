@@ -163,28 +163,26 @@ for(const [platform,scripts] of [['codex',CODEX],['claude',CLAUDE]]){
   });
 }
 
-test('codex: the switch notice names the real cause, and the silent window counts awake time only',()=>{
+test('codex: the switch notice names the real cause, and awake time leaves out the sleep',()=>{
   const fallback=require(path.join(CODEX,'model-fallback.cjs')),clock=require(path.join(CODEX,'supervisor-clock.cjs'));
-  const reason=hit=>fallback.switchReason(hit,'gpt-6.2-sol',15*60000);
+  const reason=hit=>fallback.switchReason(hit,'gpt-6.2-sol');
   assert.match(reason({connectionReset:true,status:429}),/OpenCodex 連線中斷.*不是額度被拒/);
-  assert.equal(reason({silent:true,failure:true}),'切換後 15 分鐘（不含電腦睡眠）沒有成功回應：');
   assert.match(reason({failure:true,error:'stream closed'}),/連續出錯（stream closed）/);
   assert.equal(reason({status:402,model:'openrouter/meta-muse-ember'}),'OpenRouter 餘額不足：');
   assert.equal(reason({status:429,model:'openrouter/meta-muse-ember'}),'開源順位短暫限速：');
   assert.equal(reason({status:429,model:'anthropic/claude-opus-5-5'}),'額度限速：');
   assert.equal(reason(null),'前面的順位 gpt-6.2-sol 已可再用：');
-  assert.equal(fallback.restoreReason({basis:fallback.SILENT_BASIS}),'原模型的失敗暫停已結束。');
   assert.equal(fallback.restoreReason({basis:fallback.OPENROUTER_BASIS}),'原模型的短暫限速已結束。');
   assert.equal(fallback.restoreReason({basis:'weekly'}),'額度已恢復。');
-  // 2026-11-23 12:18: 24 minutes on the wall, 1,389 seconds asleep, under a minute awake: not yet silent.
+  // 2026-11-23 12:18: 24 minutes on the wall, 1,389 seconds asleep, under a minute awake.
   const from=Date.UTC(2026,10,23,4,18),now=from+24*60000;
   const state={sleeps:[{from:new Date(from+20000).toISOString(),to:new Date(from+20000+1389000).toISOString()}]};
   const awake=clock.awakeSince(state,from,now);
   assert.equal(awake,24*60000-1389000);assert.ok(awake<15*60000);
   // The watcher builds its notice from these functions, not a copy of its own.
   const watch=fs.readFileSync(path.join(CODEX,'native-watch.cjs'),'utf8');
-  assert.ok(watch.includes('fallback.switchReason(hit,target,SILENT_SWITCH_MS)')&&watch.includes('fallback.restoreReason(')&&!/function switchReason/.test(watch));
-  assert.ok(watch.includes('rework.alerts(')&&watch.includes('clock.awakeSince(state,'));
+  assert.ok(watch.includes('fallback.switchReason(hit,target)')&&watch.includes('fallback.restoreReason(')&&!/function switchReason/.test(watch));
+  assert.ok(watch.includes('rework.alerts('));
 });
 
 

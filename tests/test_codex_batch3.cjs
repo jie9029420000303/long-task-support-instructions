@@ -128,18 +128,17 @@ test('the supervisor and the executor fall back in one shared order, workers in 
   withEnv({OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json')},()=>{
     const state={rateLimits:{'executor|anthropic/':{until:Date.now()+60000}}};
     const opus='anthropic/claude-opus-5-5',paid='anthropic-apikey/claude-opus-5-5',child='anthropic/claude-sonnet-5-5';
-    for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(opus,role),[opus,paid,'gpt-6.10-sol','gpt-6.1-terra'],role);
-    assert.deepEqual(fallback.chainFor(paid,'executor'),[opus,paid,'gpt-6.10-sol','gpt-6.1-terra'],'a chat started on the API key still has the whole order');
-    assert.equal(fallback.next(opus,opus,'executor',state),paid);
+    for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(role),[opus,paid,'gpt-6.10-sol','gpt-6.1-terra'],role);
+    assert.equal(fallback.next(opus,'executor',state),paid);
     assert.equal(fallback.limited(state,opus,Date.now(),'supervisor'),false,'the executor refusal is not the supervisor\'s');
-    assert.equal(fallback.next(child,child,'subagent',state),'anthropic-apikey/claude-sonnet-5-5','workers have the Sonnet API next (decision 20)');
+    assert.equal(fallback.next(child,'subagent',state),'anthropic-apikey/claude-sonnet-5-5','workers have the Sonnet API next (decision 20)');
     state.rateLimits['supervisor|anthropic/']={until:Date.now()+60000};
     state.apiMonth={until:Date.now()+86400000};
-    assert.equal(fallback.next(opus,opus,'supervisor',state),'gpt-6.10-sol','an API key known used up this month is skipped');
-    assert.equal(fallback.next(child,child,'subagent',state),'gpt-6.1-terra');
+    assert.equal(fallback.next(opus,'supervisor',state),'gpt-6.10-sol','an API key known used up this month is skipped');
+    assert.equal(fallback.next(child,'subagent',state),'gpt-6.1-terra');
     state.rateLimits['executor|gpt-6.10-sol']={until:Date.now()+60000};
-    assert.equal(fallback.next(opus,opus,'executor',state),'gpt-6.1-terra');
-    assert.equal(fallback.next('gpt-6-luna','gpt-6-luna','executor',{}),opus,'the executor side starts on subscription Opus');
+    assert.equal(fallback.next(opus,'executor',state),'gpt-6.1-terra');
+    assert.equal(fallback.next('gpt-6-luna','executor',{}),opus,'the executor side starts on subscription Opus');
   });
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'batch3-quota-'));
   try{

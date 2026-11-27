@@ -9,18 +9,19 @@
 const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const pace=require('./pace.cjs');
 const FALLBACK_MS=5*60*60*1000;
-// A route that keeps failing for another reason (HTTP 400 payload rejected, 5xx) or never answers after a switch is
-// left for 30 minutes; an open-source rate limit is short-lived and is retried after 15 minutes (2026-11-21 review).
+// A route that keeps failing for another reason (HTTP 400 payload rejected, 5xx) is left for 30 minutes; an
+// open-source rate limit is short-lived and is retried after 15 minutes (2026-11-21 review).
 const FAILURE_COUNT=3,FAILURE_SPAN_MS=60000,FAILURE_COOLDOWN_MS=30*60000,OPENROUTER_COOLDOWN_MS=15*60000;
-const FAILURE_BASIS='連續失敗（非額度），暫停此順位 30 分鐘',OPENROUTER_BASIS='開源順位短暫限速，15 分鐘後再試',SILENT_BASIS='切換後沒有成功回應，暫停此順位 30 分鐘';
+const FAILURE_BASIS='連續失敗（非額度），暫停此順位 30 分鐘',OPENROUTER_BASIS='開源順位短暫限速，15 分鐘後再試';
 const UNSUPPORTED_BASIS='目前的帳號不支援這個模型，5 小時後再試';
 const BILLING_BASIS='API 儲值用完，這台電腦所有工區 5 小時後再試';
 const catalog=require('./model-catalog.cjs');
 // The OpenAI subscription first, then the OpenAI API key (Jay 2026-11-25「兩邊都排，順位接在openai月訂閱戶後面」).
 const GPT_ACCOUNTS=['','openai-apikey/'];
 const solRoutes=(items=catalog.installed())=>GPT_ACCOUNTS.map(provider=>catalog.latest(items,'gpt',provider,'sol')?.id).filter(Boolean);
-// The stops of each order, front first. A mainline's Claude stops keep the tier it was started on (Opus unless Jay
-// chose another); its GPT stops are Sol then Terra. Open-source stops follow openrouter-route.cjs.
+// The stops of each order, front first. A mainline's Claude stops are Opus whatever model it was started on, so it
+// comes back to the first stop of its role (Jay 2026-11-27: 工區 D's executor, started on Sonnet for the 11/26 test,
+// was switched back to Sonnet at 15:34); its GPT stops are Sol then Terra. Open-source stops follow openrouter-route.cjs.
 const MAINLINE_STOPS=['claude|anthropic/','claude|anthropic-apikey/','sol|','sol|openai-apikey/','terra|','terra|openai-apikey/'];
 const SUBAGENT_STOPS=['claude|anthropic/','claude|anthropic-apikey/','terra|','terra|openai-apikey/'];
 const stopsOf=role=>role==='subagent'?SUBAGENT_STOPS:MAINLINE_STOPS;
@@ -162,10 +163,9 @@ function modelPolicy(binding){
 function finalReviewer(model){
   return ['sol','astra','opus','fable'].includes(catalog.identity(model)?.tier);
 }
-// The order without its open-source stops. A subagent's order does not depend on the mainline (decision 20).
-function chainFor(original,role){
-  const items=catalog.installed(), originalModel=catalog.identity(original);
-  const claudeTier=role==='subagent'?'sonnet':originalModel?.family==='claude'?originalModel.tier:'opus';
+// The order of a role without its open-source stops. A subagent's order does not depend on the mainline (decision 20).
+function chainFor(role){
+  const items=catalog.installed(), claudeTier=role==='subagent'?'sonnet':'opus';
   return stopsOf(role).map(stop=>{
     const [kind,provider]=stop.split('|');
     return kind==='claude'?catalog.latest(items,'claude',provider,claudeTier)?.id:catalog.latest(items,'gpt',provider,kind)?.id;
@@ -191,8 +191,8 @@ function availableFourth(config){
   const routes=require('./openrouter-route.cjs').routes(config);
   return config?routes.find(r=>r.model===config.model && r.effort===config.effort)||null:routes[0]||null;
 }
-function next(original,current,role,state,now=Date.now(),fourth=null){
-  const candidates=[...chainFor(original,role),...openRoutes(role,fourth).map(r=>r.model)];
+function next(current,role,state,now=Date.now(),fourth=null){
+  const candidates=[...chainFor(role),...openRoutes(role,fourth).map(r=>r.model)];
   return candidates.find(model=>model!==current&&!limited(state,model,now,role))||null;
 }
 // The refused turn's own error names the reset: "You've hit your usage limit. Try again at 11:40 PM.", or for a later day
@@ -277,13 +277,13 @@ function recovered(state,now=Date.now()){
   const back=key=>quiet(key,state.routeRefused?.[key]||0);
   // A supervisor paused for consecutive failures comes back the same way, once the route has been quiet of failures
   // as well as refusals (Jay 2026-11-23 Q67: after two outages that hit every route at once, both supervisors stayed
-  // on open-source models for up to 37 minutes although Opus was answering again). The executor's failure pauses and
-  // the silent-switch pause keep their 30 minutes.
+  // on open-source models for up to 37 minutes although Opus was answering again). The executor's failure pauses keep
+  // their 30 minutes.
   const backFromFailure=key=>quiet(key,Math.max(state.routeRefused?.[key]||0,state.routeFailed?.[key]||0));
   let changed=false;
   for(const [key,item] of Object.entries(state.rateLimits||{})){
     const failed=item.basis===FAILURE_BASIS;
-    if(item.basis===SILENT_BASIS||item.basis===BILLING_BASIS||failed&&!key.startsWith('supervisor|'))continue;
+    if(item.basis===BILLING_BASIS||failed&&!key.startsWith('supervisor|'))continue;
     const at=failed?backFromFailure(plainKey(key)):back(plainKey(key));
     if(at>item.since&&item.until>now){item.until=now;item.basis=ROUTE_BASIS;changed=true;}
   }
@@ -387,9 +387,6 @@ function scan(state,threads){
       latest.set(row.conversationId+'\u0000'+keyOf(model),row);
       const owner=owners.get(row.conversationId),switched=state.modelSwitch?.[owner.threadId];
       if(switched&&!switched.respondedAt&&model===switched.current&&at>=switched.since&&row.status>=200&&row.status<300&&row.usage?.outputTokens>0)switched.respondedAt=at;
-      // A request of the model the chat was switched away from, failing after the switch: the chat did not take it.
-      if(switched&&!switched.respondedAt&&at>=switched.since&&model!==switched.current&&model===(switched.from||switched.original)&&
-        row.status>=400&&row.status!==499&&!(switched.oldRouteFailedAt>=at))switched.oldRouteFailedAt=at;
       // Consecutive non-quota failures of one mainline on one model; a success of that thread on that model clears them.
       if(owner.role!=='subagent'){
         if(row.status>=200&&row.status<300){if(failures[owner.threadId]?.model===model)delete failures[owner.threadId];}
@@ -477,7 +474,7 @@ function ladderOf(state,now=Date.now(),fourth=null){
   const quota=require('./claude-quota.cjs'),reading=state.claudeQuota;
   const roles={};
   for(const role of ['subagent','supervisor','executor']){
-    const order=[...chainFor(null,role),...openRoutes(role,fourth).map(r=>r.model)],floor=floorIndex(state,role,now);
+    const order=[...chainFor(role),...openRoutes(role,fourth).map(r=>r.model)],floor=floorIndex(state,role,now);
     roles[role]={order,floor,first:order.find(model=>!limited(state,model,now,role))||null};
   }
   return {step:quota.step(state),available:reading?.available??null,thresholds:quota.LADDER,fiveHourStep:reading?.fiveHourStep===true,roles};
@@ -506,13 +503,12 @@ function publish(run,state,now=Date.now(),fourth=null){
   return body;
 }
 // The notice names what actually happened (2026-11-23: ten notices said 額度限速 while no provider had refused for
-// quota). A waiting entry carries no refusal of its own: its route simply came free. silentMs is the watcher's window.
-function switchReason(hit,target,silentMs){
+// quota). A waiting entry carries no refusal of its own: its route simply came free.
+function switchReason(hit,target){
   if(!hit)return '前面的順位 '+target+' 已可再用：';
   if(hit.connectionReset)return 'OpenCodex 連線中斷（OpenCodex 自己回 429，不是額度被拒）：';
   if(hit.unsupported)return '目前的帳號不支援 '+hit.model+'（OpenCodex 回 model_unavailable）：';
   if(hit.billing)return 'API 儲值用完（OpenCodex 回 billing_exhausted），這台電腦所有工區 5 小時內都跳過這組 API：';
-  if(hit.silent)return '切換後 '+Math.round(silentMs/60000)+' 分鐘（不含電腦睡眠）沒有成功回應：';
   if(hit.failure)return '目前模型連續出錯（'+String(hit.error||'').slice(0,80)+'）：';
   if(hit.status===402)return 'OpenRouter 餘額不足：';
   if(hit.status===429&&String(hit.model||'').startsWith('openrouter/'))return '開源順位短暫限速：';
@@ -521,14 +517,14 @@ function switchReason(hit,target,silentMs){
 }
 function restoreReason(limit){
   const basis=limit?.basis;
-  if(basis===FAILURE_BASIS||basis===SILENT_BASIS||limit?.cooldown==='failure')return '原模型的失敗暫停已結束。';
+  if(basis===FAILURE_BASIS||limit?.cooldown==='failure')return '原模型的失敗暫停已結束。';
   if(basis===OPENROUTER_BASIS)return '原模型的短暫限速已結束。';
   if(basis===UNSUPPORTED_BASIS||limit?.cooldown==='unsupported')return '原模型已可再用。';
   if(basis===BILLING_BASIS||limit?.cooldown==='billing')return 'API 儲值暫停已滿 5 小時，重新試用。';
   return '額度已恢復。';
 }
-module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,SILENT_BASIS,UNSUPPORTED_BASIS,BILLING_BASIS,OPENROUTER_ACCOUNT,
-  billingAccount,subscriptionWorker,cannotDispatch,supervisorOwner,
+module.exports={FALLBACK_MS,FAILURE_COOLDOWN_MS,OPENROUTER_COOLDOWN_MS,FAILURE_BASIS,OPENROUTER_BASIS,UNSUPPORTED_BASIS,BILLING_BASIS,OPENROUTER_ACCOUNT,
+  billingAccount,subscriptionWorker,cannotDispatch,supervisorOwner,sharedFile,
   modelPolicy,finalReviewer,solRoutes,MAINLINE_STOPS,SUBAGENT_STOPS,stopIndex,floorIndex,ladderOf,hashId,keyOf,sideOf,limitKey,plainKey,subscriptionClaude,subscriptionOpenAI,held,refused,migrateLimits,syncApiMonth,recordApiMonth,
   recordUnsupported,syncUnsupported,
   chainFor,openRoutes,limited,next,availableFourth,retryAt,errorReset,resetFor,refine,recovered,isFailure,scan,settingsOf,fullAccess,publish,switchReason,restoreReason};

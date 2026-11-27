@@ -8,6 +8,7 @@ const { createClient } = require('./mcp-client.cjs');
 const { hash, read, need, validateContract, validateDecision, quietReview, PROGRESS_REVIEW_MS } = require('./guard.cjs');
 const clock = require('./supervisor-clock.cjs');
 const fallback = require('./model-fallback.cjs');
+const probes = require('./route-probe.cjs');
 const quota = require('./claude-quota.cjs');
 const catalog = require('./model-catalog.cjs');
 const dashboard = require('./dashboard.cjs');
@@ -41,9 +42,9 @@ const WAIT_MINUTE_MS = Number(process.env.CODEX_WAIT_MINUTE_MS) || 60000;
 // A delivery queued behind a running turn no longer holds the whole watcher (2026-11-21 review): after 10 minutes it
 // stays queued in the target's own message queue and is confirmed later, so rate limits and other events still run.
 const BUSY_LIMIT_MS = Number(process.env.LONG_TASK_BUSY_LIMIT_MS) || 10 * 60000;
-// A switched chat that has produced no successful answer after 15 minutes moves on to the next route.
-const SILENT_SWITCH_MS = Number(process.env.LONG_TASK_SILENT_SWITCH_MS) || 15 * 60000;
 const SWITCH_RESENDS = 3;
+// A quota reading younger than this counts as fresh for a switch; an older one is read again before the switch.
+const QUOTA_FRESH_MS = 60000;
 // The App unloads a chat idle for about three hours and ends the processes it started, this watcher included
 // (2026-10-12: research chat idle 02:16→05:33, both watchers gone; every chat in the log unloaded after ~3h idle).
 // After 150 idle minutes the watcher sends its host, the supervisor chat, one short turn to stay loaded.
@@ -413,7 +414,9 @@ async function sendAndRead(target, prompt, key, options = {}) {
   const role=target===binding.supervisorId?'supervisor':'executor';
   const due=activeRoute && !activeRoute.original?.startsWith('openrouter/') && (!state.routeWaiting?.[target]) && activeRoute.until<=Date.now() &&
     !fallback.limited(state,activeRoute.original,Date.now(),role);
-  const carryRestore=fallback.modelPolicy(binding)==='automatic' && !options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt);
+  // The restore rides the delivery only once its route answers a probe (Jay 2026-11-27 decision 44).
+  const carryRestore=fallback.modelPolicy(binding)==='automatic' && !options.model && due && (!activeRoute.restored || activeRoute.current===activeRoute.original&&!activeRoute.respondedAt) &&
+    (await probes.probe(activeRoute.original,run)).ok;
   if(carryRestore)options={model:activeRoute.original,thinking:activeRoute.effort};
   // The supervisor reasons at xhigh where a case is judged (a submission, and its closing review) and at High for every
   // other event (Jay 2026-11-26 decision 2). An open-source supervisor stays at max, and a restore keeps its model.
@@ -899,7 +902,40 @@ async function handleAmendRequest(){
 // subagent is re-dispatched on the subagent order; new packages follow the ladder through model-route.cjs.
 // The notice names what actually happened (2026-11-23: ten notices said 額度限速 while no provider had refused for
 // quota): model-fallback.cjs switchReason / restoreReason.
-async function handleRateLimits() {
+// What a refusal of a route means for every later choice: the limit of that route until its reset, and the records
+// every run on this Mac reads. A failed probe that names the quota, the balance or the model is recorded the same way.
+function recordLimit(hit,files) {
+  const plain=fallback.keyOf(hit.model), open=String(hit.model||'').startsWith('openrouter/');
+  const billing=hit.billing?fallback.billingAccount(hit.model):null;
+  const key=open&&hit.status===402?fallback.OPENROUTER_ACCOUNT:fallback.limitKey(hit.role,billing||hit.model), known=state.rateLimits?.[key];
+  const reset=hit.quotaReset||(hit.failure?{until:hit.at+fallback.FAILURE_COOLDOWN_MS,basis:fallback.FAILURE_BASIS,cooldown:'failure'}:
+    hit.unsupported?{until:hit.at+fallback.FALLBACK_MS,basis:fallback.UNSUPPORTED_BASIS,cooldown:'unsupported'}:
+    billing?{until:hit.at+fallback.FALLBACK_MS,basis:fallback.BILLING_BASIS,cooldown:'billing'}:
+    open&&hit.status!==402?{until:hit.at+fallback.OPENROUTER_COOLDOWN_MS,basis:fallback.OPENROUTER_BASIS,cooldown:'short'}:fallback.resetFor(plain,hit.at,files));
+  if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...reset};
+  else {
+    known.files = [...new Set([...(known.files || []),...files])];
+    if(hit.quotaReset?.fromError)Object.assign(known,hit.quotaReset);
+  }
+  // The Claude API month cap holds for every run until its named reset.
+  if(plain==='anthropic-apikey/'&&hit.quotaReset)fallback.recordApiMonth(state,run,hit.quotaReset.until,hit.quotaReset.basis);
+  if(hit.unsupported)fallback.recordUnsupported(run,plain,hit.at,hit.at+fallback.FALLBACK_MS);
+  // Every role of every run skips the key from now on, this run's other side included.
+  if(billing){fallback.recordUnsupported(run,billing,hit.at,hit.at+fallback.FALLBACK_MS,fallback.BILLING_BASIS);fallback.syncUnsupported(state,run);}
+}
+// A failed probe read as a refusal: the provider's code tells the balance, the model or the quota. An outage or a
+// timeout records nothing; the failed probe itself keeps that model out of every run's choice for a minute.
+function probeRefusal(result,role,threadId) {
+  const code=String(result.code||''), error=('換模型前試打：'+(result.code||result.status)+' '+(result.message||'')).slice(0,200);
+  const base={role,threadId,model:result.model,at:result.at,error};
+  if(/credit_balance|insufficient_quota|billing/.test(code)&&fallback.billingAccount(result.model))return {...base,status:429,billing:true};
+  if(code==='model_unavailable')return {...base,status:400,unsupported:true};
+  if(result.status===402)return {...base,status:402};
+  if(result.status===429||/rate_limit|usage_limit/.test(code))return {...base,status:429};
+  return null;
+}
+// fresh: the quota was read at once for a switch of this pass, which is decided again on that reading.
+async function handleRateLimits({fresh=false}={}) {
   if (fallback.modelPolicy(binding)==='locked') return;
   let dirty=fallback.migrateLimits(state);
   if(fallback.syncApiMonth(state,run))dirty=true;
@@ -914,58 +950,27 @@ async function handleRateLimits() {
   const awaitingOutput=Object.values(state.modelSwitch||{}).filter(record=>!record.restored&&!record.respondedAt);
   const subagents = pace.agentRuns(binding).map(item => ({role:'subagent',threadId:item.id,path:item.path,file:item.sourceFile}));
   const hits = fallback.scan(state,[...(ownsSupervisor?[{role:'supervisor',threadId:binding.supervisorId}]:[]),{role:'executor',threadId:binding.executorId},...subagents]);
-  // A switched chat that took the new model but has produced no successful answer for 15 minutes, or never started a
-  // turn on it while idle, is treated like a failing route.
+  // A switch has taken once a turn that started after it runs the new model, as the chat's own turn_context says. A
+  // turn that started after the switch on the model it left means the chat did not take it: the switch is sent again
+  // while the chat is idle, once for each such turn and at most three times. Nothing is judged by elapsed time (Jay
+  // 2026-11-27 decision 44, replacing the 15-minute silent judgment and the resend read from failed requests: 15:19
+  // 清票's executor was judged silent the moment a turn it had started on Opus before the 14:56 switch ended, and was
+  // moved on to Terra although Opus had answered all along).
   for (const [id,record] of Object.entries(state.modelSwitch||{})) {
-    if (record.restored || record.respondedAt || record.delivery || record.silentAt) continue;
-    // The first requests after a switch went to the old model and failed: the chat never took the switch (2026-11-27
-    // 14:0x: the requests after a switch to Terra still asked for the old model, and the 15 silent minutes paused Terra
-    // for 30 minutes). The switch is sent again while the chat is idle, at most three times, and the new stop is not
-    // paused for those failures (Jay 2026-11-27 decision 38).
-    // A chat set back to the old model and refused there again is switched by the refusal itself, not resent.
-    const seenNow=id===binding.executorId?state.executorSettings:fallback.settingsOf(id),setNow=seenNow?.applied?.model||seenNow?.model;
-    if (record.oldRouteFailedAt && !(setNow!==record.current && hits.some(hit=>hit.threadId===id&&hit.model===setNow))) {
-      if (record.oldRouteFailedAt>(record.resentFor||0) && (record.resends||0)<SWITCH_RESENDS && !await targetBusy(id)) {
-        record.resends=(record.resends||0)+1;record.resentFor=record.oldRouteFailedAt;
-        record.delivery={key:'model-switch-resend-'+id.slice(0,8)+'-'+(state.modelSwitches||0)+'-'+record.resends,
-          prompt:'重送換模型通知（第 '+record.resends+' 次）：上一則換模型之後，新的請求仍送到 '+(record.from||record.original)+' 而失敗。本對話改用 '+record.current+'，從已確認的進度接續。',
-          effort:record.current.startsWith('openrouter/')?'max':record.effort};
-        dirty=true;
-      }
-      continue;
-    }
-    const actual=fallback.settingsOf(id), after=Boolean(actual&&Date.parse(actual.at)>=record.since);
-    // A model chosen by hand after the switch is not a silent route.
-    if (after && actual.model!==record.current) continue;
-    // Only a fresh switch is judged: a record older than an hour (saved before this check, or whose answer fell
-    // outside the first usage read) is left alone.
-    // Only awake time counts: a Mac asleep through the window gives the new route no chance to answer (2026-11-23
-    // 12:18 switch judged silent at 12:42 after 1,389 seconds of sleep and under a minute awake).
-    const waited=clock.awakeSince(state,after?Date.parse(actual.at):record.since);
-    if (waited < SILENT_SWITCH_MS || waited >= 4*SILENT_SWITCH_MS || !after && await targetBusy(id)) continue;
-    record.silentAt=Date.now();
-    hits.push({role:record.role,threadId:id,model:record.current,at:Date.now(),failure:true,silent:true,error:'切換後 '+Math.round(SILENT_SWITCH_MS/60000)+' 分鐘沒有成功回應'});
+    if (record.restored || record.takenAt || record.delivery) continue;
+    const turn=fallback.settingsOf(id);
+    if (!turn?.turnId || !(Date.parse(turn.at)>=record.since)) continue;
+    if (turn.model===record.current) { record.takenAt=Date.parse(turn.at); dirty=true; continue; }
+    if (turn.model!==(record.from||record.original) || record.resentFor===turn.turnId || (record.resends||0)>=SWITCH_RESENDS || await targetBusy(id)) continue;
+    record.resends=(record.resends||0)+1;record.resentFor=turn.turnId;
+    record.delivery={key:'model-switch-resend-'+id.slice(0,8)+'-'+(state.modelSwitches||0)+'-'+record.resends,
+      prompt:'重送換模型通知（第 '+record.resends+' 次）：上一則換模型之後，新回合仍用 '+turn.model+'。本對話改用 '+record.current+'，從已確認的進度接續。',
+      effort:record.current.startsWith('openrouter/')?'max':record.effort};
+    dirty=true;
   }
   for (const hit of hits) {
-    const plain=fallback.keyOf(hit.model), open=String(hit.model||'').startsWith('openrouter/');
-    const billing=hit.billing?fallback.billingAccount(hit.model):null;
-    const key=open&&hit.status===402?fallback.OPENROUTER_ACCOUNT:fallback.limitKey(hit.role,billing||hit.model), known=state.rateLimits?.[key];
     // The refused thread's own rollout names the reset; its file is kept so later looks can still find that error.
-    const files = [hit.file || pace.sessionFile(hit.threadId)].filter(Boolean);
-    const reset=hit.quotaReset||(hit.failure?{until:hit.at+fallback.FAILURE_COOLDOWN_MS,basis:hit.silent?fallback.SILENT_BASIS:fallback.FAILURE_BASIS,cooldown:'failure'}:
-      hit.unsupported?{until:hit.at+fallback.FALLBACK_MS,basis:fallback.UNSUPPORTED_BASIS,cooldown:'unsupported'}:
-      billing?{until:hit.at+fallback.FALLBACK_MS,basis:fallback.BILLING_BASIS,cooldown:'billing'}:
-      open&&hit.status!==402?{until:hit.at+fallback.OPENROUTER_COOLDOWN_MS,basis:fallback.OPENROUTER_BASIS,cooldown:'short'}:fallback.resetFor(plain,hit.at,files));
-    if (!known || known.until <= hit.at) (state.rateLimits ||= {})[key] = {since:hit.at,model:hit.model,files,...reset};
-    else {
-      known.files = [...new Set([...(known.files || []),...files])];
-      if(hit.quotaReset?.fromError)Object.assign(known,hit.quotaReset);
-    }
-    // The Claude API month cap holds for every run until its named reset.
-    if(plain==='anthropic-apikey/'&&hit.quotaReset)fallback.recordApiMonth(state,run,hit.quotaReset.until,hit.quotaReset.basis);
-    if(hit.unsupported)fallback.recordUnsupported(run,plain,hit.at,hit.at+fallback.FALLBACK_MS);
-    // Every role of every run skips the key from now on, this run's other side included.
-    if(billing){fallback.recordUnsupported(run,billing,hit.at,hit.at+fallback.FALLBACK_MS,fallback.BILLING_BASIS);fallback.syncUnsupported(state,run);}
+    recordLimit(hit,[hit.file || pace.sessionFile(hit.threadId)].filter(Boolean));
     const queue = state.switchQueue ||= [];
     if (!queue.some(item => item.threadId === hit.threadId && item.model === hit.model)) queue.push(hit);
   }
@@ -1007,11 +1012,13 @@ async function handleRateLimits() {
   // A drain left by an older version (the executor waiting to leave the Claude subscription) has no meaning now.
   if(state.quotaDrain){delete state.quotaDrain;dirty=true;}
   const active=Object.entries(state.modelSwitch||{}).filter(([,r])=>!r.restored);
-  // A mainline left on an open-source route without a switch of this watcher (a model chose it under the rule retired
-  // 2026-11-21) is moved up like a switched one: open source is only for when every route above it is out.
+  // A mainline left off its role's order without a switch of this watcher is moved up like a switched one: an
+  // open-source route a model chose under the rule retired 2026-11-21 (open source is only for when every route above
+  // it is out), or another Claude tier (工區 D's executor, started on Sonnet for the 11/26 test, Jay 2026-11-27).
   const mainlines=[binding.executorId,...(ownsSupervisor?[binding.supervisorId]:[])];
+  const offOrder=(model,role)=>{const chain=fallback.chainFor(role);return Boolean(model)&&(String(model).startsWith('openrouter/')||chain.length>0&&!chain.includes(model));};
   const strandedIds=mainlines.filter(id=>!(state.modelSwitch?.[id]&&!state.modelSwitch[id].restored)&&!waiting[id]&&
-    String(setModel(id)||'').startsWith('openrouter/'));
+    offOrder(setModel(id),id===binding.executorId?'executor':'supervisor'));
   // A mainline set to a stop the quota reading holds back moves on: the OpenAI subscription at its line or last 2%
   // (Jay 2026-11-25), or a stop in front of its ladder floor (2026-11-26 decision 24). So does an executor on the
   // ChatGPT subscription whose subscription Terra cannot serve its workers (2026-11-27 decision 37).
@@ -1026,7 +1033,7 @@ async function handleRateLimits() {
     const hit=waiting[id], record=state.modelSwitch?.[id], switched=record&&!record.restored;
     const role=hit?.role||record?.role||(id===binding.supervisorId?'supervisor':'executor');
     if(role==='subagent'){
-      const target=fallback.next(hit.model,hit.model,role,state,Date.now());
+      const target=fallback.next(hit.model,role,state,Date.now());
       const notice='rate-subagent-'+fallback.hashId(id+'/'+hit.at);
       await sendAndRead(binding.executorId,'子代理 '+(hit.path||id)+' 遇額度限速。'+(target?'依子代理順位重派，候選為 '+target+'。':'依派工清單與 model-fallback.json 重查可用模型，先繼續其他工作。'),notice);
       delete waiting[id];checkpoint();continue;
@@ -1045,15 +1052,15 @@ async function handleRateLimits() {
       delete waiting[id];checkpoint();continue;
     }
     const observed=setModel(id);
-    const stranded=!switched&&!hit&&String(observed||'').startsWith('openrouter/');
-    // A stranded mainline takes the first stop of its role as its original, so it climbs back as the routes free up.
-    const original=switched?record.original:hit?.model||(stranded?fallback.chainFor(observed,role)[0]:observed);
+    const stranded=!switched&&!hit&&offOrder(observed,role);
+    const chain=fallback.chainFor(role);
+    // Every mainline comes back to the first stop of its role, whatever model it was started on or switched from
+    // (Jay 2026-11-27: 工區 D's executor was switched back to its Sonnet start at 15:34).
+    const original=chain[0]||(switched?record.original:hit?.model||observed);
     const current=hit?.model||(switched?record.current:observed);
-    const chain=fallback.chainFor(original,role);
-    // A manually chosen start stays in the chain (every role has the Claude API on its order since 2026-11-26).
-    if(!chain.includes(original) && !original?.startsWith('openrouter/'))chain.unshift(original);
     chain.push(...fallback.openRoutes(role,binding.fourthExecutorModel).map(r=>r.model));
-    const candidates=[...new Set(chain)].filter(model=>model && !fallback.limited(state,model,time,role) &&
+    // A model whose probe failed in the last minute, in any run on this Mac, is left out like a limited one.
+    const candidates=[...new Set(chain)].filter(model=>model && !fallback.limited(state,model,time,role) && !probes.failedRecently(model,run) &&
       !(switched && model===original && record.until>time && !state.rateLimits?.[fallback.limitKey(role,original)]));
     const target=candidates[0];
     // Without its own refusal the supervisor goes down to an open-source route only at the ladder's bottom step.
@@ -1070,9 +1077,7 @@ async function handleRateLimits() {
     // WebRPA -22: set to DeepSeek since 16:24, its turn running, told at 16:36 to use DeepSeek). A real refusal always
     // gets its continuation: the turn it stopped does not resume by itself.
     if(hit?.waitingOnly && target===observed && await targetBusy(id)){delete waiting[id];checkpoint();continue;}
-    // Leaving a stop the quota reading holds back is told at once: it takes effect on the next turn.
     const floor=ladder && fallback.subscriptionOpenAI(current) && require('./claude-quota.cjs').openaiHeld(state);
-    if(!hit && !ladder && !noWorker && switched && current!==target && await targetBusy(id))continue;
     // A stranded mainline is told while it is idle and once per turn: a notice cannot move the turn in progress
     // (2026-11-23 工區 E: 72 identical notices in 19 minutes into one supervisor turn). A notice sent again says why
     // (Jay 2026-11-23:「印出來的訊息要讓我知道重送原因，不然我會以為是死迴圈不斷傳訊息」).
@@ -1083,17 +1088,38 @@ async function handleRateLimits() {
     if(!hit && switched && target===original && !original.startsWith('openrouter/') && (()=>{const actual=fallback.settingsOf(id);return actual?.model===original && Date.parse(actual.at)>=record.since;})() && !record.delivery){
       record.restored=now();record.restoredBy='already-on-original';checkpoint();continue;
     }
-    const restored=target===original && !original.startsWith('openrouter/');
+    // Every switch goes to an idle chat. A turn in progress keeps the model it started with, and a notice steered into
+    // it was taken as an instruction mid-turn (Jay 2026-11-27 decision 44: 清票's executor was told at 14:56 during a
+    // turn that ran on Opus until 15:19). A refused turn has ended, so a refusal is answered at once.
+    if(await targetBusy(id))continue;
+    // The quota is read again right before the switch, and the switch is decided again on that reading, so a reset
+    // nobody announced counts (Jay 2026-11-27 decision 45:「掃模型的排程只是多做一個即時確認剩餘額度」).
+    if(!fresh && Date.now()-(state.claudeQuota?.at||0)>=QUOTA_FRESH_MS){
+      await quota.refresh(state,Date.now(),run,{force:true});
+      fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();
+      return handleRateLimits({fresh:true});
+    }
+    // The target answers a probe before the chat is switched to it. One that does not is left out, recorded as refused
+    // when its error names the quota, the balance or the model, and the next pass takes the next stop (decision 44).
+    const tried=await probes.probe(target,run);
+    if(!tried.ok){
+      const refusal=probeRefusal(tried,role,id);
+      if(refusal)recordLimit(refusal,[]);
+      fallback.publish(run,state,Date.now(),binding.fourthExecutorModel);checkpoint();
+      continue;
+    }
+    // Back at the first stop the record closes: nothing is left above it to come back to.
+    const restored=target===original;
     const settings=fallback.settingsOf(id)||{};
     // Leaving open source (always max) a stranded mainline takes its role's usual effort: xhigh for both (decisions 1-2).
     const effort=(switched?record.effort:stranded?'xhigh':settings.effort)||null;
     const targetEffort=target.startsWith('openrouter/')?'max':effort;
     const until=state.rateLimits?.[fallback.limitKey(role,original)]?.until || time;
-    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：開源模型只在前面順位都不能用時使用。本對話改用 '+target+'，從已確認的進度接續。':restored ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：'+fallback.restoreReason(state.rateLimits?.[fallback.limitKey(role,original)]))+'本對話用 '+target+' 從中斷處接續原工作。':
+    let prompt=isPaused()?'本對話切換至 '+target+'。任務維持暫停，等原恢復指示。':stranded?'模型順位由背景程式切換：'+observed+' 不在本角色的順位上（開源模型只在前面順位都不能用時使用）。本對話改用 '+target+'，從已確認的進度接續。':restored&&(switched||target===current) ? (hit?'額度限速恢復時間已過。':'LONG_TASK_MODEL_RESTORED：'+fallback.restoreReason(state.rateLimits?.[fallback.limitKey(role,original)]))+'本對話用 '+target+' 從中斷處接續原工作。':
       floor?'OpenAI 訂閱留給 Jay 自己用（'+quota.describeOpenAI(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
       ladder?'降級階梯（'+quota.describe(reading)+'）：本對話改用 '+target+'，從已確認的進度接續。':
       noWorker?'主線在 ChatGPT 訂閱上只能派 Terra 訂閱子代理，Terra 訂閱目前不能用：本對話改用 '+target+'，從已確認的進度接續。':
-      fallback.switchReason(hit,target,SILENT_SWITCH_MS)+'本對話改用 '+target+'，從已確認的進度接續。';
+      fallback.switchReason(hit,target)+'本對話改用 '+target+'，從已確認的進度接續。';
     // Workers keep their own order whatever the mainline runs (Jay 2026-11-26 decision 20), except under a mainline on
     // the ChatGPT subscription, whose workers can only be the subscription Terra (2026-11-27 decision 37). So a change of
     // model family is told, and so is a move onto or off the ChatGPT subscription.
@@ -1108,7 +1134,9 @@ async function handleRateLimits() {
     if(stranded && told)prompt+='（第 '+(told.count+1)+' 次通知。重送原因：上一則在 '+clockText(Date.parse(told.at))+' 送出，之後開始的新回合仍設定為 '+observed+'。）';
     state.modelSwitches=(state.modelSwitches||0)+1;
     const key='model-switch-'+id.slice(0,8)+'-'+state.modelSwitches;
-    (state.modelSwitch||={})[id]={role,original,from:current,current:target,effort,since:time,until,restored:null,
+    // since is the moment the notice goes out, after the busy check and the probe: a turn the chat starts later is the
+    // one that shows whether it took the switch.
+    (state.modelSwitch||={})[id]={role,original,from:current,current:target,effort,since:Date.now(),until,restored:null,
       ...(ladder||switched&&record.ladderOrigin&&!hit?{ladderOrigin:true}:{}),delivery:{key,prompt,effort:targetEffort}};
     if(stranded)(state.strandedNotice||={})[id]={turnId,at:now(),count:(told?.count||0)+1};
     delete waiting[id];

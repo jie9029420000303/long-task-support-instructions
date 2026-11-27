@@ -84,7 +84,7 @@ function eZone(){
   save(path.join(root,'config.json'),{providers:{openrouter:{modelPinnedReasoningEfforts:{[museRaw]:'max'},modelOpenRouterRouting:{[museRaw]:{only:['google-vertex/global'],allowFallbacks:false}}}}});
   const envBase={OPENCODEX_HOME:root,OPENCODEX_MODEL_CATALOG:catalogFile};
   const rateLimits={};
-  withEnv(envBase,()=>{for(const model of fallback.chainFor(sol,'executor'))rateLimits[fallback.limitKey('executor',model)]={since:now-60000,until:now+3600000,model,basis:'replay'};});
+  withEnv(envBase,()=>{for(const model of fallback.chainFor('executor'))rateLimits[fallback.limitKey('executor',model)]={since:now-60000,until:now+3600000,model,basis:'replay'};});
   const record={role:'executor',original:sol,current:muse,effort:'high',since:now-30000,until:now+3600000,restored:null,respondedAt:now-29000};
   save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0,
     lastExecutorActivityAt:now,lastProgressReviewAt:now,rateLimits,modelSwitch:{'executor-qa':record}});

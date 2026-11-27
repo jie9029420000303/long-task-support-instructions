@@ -93,8 +93,8 @@ test('both mainline roles put the OpenAI API right after each OpenAI subscriptio
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'openai-chain-'));
   try{
     withEnv({OPENCODEX_MODEL_CATALOG:catalogFile(dir),LONG_TASK_HOME:dir,OPENCODEX_HOME:path.join(dir,'no-opencodex')},()=>{
-      for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(opus,role),[opus,paid,sol,apiSol,terra,apiTerra],role);
-      for(const mainline of [sol,apiSol,opus])assert.deepEqual(fallback.chainFor(mainline,'subagent'),[sonnet,'anthropic-apikey/claude-sonnet-5-5',terra,apiTerra],'workers of '+mainline);
+      for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(role),[opus,paid,sol,apiSol,terra,apiTerra],role);
+      for(const mainline of [sol,apiSol,opus])assert.deepEqual(fallback.chainFor('subagent'),[sonnet,'anthropic-apikey/claude-sonnet-5-5',terra,apiTerra],'workers of '+mainline);
       const now=Date.now(),state={claudeQuota:{step:0,openai:quota.evaluateOpenAI(reading(now),now)}};
       for(const role of ['supervisor','executor','subagent'])assert.equal(fallback.limited(state,sol,now,role),true,role+' skips the subscription Sol');
       assert.equal(fallback.limited(state,terra,now,'subagent'),true);
@@ -102,7 +102,7 @@ test('both mainline roles put the OpenAI API right after each OpenAI subscriptio
       assert.equal(fallback.limited(state,opus,now,'executor'),false,'the OpenAI floor does not touch the Claude stops');
       // With the Claude API out for the month the supervisor's next stop after Opus passes the held subscription Sol.
       state.apiMonth={until:now+DAY};
-      assert.equal(fallback.next(opus,opus,'supervisor',state),apiSol);
+      assert.equal(fallback.next(opus,'supervisor',state),apiSol);
       // Jay's voice, or any other conversation, keeps using the subscription: its success never lifts the floor.
       state.rateLimits={};state.routeOk={[sol]:now};state.routeRefused={};
       fallback.recovered(state,now+HOUR);
@@ -176,7 +176,8 @@ test('at the OpenAI floor and ladder step 6 the executor on the subscription Sol
     // Off the ChatGPT subscription the workers follow their own order again, so the move is told (2026-11-27 decision 37).
     assert.match(moved.prompt,/新派子代理照 model-fallback.json 的子代理順位/);
     const record=read(f.statePath).modelSwitch['executor-qa'];
-    assert.deepEqual([record.original,record.current],[sol,apiSol],'kept as a move away from the subscription Sol, so it returns after the reset');
+    // Every mainline comes back to the first stop of its role (Jay 2026-11-27), so it climbs back up the order after the reset.
+    assert.deepEqual([record.original,record.current],[opus,apiSol]);
     const published=read(path.join(f.run,'model-fallback.json'));
     assert.deepEqual(published.chain.executor.slice(2,4),[sol,apiSol]);
     assert.equal(published.openaiQuota.subscriptionHeld,true);
