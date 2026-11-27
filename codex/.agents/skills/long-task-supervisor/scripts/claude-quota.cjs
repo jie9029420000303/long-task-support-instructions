@@ -206,6 +206,28 @@ function list(provider){
       try{resolve(JSON.parse(stdout));}catch(caught){resolve({error:'unreadable ocx output: '+String(caught.message).slice(0,120)});}
     }));
 }
+// OpenCodex's experimental plaintextV2AgentMessages carries the messages between chats as plain text, so a mainline on
+// the ChatGPT subscription and a worker of any other provider read each other (2026-11-28 00:16: Opus to the
+// subscription Terra and the subscription Sol to DeepSeek both passed). Without it the platform encrypts the task for
+// the ChatGPT backend, any other provider refuses it, and a mainline on the subscription again hands work only to the
+// subscription Terra (decision 37). The running proxy's answer counts: the setting takes effect only once it restarts.
+// Jay 2026-11-28「A，放寬子代理跟主線同家的限制…背景程式加檢查 plaintext 設定還開著」.
+function plaintext(){
+  const file=process.env.LONG_TASK_CLAUDE_QUOTA_FILE;
+  if(file){
+    let data;try{data=JSON.parse(fs.readFileSync(file,'utf8'));}catch{data={};}
+    return Promise.resolve({enabled:typeof data.plaintextAgentMessages==='boolean'?data.plaintextAgentMessages:null});
+  }
+  const bin=process.env.OPENCODEX_OCX_BIN||'ocx';
+  return new Promise(resolve=>execFile(bin,['agent','status','--json'],{encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024},(error,stdout)=>{
+    if(error)return resolve({enabled:null,error:String(error.message||error).split('\n')[0].slice(0,200)});
+    try{const value=JSON.parse(stdout).v2?.plaintextAgentMessagesEnabled;resolve(typeof value==='boolean'?{enabled:value}:{enabled:null,error:'ocx agent status 沒有 plaintextAgentMessagesEnabled'});}
+    catch(caught){resolve({enabled:null,error:'unreadable ocx output: '+String(caught.message).slice(0,120)});}
+  }));
+}
+// A worker of any provider under any mainline, only while the running OpenCodex says the setting is on. Unknown counts
+// as off: a task the worker cannot read stops the mainline's turn.
+function crossFamily(state){return state?.claudeQuota?.plaintext?.enabled===true;}
 // A run under the system temp directory is a test: without a named file it never asks the real OpenCodex and the
 // reserve does not apply (the same rule notify.cjs uses for phone pushes).
 function temporary(run){
@@ -217,7 +239,8 @@ function temporary(run){
 // models switched on, and the model catalog. Their fingerprint is taken on every pass and a change reads at once
 // (Jay 2026-11-27「這個技能對opencodex裡面的各類相關設定應該要有即時掌握的機制 ... 要固化成程式程序」): a stop line or a
 // label changed at 23:00 used to wait for the next 30-minute reading. Credentials are left out, so a token refresh does
-// not count; the catalog counts by its size and time, since it is 1.6 MB.
+// not count; the catalog counts by its size and time, since it is 1.6 MB. The proxy's process id counts too: a setting
+// such as plaintextV2AgentMessages takes effect when OpenCodex restarts, and the restart is read at once.
 function settingsFingerprint(){
   const home=process.env.OPENCODEX_HOME||path.join(os.homedir(),'.opencodex');
   const json=file=>{try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch{return null;}};
@@ -227,7 +250,8 @@ function settingsFingerprint(){
   const catalog=[process.env.OPENCODEX_MODEL_CATALOG,path.join(codexHome,'opencodex-catalog.json')].filter(Boolean).map(file=>{
     try{const stat=fs.statSync(file);return [file,stat.size,stat.mtimeMs];}catch{return [file,null];}
   });
-  const settings={anthropic:accounts('anthropic'),chatgpt:accounts('chatgpt'),config:json(path.join(home,'config.json')),catalog};
+  let proxy=null;try{proxy=fs.readFileSync(path.join(home,'ocx.pid'),'utf8').trim();}catch{}
+  const settings={anthropic:accounts('anthropic'),chatgpt:accounts('chatgpt'),config:json(path.join(home,'config.json')),catalog,proxy};
   return crypto.createHash('sha256').update(JSON.stringify(settings)).digest('hex');
 }
 // Reads every 30 minutes, once just after any account reset (Q51 C) and whenever the OpenCodex settings change. force reads at once: the watcher reads again
@@ -238,12 +262,12 @@ async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   if(!force&&known&&now<known.nextReadAt&&known.settings===settings)return false;
   if(!process.env.LONG_TASK_CLAUDE_QUOTA_FILE&&run&&temporary(run)){
     state.claudeQuota={at:now,step:0,available:null,unconfigured:true,ladder:LADDER,accounts:[],
-      openai:evaluateOpenAI(null,now),nextReadAt:now+READ_EVERY_MS,settings};
+      openai:evaluateOpenAI(null,now),plaintext:{enabled:null},nextReadAt:now+READ_EVERY_MS,settings};
     return !known||!known.unconfigured;
   }
   // The ledger is read before OpenCodex, so a pause the other run just made shows in this reading.
   const file=stopsFile(run), ledger=loadStops(file);
-  const reading=await read(), data=reading.anthropic;
+  const [reading,plain]=await Promise.all([read(),plaintext()]), data=reading.anthropic;
   const actions=[];
   for(const provider of [data,reading.openai])if(provider&&!provider.error)actions.push(...await applyStops(provider,ledger,now));
   if(actions.some(action=>!action.error))saveStops(file,ledger);
@@ -257,7 +281,8 @@ async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   result.nextResetAt=resets.length?Math.min(...resets):null;
   result.nextReadAt=nextReadAt(result,now);
   result.settings=settings;
-  const changed=!known||known.step!==result.step||known.openai?.held!==result.openai.held||actions.length>0;
+  result.plaintext=plain;
+  const changed=!known||known.step!==result.step||known.openai?.held!==result.openai.held||known.plaintext?.enabled!==plain.enabled||actions.length>0;
   state.claudeQuota=result;
   return changed;
 }
@@ -276,6 +301,13 @@ function describe(quota){
   return 'Agent 可用量 '+share+'（停用線以上留給你）：'+why+(next!==undefined&&quota.available!==null?'；低於 '+next+'% 再降一階':'')+
     [...stops,...failed].map(s=>'；'+s).join('')+(quota.error?'；讀取錯誤：'+quota.error:'');
 }
+function describePlaintext(quota){
+  const plain=quota?.plaintext;
+  if(!plain)return '尚未讀取';
+  if(plain.enabled===true)return 'OpenCodex 的 plaintextV2AgentMessages 開著：主線在 ChatGPT 訂閱上也照子代理順位派工';
+  const why=plain.enabled===false?'OpenCodex 的 plaintextV2AgentMessages 已關閉':'讀不到 OpenCodex 的 plaintextV2AgentMessages'+(plain.error?'（'+plain.error+'）':'');
+  return why+'：主線在 ChatGPT 訂閱上時子代理只能用 Terra 訂閱。要恢復就執行 ocx config set plaintextV2AgentMessages true，再 ocx service restart';
+}
 function describeOpenAI(quota){
   const openai=quota?.openai;
   if(!openai)return '尚未讀取';
@@ -286,4 +318,4 @@ function describeOpenAI(quota){
   return left+'：長任務照常可用'+(openai.error?'；讀取錯誤：'+openai.error:'');
 }
 module.exports={LADDER,LADDER_DELAY,FIVE_HOUR_HIGH,FIVE_HOUR_NEAR_MS,READ_EVERY_MS,OPENAI_FLOOR,weightOf,shared,evaluate,evaluateOpenAI,stepOf,floorOf,nextReadAt,read,temporary,refresh,
-  step,openaiHeld,describe,describeOpenAI,planStops,applyStops,stopsFile};
+  step,openaiHeld,describe,describeOpenAI,describePlaintext,plaintext,crossFamily,planStops,applyStops,stopsFile};

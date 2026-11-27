@@ -79,7 +79,8 @@ test('every reading refreshes the Claude and OpenAI subscription quota first, re
     await withEnv({LONG_TASK_CLAUDE_QUOTA_FILE:undefined,OPENCODEX_OCX_BIN:bin,LONG_TASK_TEMP_ROOT:path.join(root,'elsewhere'),
       LONG_TASK_ACCOUNT_STOPS_FILE:path.join(root,'stops.json')},()=>quota.refresh(state,now,path.join(root,'run')));
     const argv=fs.readFileSync(calls,'utf8').trim().split('\n').map(JSON.parse);
-    assert.deepEqual(argv.map(a=>a.join(' ')).sort(),['account list anthropic --quota --refresh --json','account list openai --quota --refresh --json']);
+    // v1.21.4: the running proxy's plaintextV2AgentMessages is read with the same reading.
+    assert.deepEqual(argv.map(a=>a.join(' ')).sort(),['account list anthropic --quota --refresh --json','account list openai --quota --refresh --json','agent status --json']);
     assert.ok(!argv.some(a=>a[1]==='pause'),'nothing is paused in OpenCodex for the floor');
     assert.equal(state.claudeQuota.openai.held,true);
     assert.equal(quota.openaiHeld(state),true);

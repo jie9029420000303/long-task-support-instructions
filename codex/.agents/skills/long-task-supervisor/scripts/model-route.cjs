@@ -36,12 +36,13 @@ function resolve(input) {
   if(input.errors!==undefined)throw Error('errors 已改為 failures：這條驗收條文目前累計的不合格次數（rework.cjs status 的 failures），0 到 5');
   if(!main&&!openrouter().choices.some(r=>r.model===input.executorModel||r.model===input.supervisorModel))return {family:'unchanged',roles:{},reason:'Use the observed inventory for this model family.'};
   const result={family:main?.family||'openrouter',provider:main?.provider||'openrouter/',supervisorModel:input.supervisorModel,roles:{}};
-  let limits={},openaiHeld=false,floors={},apiMonth=null;
+  let limits={},openaiHeld=false,floors={},apiMonth=null,crossFamily=false;
   if(input.fallback){
     // The watcher publishes the executor side's limits, the ladder floor of each role and whether the OpenAI
     // subscription is out; before its first reading nothing is held here and the watcher moves the mainline later.
     try{const published=JSON.parse(fs.readFileSync(input.fallback,'utf8'));limits=published.limits||{};floors=published.ladder?.floors||{};
-      openaiHeld=published.openaiQuota?.subscriptionHeld===true;apiMonth=published.apiMonth||null;}
+      openaiHeld=published.openaiQuota?.subscriptionHeld===true;apiMonth=published.apiMonth||null;
+      crossFamily=published.plaintextAgentMessages?.enabled===true;}
     catch(error){if(error.code!=='ENOENT')throw error;} // A new run has no limit ledger yet.
   }
   const refused=id=>Date.parse(limits[keyOf(id)]?.until)>Date.now()||isOpen(id)&&Date.parse(limits['openrouter/']?.until)>Date.now()||
@@ -62,9 +63,10 @@ function resolve(input) {
     if(step>=JAY_AT&&!research){unavailable('這條已累計 '+step+' 次不合格：研究登記後由監督在待決帳問 Jay，裁決前不再派這條');continue;}
     const executorModel=input.executorModel||input.supervisorModel;
     // A mainline on the ChatGPT subscription can only hand work to the subscription Terra, whatever the subagent ladder
-    // says (Jay 2026-11-27 decision 37; any other provider refuses the encrypted task).
+    // says (Jay 2026-11-27 decision 37; any other provider refuses the encrypted task), unless the watcher reads
+    // OpenCodex's plaintextV2AgentMessages on: then every worker follows the subagent order (Jay 2026-11-28).
     // The mainline's model as the caller observed it (observedInput reads it from the calling chat's rollout).
-    const subscriptionMainline=worker&&subscriptionOpenAI(input.executorModel);
+    const subscriptionMainline=worker&&subscriptionOpenAI(input.executorModel)&&!crossFamily;
     // 1st, 3rd and 5th: the same subagent again, same model and effort, with the correction (followup_task).
     if(step%2===1&&!override.model){
       if(!input.previousModel||!input.previousEffort){unavailable('交回原子代理重做要附 previousModel 與 previousEffort（它剛才的模型與推理）');continue;}

@@ -944,6 +944,13 @@ async function handleRateLimits({fresh=false}={}) {
   // thresholds (after v1.21.1 it kept the old thresholds' text until a step changed).
   const readBefore=state.claudeQuota?.at;
   if(await quota.refresh(state,Date.now(),run)||state.claudeQuota?.at!==readBefore)dirty=true;
+  // The supervisor hears once when OpenCodex's plaintextV2AgentMessages is read off, and once when it is back on
+  // (Jay 2026-11-28「背景程式加檢查 plaintext 設定還開著」). A shared supervisor hears it from its owner watcher only.
+  const plain=state.claudeQuota?.plaintext?.enabled;
+  if(typeof plain==='boolean'&&state.plaintextSeen!==plain){
+    if(plain===false||state.plaintextSeen===false)state.plaintextNotice={enabled:plain,at:now()};
+    state.plaintextSeen=plain;dirty=true;
+  }
   // A supervisor shared with another run is moved by one watcher only (model-fallback.cjs supervisorOwner). This one
   // leaves it alone: its own open switch of that supervisor is closed and nothing of it is queued or judged here.
   const ownsSupervisor=fallback.supervisorOwner(run,binding.supervisorId);
@@ -1124,13 +1131,14 @@ async function handleRateLimits({fresh=false}={}) {
       noWorker?'主線在 ChatGPT 訂閱上只能派 Terra 訂閱子代理，Terra 訂閱目前不能用：本對話改用 '+target+'，從已確認的進度接續。':
       fallback.switchReason(hit,target)+'本對話改用 '+target+'，從已確認的進度接續。';
     // Workers keep their own order whatever the mainline runs (Jay 2026-11-26 decision 20), except under a mainline on
-    // the ChatGPT subscription, whose workers can only be the subscription Terra (2026-11-27 decision 37). So a change of
-    // model family is told, and so is a move onto or off the ChatGPT subscription.
+    // the ChatGPT subscription while OpenCodex's plaintextV2AgentMessages is off, whose workers can only be the
+    // subscription Terra (2026-11-27 decision 37, lifted with the setting on 2026-11-28). So a change of model family is
+    // told, and with the setting off so is a move onto or off the ChatGPT subscription.
     const familyOf=model=>String(model||'').startsWith('openrouter/')?model:catalog.identity(model)?.family||model;
     const onSubscription=fallback.subscriptionOpenAI(target);
-    const otherFamily=familyOf(current)!==familyOf(target);
-    if(role==='executor' && !isPaused() && (otherFamily||fallback.subscriptionOpenAI(current)!==onSubscription))
-      prompt+=' '+(otherFamily?'換到不同家模型':onSubscription?'換到 ChatGPT 訂閱':'離開 ChatGPT 訂閱')+'：在途子代理改從工作包交付檔與原件收件，不再向它發訊；'+(onSubscription?
+    const otherFamily=familyOf(current)!==familyOf(target), familyRule=!quota.crossFamily(state);
+    if(role==='executor' && !isPaused() && (otherFamily||familyRule&&fallback.subscriptionOpenAI(current)!==onSubscription))
+      prompt+=' '+(otherFamily?'換到不同家模型':onSubscription?'換到 ChatGPT 訂閱':'離開 ChatGPT 訂閱')+'：在途子代理改從工作包交付檔與原件收件，不再向它發訊；'+(onSubscription&&familyRule?
         '新派子代理一律用 Terra 訂閱（主線在 ChatGPT 訂閱上派其他家子代理會被平台拒絕），照 model-route 的結果派。':
         '新派子代理照 model-fallback.json 的子代理順位（ladder.first.subagent）。');
     if(role==='supervisor' && !isPaused() && target.startsWith('openrouter/'))prompt+=' 暫代監督依原契約照常收件、查證與派工；要結案的候選照常審查並提交，背景程式會保留原件，交恢復的高階監督逐條複驗結案。';
@@ -1204,6 +1212,16 @@ async function watch() {
       await sendAndRead(binding.supervisorId,'LONG_TASK_WATCH_RECOVERED：背景監看已恢復讀取執行對話（'+clockText(Date.parse(since))+' 起中斷）。不用處理，用一句話結束回合即可。',
         'watch-recovered-'+require('node:crypto').createHash('sha256').update(since).digest('hex').slice(0,12));
       delete state.appHealth.recoveryNotice; checkpoint();
+      continue;
+    }
+    if (state.plaintextNotice && !state.inflight && !state.pending) {
+      const notice = state.plaintextNotice;
+      if (fallback.supervisorOwner(run,binding.supervisorId))
+        await sendAndRead(binding.supervisorId,notice.enabled
+          ?'LONG_TASK_PLAINTEXT_ON：OpenCodex 的 plaintextV2AgentMessages 又開著了，主線在 ChatGPT 訂閱上也照子代理順位派工（model-route 已照這個算）。不用處理，用一句話結束回合即可。'
+          :'LONG_TASK_PLAINTEXT_OFF：背景程式讀到 OpenCodex 的 plaintextV2AgentMessages 沒有開著（'+quota.describePlaintext(state.claudeQuota)+'）。主線在 ChatGPT 訂閱上時，子代理改為只能用 Terra 訂閱，背景程式與 model-route 已照這個算。請把這件事登記到待決帳讓 Jay 知道，其他工作照常。',
+          'plaintext-'+(notice.enabled?'on':'off')+'-'+require('node:crypto').createHash('sha256').update(notice.at).digest('hex').slice(0,12));
+      delete state.plaintextNotice; checkpoint();
       continue;
     }
     if(await keepLoaded())continue;
