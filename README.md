@@ -37,7 +37,7 @@ Codex 長任務的子代理用完即封存（2026-11-17 起）：Codex App 替�
 ## 結構
 
 - `SPEC.md`：兩個平台共用的行為契約與流程圖。
-- `workflow/`：流程圖原始規格與可直接開啟的 HTML。
+- `workflow/`：流程圖原始規格與可直接開啟的 HTML。`模型切換與運作流程.html` 畫出各角色的換模型順位、降級階梯與主線派子代理時怎麼選模型，同名 `.md` 是它的原始稿，改規則時兩者一起更新。
 - `codex/`：Codex 的 `long-task-supervisor` 與 `goal-orchestrator`。
 - `claude-code/`：Claude Code 的 `long-task-supervisor` 與 `long-task-orchestrator`；依其實際工具、子代理與模型控制能力適配，不可覆蓋 `codex/`。
 - `tests/`：兩版本都必須維持的行為案例。
