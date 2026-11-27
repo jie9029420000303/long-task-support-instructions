@@ -78,9 +78,16 @@ function commandKind(command){
 // what follows the marker is code (2026-11-27 工區 E: work package and evidence .md files were taken for code edits). Only
 // the literal end after the last quote or ${...} is known text of the path, and it keeps the extension. A name that is all
 // variables cannot be judged and is left out.
+// A collect result the mainline writes for dispatch.cjs ("status":{"list":…} or "verdict":{…}) is data for the dispatch
+// tool wherever it is put (2026-11-27 工區 E 14:28: /tmp/c16-result.json was taken for a code edit; Jay decision 41).
+const DISPATCH_RESULT=/"status"\s*:\s*\{[\s+]*"list"\s*:|"verdict"\s*:\s*\{/;
 function patchFiles(text){
-  return [...String(text||'').matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)\s*(?=\\n|\n|$)/g)]
-    .map(match=>match[1].replace(/^.*["'\x60}]/,'').trim()).filter(Boolean);
+  const source=String(text||''),markers=[...source.matchAll(/\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)\s*(?=\\n|\n|$)/g)];
+  return markers.map((match,at)=>{
+    const file=match[1].replace(/^.*["'\x60}]/,'').trim();
+    const body=source.slice(match.index+match[0].length,markers[at+1]?.index??source.length).replace(/\\(["n])/g,(all,c)=>c==='n'?'\n':'"');
+    return /\.json$/i.test(file)&&DISPATCH_RESULT.test(body)?'':file;
+  }).filter(Boolean);
 }
 function selfWorkOf(payload){
   const out=[];

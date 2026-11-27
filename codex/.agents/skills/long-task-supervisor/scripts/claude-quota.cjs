@@ -31,16 +31,22 @@ function stopLine(account){
   return Number.isFinite(line)&&line>0&&line<=100?line:null;
 }
 const shared=account=>/共用/.test(String(account?.label||''));
-// The main slot and a pool slot of one ChatGPT account share an upstream key: one account, whose line is the one set.
+// The main slot and a pool slot of one ChatGPT account are one account, whose line is the one set. They share an
+// upstream key; a reading where a slot comes without that key (2026-11-27: prolite's main slot, one read in three,
+// counted twice) matches them by the masked email and plan instead.
+function sameOpenAIAccount(a,b){
+  if(a.upstreamAccountKey&&b.upstreamAccountKey)return a.upstreamAccountKey===b.upstreamAccountKey;
+  return Boolean(a.email)&&a.email===b.email&&a.plan===b.plan;
+}
 function openaiAccounts(data){
-  const byKey=new Map();
+  const accounts=[];
   for(const account of (Array.isArray(data?.accounts)?data.accounts:[])){
     if(!account||account.provider!=='openai')continue;
-    const key=account.upstreamAccountKey||account.id,known=byKey.get(key);
-    if(!known){byKey.set(key,{...account,line:stopLine(account),slots:[account]});continue;}
+    const known=accounts.find(item=>item.slots.some(slot=>sameOpenAIAccount(slot,account)));
+    if(!known){accounts.push({...account,line:stopLine(account),slots:[account]});continue;}
     known.slots.push(account);known.line??=stopLine(account);known.paused=known.paused&&account.paused;
   }
-  return [...byKey.values()];
+  return accounts;
 }
 // OpenAI subscription floor. An account is out for the long task once its weekly use reaches its own line, or, without
 // a line, once any current window (five hours, week, month) has at most 2% left; it serves again at the latest reset

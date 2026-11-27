@@ -122,10 +122,11 @@ test('model-route gives the executor the API Sol at the floor and workers the AP
   try{
     const executor=route.resolve({supervisorModel:opus,roles:['executor'],fallback:file,catalogs:{executor:inventory}});
     assert.equal(executor.roles.executor.model,apiSol);
-    for(const executorModel of [apiSol,sol]){
-      const workers=route.resolve({supervisorModel:opus,executorModel,roles:['general'],fallback:file,catalogs:{subagent:inventory}});
-      assert.deepEqual([workers.roles.general.model,workers.roles.general.effort],[apiTerra,'medium'],'workers of '+executorModel);
-    }
+    const workers=route.resolve({supervisorModel:opus,executorModel:apiSol,roles:['general'],fallback:file,catalogs:{subagent:inventory}});
+    assert.deepEqual([workers.roles.general.model,workers.roles.general.effort],[apiTerra,'medium'],'workers of '+apiSol);
+    // A mainline still on the subscription Sol can hand work only to the subscription Terra, which is out: it waits for
+    // the watcher to move it (2026-11-27 decision 37).
+    assert.equal(route.resolve({supervisorModel:opus,executorModel:sol,roles:['general'],fallback:file,catalogs:{subagent:inventory}}).roles.general.status,'unavailable');
     save(file,{limits:{},ladder:{floors:{executor:2,subagent:2}},openaiQuota:{subscriptionHeld:false}});
     assert.equal(route.resolve({supervisorModel:opus,roles:['executor'],fallback:file,catalogs:{executor:inventory}}).roles.executor.model,sol);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
@@ -172,7 +173,8 @@ test('at the OpenAI floor and ladder step 6 the executor on the subscription Sol
     const moved=f.calls().find(c=>c.threadId==='executor-qa'&&c.model);
     assert.deepEqual([moved.model,moved.thinking],[apiSol,'high']);
     assert.match(moved.prompt,/OpenAI 訂閱留給 Jay 自己用（prolite 剩 1%/);
-    assert.doesNotMatch(moved.prompt,/換到不同家模型/,'the API Sol is the same model family, so workers are not mentioned');
+    // Off the ChatGPT subscription the workers follow their own order again, so the move is told (2026-11-27 decision 37).
+    assert.match(moved.prompt,/新派子代理照 model-fallback.json 的子代理順位/);
     const record=read(f.statePath).modelSwitch['executor-qa'];
     assert.deepEqual([record.original,record.current],[sol,apiSol],'kept as a move away from the subscription Sol, so it returns after the reset');
     const published=read(path.join(f.run,'model-fallback.json'));
