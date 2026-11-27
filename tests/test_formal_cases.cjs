@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const {spawnSync} = require('node:child_process');
+const {researchTranscript} = require('./fixtures/research-transcript.cjs');
 const roots = ['claude-code/.claude','codex/.agents'].map(p=>path.resolve(__dirname,'..',p,'skills/long-task-supervisor/scripts'));
 // Research registration is mainline-only; a test run from inside a Codex subagent must not look like one.
 delete process.env.CODEX_THREAD_ID;delete process.env.CODEX_SESSION_ID;
@@ -78,11 +79,12 @@ for (const scripts of roots) {
     assert.match(dispatch(newPackage,1).stderr,/cannot be renamed/);
     Object.assign(newPackage.packages.inFlight[0],{id:'P3',caseIds:['suite-2'],caseMap:{'suite-2':'2'}});
     assert.match(dispatch(newPackage,1).stderr,/C1 已累計 2 次不合格，P3 先不派/);
-    const experiment=p('experiment');fs.writeFileSync(experiment,'Confirmed example');
+    const researchAgent=researchTranscript({t,root,scripts,steps:[{search:'receipt mismatch test runner'},{text:'https://example.org/test: rerun with the revised candidate'}]});
     const research={criterionId:'C1',directCauses:['receipt a: FAIL','receipt b: FAIL'],commonCause:'same candidate defect',workPackage:'P2',excluded:'different target excluded',environment:'fixture host, temp RUN',software:'node test runner',
-      sources:[{url:'https://example.org/test',checkedAt:'2025-01-01T00:00:00Z'}],experiment,experimentPassed:true,solution:'use revised candidate'};
-    write(p('research.json'),{...research,experimentPassed:false});
-    assert.match(call('rework.cjs',['research',root,p('research.json')],1).stderr,/experiment/);
+      researchAgent,sources:[{url:'https://example.org/test'}],selected:'use revised candidate',selectionReason:'the only candidate',
+      candidates:[{approach:'use revised candidate',conditions:'same target',risks:'none known',sources:['https://example.org/test']}]};
+    write(p('research.json'),{...research,candidates:[{...research.candidates[0],sources:[]}]});
+    assert.match(call('rework.cjs',['research',root,p('research.json')],1).stderr,/sources 列它依據的外部網址/);
     write(p('research.json'),{...research,directCauses:['receipt b: FAIL']});
     assert.match(call('rework.cjs',['research',root,p('research.json')],1).stderr,/directCauses/);
     write(p('research.json'),research);call('rework.cjs',['research',root,p('research.json')]);

@@ -44,12 +44,12 @@ const held=(history,ids=[])=>{const t=tally(history);return [...new Set(ids)].fi
 function nextStep(t){
   const n=t.failures.length;
   if(waitsForJay(t))return '研究已登記，等 Jay 裁決（監督在待決帳問他）；裁決後用 rework.cjs resume 登記他的原話';
-  if(waitsForStudy(t))return '先派研究子代理（用執行主線當下的模型與推理；研究範圍含開發與測試驗收環境條件、使用的套件與軟體背景；研究工作包不列這條），研究交回用 rework.cjs research 登記';
+  if(waitsForStudy(t))return '先派研究子代理（用執行主線當下的模型與推理；先上網搜尋 GitHub、技術論壇與所用語言或框架的外部文件找可行方案再分析，研究範圍含開發與測試驗收環境條件、使用的套件與軟體背景；只做唯讀查核，不做實作實驗；研究工作包不列這條），研究交回用 rework.cjs research 登記，researchAgent 寫研究子代理的代號';
   return ['照常派工',
     '交回剛交件的子代理，同模型同推理重做，附這次的具體指正',
-    '研究已登記：開新的子代理，推理升兩檔（開源模型改派下一款開源），附研究結果與前兩次的錯誤摘要',
+    '研究已登記：開新的子代理，推理升兩檔（開源模型改派下一款開源），附研究選定的方案與前兩次的錯誤摘要；第一步先做驗證小實驗',
     '交回第 3 次做的子代理，同模型同推理重做，附這次的具體指正',
-    '研究已登記：開新的子代理，用執行主線當下的模型與推理，附研究結果與前四次的錯誤摘要',
+    '研究已登記：開新的子代理，用執行主線當下的模型與推理，附研究選定的方案與前四次的錯誤摘要；第一步先做驗證小實驗',
     '交回第 5 次做的子代理，同模型同推理重做，附這次的具體指正'][n]||'照常派工';
 }
 function status(run){
@@ -159,11 +159,48 @@ function registered(run,binding,id){
   const file=path.join(run,binding.dispatchAudit?.snapshot||'dispatch.json');
   return fs.existsSync(file)&&entries(read(file)).some(({item})=>item.id===id);
 }
-// 關卡二 (Jay 2026-11-23): research lists the direct cause of each failure and their common upstream cause, besides
-// the four outputs of 2026-11-19 (failure evidence, excluded causes, dated outside sources, a passing experiment), and
-// (Jay 2026-11-27 decision 50) the development and test/acceptance environment conditions and the packages and software
-// involved. Skipping research needs the supervisor (decision 49): on workspace E the mainline itself waived the 2nd
-// failure of I07 and of I23, and no research subagent was ever dispatched; I23 was a performance cause, not a typo.
+// Research is a web search for workable answers (Jay 2026-11-28「他要把這遇到的問題定位了以後，一定要開啟上網，搜尋
+// GitHub，各種技術論壇，或是他們使用的語言，或是情境的外部技術文件，找到可能可行的方案了以後，回來分析，然後再回給執行
+// 主線，派子代理去做實作」). Workspace E's research C69 ran 112 commands and two searches, proposed a design no source
+// held, and wrote all five sources' times within four seconds of each other. So the research subagent's own transcript
+// is read: it has to have searched (a Codex web_search_call, a web__run call in a command, or Claude's WebSearch or
+// WebFetch), and every source it gives first appears there at or after its first search; that moment is recorded as
+// when the source was seen. Only what it did after the latest failure it studies counts. The research itself only reads and checks: the subagent the mainline dispatches on the
+// chosen candidate runs the confirming experiment first (Jay 2026-11-28, replacing the passing experiment of 2026-11-19).
+const SEARCH_TOOLS=new Set(['WebSearch','WebFetch','web_search','web__run']);
+function searchOf(row){
+  const item=row.payload;
+  if(item?.type==='web_search_call')return [].concat(item.action?.queries||item.action?.query||item.action?.url||'search').map(String);
+  if(['custom_tool_call','function_call'].includes(item?.type)){
+    const body=String(item.input||item.arguments||'');
+    if(SEARCH_TOOLS.has(item.name)||/\bweb__run\s*\(|\bweb_search\s*\(/.test(body))return [body.slice(0,300)];
+  }
+  if(row.type==='assistant')for(const block of row.message?.content||[])
+    if(block?.type==='tool_use'&&SEARCH_TOOLS.has(block.name))return [JSON.stringify(block.input||{}).slice(0,300)];
+  return null;
+}
+function researchTrail(binding,handle,since){
+  const pace=require('./pace.cjs'),key=String(handle).replace(/^agent:/,'');
+  // An agent path can be reused after its subagent closes; the latest run under that path is the research.
+  const agent=pace.agentRuns(binding).filter(item=>[item.path,item.id].includes(key)).sort((a,b)=>(b.lastAt||0)-(a.lastAt||0))[0];
+  need(agent,'researchAgent '+handle+' 不是這個執行主線派出的子代理：寫研究子代理的代號（Codex 的 /root/... 路徑或子代理對話 ID，Claude Code 的 agent ID）');
+  const files=pace.sessionFiles?pace.sessionFiles(agent.id):[];
+  const searches=[],after=[];
+  for(const file of files.length?files:[agent.sourceFile])for(const line of fs.readFileSync(file,'utf8').split('\n')){
+    let row;try{row=JSON.parse(line);}catch{continue;}
+    const at=Date.parse(row.timestamp);
+    if(!Number.isFinite(at)||at<since)continue;
+    const queries=searchOf(row);
+    if(queries)searches.push({at:new Date(at).toISOString(),queries});
+    if(searches.length)after.push({at,line});
+  }
+  const seen=url=>{const bare=url.replace(/#.*$/,'').replace(/\/+$/,''),hit=after.find(item=>item.line.includes(bare));return hit?new Date(hit.at).toISOString():null;};
+  return {agent:agent.path||agent.id,searches,seen};
+}
+// 關卡二 (Jay 2026-11-23): research lists the direct cause of each failure and their common upstream cause, the excluded
+// causes, and (Jay 2026-11-27 decision 50) the development and test/acceptance environment conditions and the packages
+// and software involved. Skipping research needs the supervisor (decision 49): on workspace E the mainline itself waived
+// the 2nd failure of I07 and of I23, and no research subagent was ever dispatched; I23 was a performance cause, not a typo.
 function reset(run,binding,mode,input,at=new Date().toISOString()){
   if(mode==='research')mainlineOnly('登記研究');
   else{
@@ -180,11 +217,24 @@ function reset(run,binding,mode,input,at=new Date().toISOString()){
     directCauses:causes.map(c=>c.trim()),at};
   if(mode==='research'){
     need(text(input.commonCause),'commonCause 要寫各次失敗共同的上游原因');
-    need(['excluded','environment','software','solution','workPackage','experiment'].every(k=>text(input[k]))&&input.experimentPassed===true&&fs.statSync(input.experiment,{throwIfNoEntry:false})?.isFile()&&
-      Array.isArray(input.sources)&&input.sources.length&&input.sources.every(x=>/^https?:\/\//.test(x?.url)&&contract.exactTime(x.checkedAt)!==null),
-      '研究登記要有：excluded（已排除原因）、environment（開發與測試驗收環境的條件：主機、規格、容器、資料、權限與限制）、software（用到的套件與軟體：名稱、版本與已知限制）、sources（外部網址＋含時區的查閱時間）、experiment（通過的小實驗證據檔）與 experimentPassed:true、solution（採用的解法）、workPackage（照研究重做的工作包）');
+    need(['excluded','environment','software','workPackage','researchAgent'].every(k=>text(input[k]))&&
+      Array.isArray(input.sources)&&input.sources.length&&input.sources.every(x=>/^https?:\/\//.test(x?.url)),
+      '研究登記要有：excluded（已排除原因）、environment（開發與測試驗收環境的條件：主機、規格、容器、資料、權限與限制）、software（用到的套件與軟體：名稱、版本與已知限制）、researchAgent（研究子代理的代號）、sources（研究子代理搜到的外部網址）、candidates（候選方案）、workPackage（照研究重做的工作包）');
+    const trail=researchTrail(binding,input.researchAgent.trim(),Date.parse(covered.at(-1)?.at)||0);
+    need(trail.searches.length,'研究子代理 '+trail.agent+' 在最近一次不合格（'+covered.at(-1)?.at+'）之後的執行紀錄沒有任何網路搜尋：研究要先上網搜尋 GitHub、技術論壇與所用語言或框架的外部文件，從找到的方案分析，再交回主線。請派研究子代理照這個順序重做');
+    const sources=input.sources.map(x=>({url:x.url,seenAt:trail.seen(x.url)})),unseen=sources.filter(x=>!x.seenAt).map(x=>x.url);
+    need(!unseen.length,'這些來源沒有出現在研究子代理 '+trail.agent+' 搜尋之後的執行紀錄裡：'+unseen.join('、')+'。來源要是研究子代理上網搜到、讀到的網址');
+    const urls=new Set(sources.map(x=>x.url)),candidates=Array.isArray(input.candidates)?input.candidates:[];
+    need(candidates.length||text(input.notFound),'candidates 要列研究找到的候選方案；真的查不到可行方案時，寫 notFound 說明查了哪些地方、為什麼都不可行');
+    need(candidates.every(c=>['approach','conditions','risks'].every(k=>text(c?.[k]))&&Array.isArray(c.sources)&&c.sources.length&&c.sources.every(url=>urls.has(url))),
+      '每個候選方案要寫 approach（做法）、conditions（適用條件）、risks（風險），sources 列它依據的外部網址（至少一個，要是 sources 列過的）');
+    const chosen=candidates.find(c=>c.approach===input.selected);
+    need(!candidates.length||chosen&&text(input.selectionReason),'selected 照抄選定候選方案的 approach，selectionReason 寫為什麼選它');
     need(registered(run,binding,input.workPackage),'workPackage '+input.workPackage+' 還沒登記在派工表');
-    Object.assign(row,{commonCause:input.commonCause.trim(),excluded:input.excluded,environment:input.environment.trim(),software:input.software.trim(),sources:input.sources,experiment:input.experiment,solution:input.solution,workPackage:input.workPackage});
+    Object.assign(row,{commonCause:input.commonCause.trim(),excluded:input.excluded,environment:input.environment.trim(),software:input.software.trim(),
+      researchAgent:trail.agent,searches:trail.searches,sources,candidates,
+      ...(chosen?{selected:chosen.approach,selectionReason:input.selectionReason.trim(),solution:chosen.approach}:{notFound:input.notFound.trim(),solution:'查不到可行方案：'+input.notFound.trim()}),
+      workPackage:input.workPackage});
   }else{
     need(text(input.reason),'不需研究要寫 reason：為什麼這兩次不合格不必上網研究（只限錯字、設定值這類不涉及技術判斷的小修，或補做實測就能佐證）');
     row.reason=input.reason.trim();row.by='supervisor';
