@@ -22,9 +22,22 @@ function installed() {
   const dir=process.env.CODEX_HOME||path.join(os.homedir(),'.codex');
   const files=process.env.OPENCODEX_MODEL_CATALOG?[process.env.OPENCODEX_MODEL_CATALOG]:['opencodex-catalog.json','models_cache.json'].map(name=>path.join(dir,name));
   for(const file of files){
-    try{return JSON.parse(fs.readFileSync(file,'utf8')).models||[];}
+    try{return enabled(JSON.parse(fs.readFileSync(file,'utf8')).models||[]);}
     catch(error){if(error.code!=='ENOENT')return [];}
   }
   return [];
+}
+// OpenCodex rewrites the catalog only now and then (on 2026-11-27 its settings changed at 22:56, the catalog last at
+// 21:56), so a model or provider switched off in its settings since then can still be listed. The settings are read on
+// every call (Jay 2026-11-27「這個技能對opencodex裡面的各類相關設定應該要有即時掌握的機制」).
+function enabled(items){
+  let config;
+  try{config=JSON.parse(fs.readFileSync(path.join(process.env.OPENCODEX_HOME||path.join(os.homedir(),'.opencodex'),'config.json'),'utf8'));}
+  catch{return items;}
+  const off=new Set(config.disabledModels||[]);
+  return items.filter(item=>{
+    const id=item.id||item.slug||'', provider=id.includes('/')?id.split('/')[0]:null;
+    return !off.has(id)&&!(provider&&config.providers?.[provider]?.disabled===true);
+  });
 }
 module.exports={tiers,efforts,identity,available,latest,installed};

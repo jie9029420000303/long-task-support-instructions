@@ -125,7 +125,8 @@ test('a refused executor continues on the Opus API and gets its own model back a
 
 test('the supervisor and the executor fall back in one shared order, workers in theirs, and a refusal belongs to its own side',()=>{
   const fallback=require(path.join(scripts,'model-fallback.cjs'));
-  withEnv({OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json')},()=>{
+  // No OpenCodex settings: the catalog is read live against them (v1.21.3), and this machine's switch off gpt-6.1-terra.
+  withEnv({OPENCODEX_MODEL_CATALOG:path.join(__dirname,'fixtures/model-routing-catalog.json'),OPENCODEX_HOME:path.join(__dirname,'fixtures/no-opencodex-settings')},()=>{
     const state={rateLimits:{'executor|anthropic/':{until:Date.now()+60000}}};
     const opus='anthropic/claude-opus-5-5',paid='anthropic-apikey/claude-opus-5-5',child='anthropic/claude-sonnet-5-5';
     for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(role),[opus,paid,'gpt-6.10-sol','gpt-6.1-terra'],role);
