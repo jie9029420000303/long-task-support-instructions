@@ -172,7 +172,7 @@ test('an executor can prefer an eligible fourth model and an exhausted superviso
     const stateAfter=read(f.statePath);assert.equal(stateAfter.modelSwitch['executor-qa'].effort,'high');
     assert.deepEqual(read(path.join(f.run,'model-fallback.json')).fourthExecutorModel,fourth);
     withEnv({OPENCODEX_HOME:f.root,OPENCODEX_MODEL_CATALOG:catalogFile},()=>{
-      assert.equal(fallback.next(opus,'gpt-6.10-sol','supervisor',stateAfter,Date.now(),fourth),model);
+      assert.equal(fallback.next('gpt-6.10-sol','supervisor',stateAfter,Date.now(),fourth),model);
       assert.equal(fallback.availableFourth({...fourth,effort:'ultra'}),null);
       entry.visibility='hide';save(catalogFile,catalog);assert.equal(fallback.availableFourth(fourth),null);
     });
@@ -339,7 +339,8 @@ test('a refused child is reassigned by the subagent order whatever the executor 
 // picks by hand after a switch the new starting point, so the reset of the old switch no longer overrides it.
 test('after a manual model change the reset of the old switch leaves the hand-picked model alone',async()=>{
   const record={role:'supervisor',original:opus,current:paid,effort:'high',since:Date.now()-3600000,until:Date.now()-4000,restored:null};
-  const f=fixture({supervisorModel:'gpt-6.2-sol',state:{modelSwitch:{'supervisor-qa':record}}});
+  // A model on the supervisor's order: a hand-picked model off the order (another Claude tier, open source) is moved up.
+  const f=fixture({supervisorModel:'gpt-6.10-sol',state:{modelSwitch:{'supervisor-qa':record}}});
   try{
     f.start();await until(()=>read(f.statePath).modelSwitch['supervisor-qa'].restored);
     assert.equal(read(f.statePath).modelSwitch['supervisor-qa'].restoredBy,'manual-change');

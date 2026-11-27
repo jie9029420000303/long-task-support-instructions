@@ -106,15 +106,15 @@ test('the supervisor and the executor share one order with the Claude API on it,
   const home=fs.mkdtempSync(path.join(os.tmpdir(),'api-month-'));
   try{
     withEnv({OPENCODEX_MODEL_CATALOG:catalogFixture,LONG_TASK_HOME:home},()=>{
-      for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(opus,role),[opus,paid,sol,terra],role);
-      assert.deepEqual(fallback.chainFor(sonnet,'subagent'),[sonnet,'anthropic-apikey/claude-sonnet-5-5',terra],'workers have the Claude API too');
+      for(const role of ['supervisor','executor'])assert.deepEqual(fallback.chainFor(role),[opus,paid,sol,terra],role);
+      assert.deepEqual(fallback.chainFor('subagent'),[sonnet,'anthropic-apikey/claude-sonnet-5-5',terra],'workers have the Claude API too');
       const first={},second={},until=Date.now()+9*DAY;
       fallback.recordApiMonth(first,path.join(home,'run-a'),until,'錯誤訊息寫明的恢復時間');
       assert.equal(read(path.join(home,'anthropic-api-month.json')).until,until);
       assert.equal(fallback.syncApiMonth(second,path.join(home,'run-b')),true);
       assert.equal(second.apiMonth.until,until);
-      for(const role of ['supervisor','executor'])assert.equal(fallback.next(opus,opus,role,second),sol,'the other run goes from Opus straight to Sol');
-      assert.equal(fallback.next(opus,opus,'executor',{}),paid,'without the cap the API comes next');
+      for(const role of ['supervisor','executor'])assert.equal(fallback.next(opus,role,second),sol,'the other run goes from Opus straight to Sol');
+      assert.equal(fallback.next(opus,'executor',{}),paid,'without the cap the API comes next');
       assert.equal(fallback.syncApiMonth(second,path.join(home,'run-b'),until+1),true);assert.equal(second.apiMonth,undefined,'it ends at the named reset');
     });
   }finally{fs.rmSync(home,{recursive:true,force:true});}
@@ -169,17 +169,17 @@ test('for the supervisor a 429 that OpenCodex writes for a dropped connection co
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('a supervisor failure pause ends once its route has been quiet for 10 minutes and has answered since; the executor pause and the silent-switch pause keep their 30 minutes',()=>{
+test('a supervisor failure pause ends once its route has been quiet for 10 minutes and has answered since; the executor pause keeps its 30 minutes',()=>{
   const t0=Date.now()-20*MINUTE,pause=basis=>({since:t0,until:t0+30*MINUTE,basis});
-  const own='supervisor|anthropic/',executorKey=fallback.limitKey('executor',sol),paidKey=fallback.limitKey('supervisor',paid);
-  const state={rateLimits:{[own]:pause(fallback.FAILURE_BASIS),[executorKey]:pause(fallback.FAILURE_BASIS),[paidKey]:pause(fallback.SILENT_BASIS)},
+  const own='supervisor|anthropic/',executorKey=fallback.limitKey('executor',sol);
+  const state={rateLimits:{[own]:pause(fallback.FAILURE_BASIS),[executorKey]:pause(fallback.FAILURE_BASIS)},
     routeFailed:{'anthropic/':t0+2*MINUTE,[sol]:t0,'anthropic-apikey/':t0},routeOk:{'anthropic/':t0+MINUTE,[sol]:t0+3*MINUTE,'anthropic-apikey/':t0+3*MINUTE}};
   assert.equal(fallback.recovered(state,t0+15*MINUTE),false,'its last success came before the route last failed');
   state.routeOk['anthropic/']=t0+3*MINUTE;
   assert.equal(fallback.recovered(state,t0+11*MINUTE),false,'answering again, but the route has not been quiet for 10 minutes');
   assert.equal(fallback.recovered(state,t0+12*MINUTE),true);
   assert.deepEqual(state.rateLimits[own],{since:t0,until:t0+12*MINUTE,basis:'同一路線之後已有成功請求'});
-  assert.deepEqual([state.rateLimits[executorKey],state.rateLimits[paidKey]],[pause(fallback.FAILURE_BASIS),pause(fallback.SILENT_BASIS)]);
+  assert.deepEqual(state.rateLimits[executorKey],pause(fallback.FAILURE_BASIS));
 });
 
 function fixture({executorModel=opus,supervisorModel=opus,quotaData=null,env:extra={}}={}){

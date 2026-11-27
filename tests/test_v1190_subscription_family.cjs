@@ -3,8 +3,8 @@
 //   subagent ladder says, because any other provider refuses the encrypted task (13:58～14:02 工區 E and 清票 were
 //   refused on DeepSeek, Muse and the OpenAI API; the 14:42 test reproduced unreadable_encrypted_agent_task), and once
 //   that Terra cannot serve, the mainline itself leaves the subscription;
-// - when the first requests after a switch still go to the old model and fail, the switch is sent again and the new
-//   stop is not paused for it (14:0x: Terra was paused 30 minutes as "silent" and two supervisors fell to DeepSeek);
+// - a switch that did not take is sent again and the new stop is not paused for it (14:0x: Terra was paused 30 minutes
+//   as "silent" and two supervisors fell to DeepSeek); from v1.20.0 that is read from the chat's next turn;
 // - an API key out of balance (billing_exhausted) is skipped by every role of every run and tried again after 5 hours;
 // - a supervisor shared by two runs is moved by one watcher only;
 // - prolite's main slot without its upstream key is still one account with its pool slot (14:25 清票 read 24.9% while
@@ -73,9 +73,9 @@ test('once the subscription Terra cannot serve, a mainline on the ChatGPT subscr
     assert.equal(fallback.cannotDispatch(state,sol,'executor',now),true);
     assert.equal(fallback.cannotDispatch(state,sol,'supervisor',now),false,'the supervisor sends no workers');
     assert.equal(fallback.cannotDispatch(state,opus,'executor',now),false);
-    assert.equal(fallback.next(opus,sol,'executor',state,now),opus);
+    assert.equal(fallback.next(sol,'executor',state,now),opus);
     const claudeOut={rateLimits:{...state.rateLimits,[fallback.limitKey('executor',opus)]:{until:now+3600000},[fallback.limitKey('executor','anthropic-apikey/claude-opus-5-5')]:{until:now+3600000}}};
-    assert.equal(fallback.next(opus,opus,'executor',claudeOut,now),apiSol,'the mainline goes to the OpenAI API Sol, not the subscription Sol');
+    assert.equal(fallback.next(opus,'executor',claudeOut,now),apiSol,'the mainline goes to the OpenAI API Sol, not the subscription Sol');
     assert.equal(fallback.cannotDispatch({},sol,'executor',now),false,'with Terra serving the mainline stays');
   });}finally{fs.rmSync(home.root,{recursive:true,force:true});}
 });
@@ -143,7 +143,7 @@ test('a collect result JSON the mainline writes is the dispatch tool\'s data, an
 });
 
 // A watcher replayed on a chat it has just switched: the record, the rollout and the usage are the test's own.
-function watched({record,setTo,turnModel,aboveCurrent=false}){
+function watched({record,setTo,turnModel,laterTurn=null,aboveCurrent=false,extraEnv={}}){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'v1190-watch-')),now=Date.now();
   const home=path.join(root,'codex-home'),source=path.join(root,'source.txt');fs.writeFileSync(source,'Keep the work moving\n');
   const contract={goal:'Finish',authorization:'Isolated QA',criteria:[{id:'A1',requirement:'Keep work moving',source:'source.txt:1',verify:'Replay'}],sources:[{path:source,sha256:sha(source)}]};
@@ -153,7 +153,7 @@ function watched({record,setTo,turnModel,aboveCurrent=false}){
   save(path.join(run,'binding.json'),binding);
   const catalog=catalogHome();
   // Every stop of the executor's order above the chat's current model is out, as at 14:0x.
-  const stops=withEnv(catalog.env,()=>fallback.chainFor(opus,'executor')),limited=aboveCurrent?stops.slice(0,stops.indexOf(record.current)):[];
+  const stops=withEnv(catalog.env,()=>fallback.chainFor('executor')),limited=aboveCurrent?stops.slice(0,stops.indexOf(record.current)):[];
   save(path.join(run,'daemon-state.json'),{phase:'starting',cursor:null,seen:[],messages:[],pending:null,inflight:null,reads:0,starts:0,
     lastExecutorActivityAt:now,lastProgressReviewAt:now,
     rateLimits:Object.fromEntries(limited.map(model=>[fallback.limitKey('executor',model),{since:now-60000,until:now+3600000,model,basis:'replay',files:[]}])),modelSwitch:record?{'executor-qa':{...record,since:now-30000,until:now+3600000}}:{}});
@@ -163,11 +163,16 @@ function watched({record,setTo,turnModel,aboveCurrent=false}){
   line(executorLog,{timestamp:iso(now-50000),type:'turn_context',payload:{turn_id:'old-turn',model:turnModel,effort:'xhigh',approval_policy:'never',approvals_reviewer:'user'}});
   line(executorLog,{timestamp:iso(now-30000),type:'event_msg',payload:{type:'thread_settings_applied',thread_settings:{model:setTo,approval_policy:'never'}}});
   line(executorLog,{timestamp:iso(now-29000),type:'event_msg',payload:{type:'task_complete',turn_id:'old-turn'}});
+  // A turn the chat started after the switch, on the model laterTurn names.
+  if(laterTurn){
+    line(executorLog,{timestamp:iso(now-20000),type:'turn_context',payload:{turn_id:'new-turn',model:laterTurn,effort:'xhigh',approval_policy:'never',approvals_reviewer:'user'}});
+    line(executorLog,{timestamp:iso(now-15000),type:'event_msg',payload:{type:'task_complete',turn_id:'new-turn'}});
+  }
   const sent=path.join(root,'sent.json'),mockFile=path.join(root,'mock.json'),usage=path.join(root,'usage.jsonl');
   fs.writeFileSync(usage,JSON.stringify({conversationId:'unrelated',status:200})+'\n');
   save(mockFile,{supervisorId:binding.supervisorId,executorId:binding.executorId,noTurn:true});
   const env={...process.env,...catalog.env,CODEX_HOME:home,CODEX_APP_TOOLS_SERVER_PATH:path.join(__dirname,'mock-codex-app-server.cjs'),MOCK_CODEX_FIXTURE:mockFile,MOCK_CODEX_SENT:sent,
-    OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:path.join(root,'quota.json'),CHROME_RELAY_BIN:path.join(root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200'};
+    OPENCODEX_USAGE_FILE:usage,OPENCODEX_QUOTA_FILE:path.join(root,'quota.json'),CHROME_RELAY_BIN:path.join(root,'no-relay'),CODEX_WATCH_IDLE_SLEEP_MS:'200',...extraEnv};
   delete env.CODEX_THREAD_ID;delete env.LONG_TASK_HOME;
   let child;
   return {run,usage,statePath:path.join(run,'daemon-state.json'),
@@ -177,20 +182,30 @@ function watched({record,setTo,turnModel,aboveCurrent=false}){
 }
 const request=(model,status,extra={})=>({conversationId:fallback.hashId('executor-qa'),timestamp:Date.now(),requestedModel:model,model,status,...extra});
 
-test('the first request after a switch still goes to the old model and fails: the switch is sent again and the new stop is not paused',async()=>{
-  const f=watched({record:{role:'executor',original:sol,from:sol,current:terra,effort:'xhigh',restored:null},setTo:terra,turnModel:sol,aboveCurrent:true});
+// v1.20.0 (Jay 2026-11-27 decision 44): whether a switch took is read from the chat's own turn, not from failed requests
+// or from the time that passes.
+test('a turn started after the switch on the old model means the switch did not take: it is sent again once for that turn',async()=>{
+  const f=watched({record:{role:'executor',original:opus,from:sol,current:terra,effort:'xhigh',restored:null},setTo:terra,turnModel:sol,laterTurn:sol,aboveCurrent:true});
   try{
     f.start();
-    await until(()=>read(f.statePath).usageOffset!==undefined);
-    line(f.usage,request(sol,500,{errorCode:'server_error'}));
     await until(()=>f.calls().some(call=>/重送換模型通知（第 1 次）/.test(call.prompt||'')));
     const resent=f.calls().find(call=>/重送換模型通知/.test(call.prompt||''));
     assert.equal(resent.model,terra);
-    assert.match(resent.prompt,new RegExp(sol));
+    assert.match(resent.prompt,new RegExp('新回合仍用 '+sol));
     await delay(1000);
-    assert.equal(f.calls().filter(call=>/重送換模型通知/.test(call.prompt||'')).length,1,'one failure, one resend');
-    const state=read(f.statePath);
-    assert.equal(state.rateLimits[fallback.limitKey('executor',terra)],undefined,'Terra is not paused for the old model\'s failure');
+    assert.equal(f.calls().filter(call=>/重送換模型通知/.test(call.prompt||'')).length,1,'one turn on the old model, one resend');
+    assert.equal(read(f.statePath).rateLimits[fallback.limitKey('executor',terra)],undefined,'Terra is not paused for it');
+  }finally{await f.stop();}
+});
+
+test('a turn started after the switch on the new model marks it taken, and nothing is judged by the time that passes',async()=>{
+  const f=watched({record:{role:'executor',original:opus,from:sol,current:terra,effort:'xhigh',restored:null},setTo:terra,turnModel:sol,laterTurn:terra,aboveCurrent:true});
+  try{
+    f.start();
+    await until(()=>read(f.statePath).modelSwitch['executor-qa'].takenAt);
+    await delay(1000);
+    assert.ok(!f.calls().some(call=>call.model),'no notice for a switch that took');
+    assert.equal(read(f.statePath).rateLimits[fallback.limitKey('executor',terra)],undefined);
   }finally{await f.stop();}
 });
 
@@ -210,3 +225,72 @@ test('a billing_exhausted refusal moves the mainline off the API at once and is 
   }finally{await f.stop();}
 });
 
+
+// v1.20.0 (decision 44): the target answers one request through OpenCodex before a chat is switched to it. A local
+// server stands in for OpenCodex, answering as the 2026-11-27 15:46 test did: a completed stream for a model that
+// serves, a failed stream naming credit_balance_exhausted for the OpenAI API Sol, and a 429 for a model out of quota.
+function probeServer(answer){
+  const http=require('node:http'),asked=[];
+  const server=http.createServer((req,res)=>{
+    let body='';req.on('data',chunk=>body+=chunk);
+    req.on('end',()=>{
+      const model=JSON.parse(body).model;asked.push(model);
+      const [status,rows]=answer(model);
+      res.writeHead(status,{'content-type':status===200?'text/event-stream':'application/json'});
+      res.end(status===200?rows.map(row=>'event: '+row.type+'\ndata: '+JSON.stringify(row)+'\n\n').join(''):JSON.stringify(rows));
+    });
+  });
+  return new Promise(resolve=>server.listen(0,'127.0.0.1',()=>resolve({asked,url:'http://127.0.0.1:'+server.address().port+'/v1/responses',close:()=>new Promise(done=>server.close(done))})));
+}
+const completed=[{type:'response.created'},{type:'response.completed',response:{status:'completed'}}];
+const outOfBalance=[{type:'response.created'},{type:'response.failed',response:{error:{code:'credit_balance_exhausted',message:'Your credit balance is too low'}}}];
+
+test('a probe passes only on a completed stream, keeps the provider code of a failure, and is asked once a minute',async()=>{
+  const probes=require(path.join(scripts,'route-probe.cjs'));
+  const server=await probeServer(model=>model===apiSol?[200,outOfBalance]:[200,completed]);
+  const run=fs.mkdtempSync(path.join(os.tmpdir(),'v1200-probe-')),old=process.env.LONG_TASK_PROBE_URL;
+  process.env.LONG_TASK_PROBE_URL=server.url;
+  try{
+    const now=Date.now();
+    assert.equal((await probes.probe(opus,run,now)).ok,true);
+    assert.equal((await probes.probe(opus,run,now+30000)).ok,true);
+    assert.deepEqual(server.asked,[opus],'a second probe within the minute reads the first answer');
+    const refused=await probes.probe(apiSol,run,now);
+    assert.deepEqual([refused.ok,refused.status,refused.code],[false,200,'credit_balance_exhausted'],'HTTP 200 alone is not a pass');
+    assert.equal(probes.failedRecently(apiSol,run,now+30000),true);
+    assert.equal(probes.failedRecently(apiSol,run,now+probes.PROBE_TTL_MS),false,'after a minute it is asked again');
+    assert.equal(probes.failedRecently(opus,run,now),false);
+    await probes.probe(opus,run,now+probes.PROBE_TTL_MS);
+    assert.deepEqual(server.asked,[opus,apiSol,opus]);
+  }finally{
+    if(old===undefined)delete process.env.LONG_TASK_PROBE_URL;else process.env.LONG_TASK_PROBE_URL=old;
+    await server.close();fs.rmSync(run,{recursive:true,force:true});
+  }
+});
+
+test('a mainline left on Sonnet comes back to Opus, the first stop of its role',async()=>{
+  const f=watched({record:null,setTo:sonnet,turnModel:sonnet});
+  try{
+    f.start();
+    await until(()=>f.calls().some(call=>call.model));
+    const notice=f.calls().find(call=>call.model);
+    assert.equal(notice.model,opus);
+    assert.match(notice.prompt,new RegExp(sonnet+' 不在本角色的順位上'));
+    assert.equal(read(f.statePath).modelSwitch['executor-qa'].original,opus);
+  }finally{await f.stop();}
+});
+
+test('a target that fails its probe is never switched to: it is recorded as refused and the next stop is taken',async()=>{
+  const server=await probeServer(model=>model===opus?[429,{error:{type:'rate_limit_error',message:'usage limit reached'}}]:[200,completed]);
+  const f=watched({record:null,setTo:sonnet,turnModel:sonnet,extraEnv:{LONG_TASK_PROBE_URL:server.url}});
+  try{
+    const stops=withEnv(catalogHome().env,()=>fallback.chainFor('executor'));
+    f.start();
+    await until(()=>f.calls().some(call=>call.model));
+    const notices=f.calls().filter(call=>call.model);
+    assert.ok(notices.every(call=>call.model!==opus),'no switch is sent to the model that failed');
+    assert.equal(notices[0].model,stops.find(model=>model!==opus));
+    assert.ok(server.asked.indexOf(opus)<server.asked.indexOf(notices[0].model),'Opus was asked first');
+    assert.ok(read(f.statePath).rateLimits[fallback.limitKey('executor',opus)]?.until>Date.now(),'the refusal pauses Opus for this role');
+  }finally{await f.stop();await server.close();}
+});

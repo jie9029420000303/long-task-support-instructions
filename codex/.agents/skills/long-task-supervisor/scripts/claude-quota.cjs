@@ -209,10 +209,12 @@ function temporary(run){
   const tmp=real(process.env.LONG_TASK_TEMP_ROOT||require('node:os').tmpdir()),at=real(run);
   return at===tmp||at.startsWith(tmp+require('node:path').sep);
 }
-// Reads every 30 minutes and once just after any account reset (Q51 C). Returns true when the decision changed.
-async function refresh(state,now=Date.now(),run=null){
+// Reads every 30 minutes and once just after any account reset (Q51 C). force reads at once: the watcher reads again
+// right before it switches a chat, so a reset nobody announced (a reset offer, or one the provider made itself) counts
+// in that switch (Jay 2026-11-27 decision 45). Returns true when the decision changed.
+async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   const known=state.claudeQuota;
-  if(known&&now<known.nextReadAt)return false;
+  if(!force&&known&&now<known.nextReadAt)return false;
   if(!process.env.LONG_TASK_CLAUDE_QUOTA_FILE&&run&&temporary(run)){
     state.claudeQuota={at:now,step:0,available:null,unconfigured:true,ladder:LADDER,accounts:[],
       openai:evaluateOpenAI(null,now),nextReadAt:now+READ_EVERY_MS};
