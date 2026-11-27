@@ -2,10 +2,10 @@
 <html lang="zh-Hant" data-theme="blueprint" data-mode="auto" data-style="80">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-EnrV2y1+ZGBpgNwkPYLB0OcHIDdo7AU4mwW+QVBSCrc=' 'sha256-U29bHzy4sZKP875375HeDK+KOJw9yvgTM3ocXP1TGOw='; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'self'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-sx5PiCSpL0JsEEHS1UXSKzB3HO8Bt3ReCPFEnM2fcls=' 'sha256-U29bHzy4sZKP875375HeDK+KOJw9yvgTM3ocXP1TGOw='; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'self'; form-action 'none'; base-uri 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="Answer me with HTML 0.6.4">
-<title>長任務技能 模型切換與運作流程（v1.20.0 定版）</title>
+<title>長任務技能 模型切換與運作流程（v1.21.1 定版）</title>
 <style>
 html[data-theme="blueprint"], html[data-theme="blueprint"][data-mode="light"] {
   color-scheme: light;
@@ -1005,128 +1005,6 @@ table.am-mark { background: none; }
 @media print { .am-remark-pop { display: none !important; } }
 
 
-/* Change markers (only on pages that have one). Only the Changes view (.am-view-changes) draws change styling: colors, strike-through, faded items
-   and badges. Before and After look like a plain diagram, and the items that do not exist in the view are hidden.
-   The colors are the theme's --ok, --err and --warn, so every theme and mode works. A view hides items with visibility, so nothing moves. */
-.am-view-before [data-delta="added"], .am-view-after [data-delta="removed"] { visibility: hidden; }
-.am-view-before .am-delta-badge, .am-view-after .am-delta-badge { visibility: hidden; }
-/* A list label's badge is inline and would indent the label like a nesting level, so there it takes no space; the other badges are positioned and move nothing. */
-.am-view-before .am-tree-label > .am-delta-badge, .am-view-after .am-tree-label > .am-delta-badge { display: none; }
-
-.am-delta-badge--added { --badge: var(--ok, #1f9d4d); }
-.am-delta-badge--removed { --badge: var(--err, #c62828); }
-.am-delta-badge--changed { --badge: var(--warn, #a8620a); }
-
-/* flow */
-.am-view-changes .am-node[data-delta="added"] .am-node-shape { stroke: var(--ok, #1f9d4d); }
-.am-view-changes .am-node[data-delta="removed"] .am-node-shape { stroke: var(--err, #c62828); }
-.am-view-changes .am-node[data-delta="changed"] .am-node-shape { stroke: var(--warn, #a8620a); }
-.am-view-changes .am-node[data-delta="added"] > text { fill: var(--ok, #1f9d4d); }
-.am-view-changes .am-node[data-delta="removed"] > text { fill: var(--err, #c62828); }
-.am-view-changes [data-delta="added"] > .am-edge { stroke: var(--ok, #1f9d4d); }
-.am-view-changes [data-delta="removed"] > .am-edge { stroke: var(--err, #c62828); }
-.am-view-changes .am-arrow--added { fill: var(--ok, #1f9d4d); }
-.am-view-changes .am-arrow--removed { fill: var(--err, #c62828); }
-.am-view-changes [data-delta="added"] > .am-edge-label text { fill: var(--ok, #1f9d4d); }
-.am-view-changes [data-delta="removed"] > .am-edge-label text { fill: var(--err, #c62828); }
-.am-view-changes .am-cluster[data-delta="added"] { stroke: var(--ok, #1f9d4d); }
-.am-view-changes .am-cluster[data-delta="removed"] { stroke: var(--err, #c62828); }
-.am-view-changes .am-cluster-label[data-delta="added"] { fill: var(--ok, #1f9d4d); }
-.am-view-changes .am-cluster-label[data-delta="removed"] { fill: var(--err, #c62828); }
-/* state: a state is an .am-node, and its initial and final dots take the same colors as a node shape. */
-.am-view-changes .am-node[data-delta="added"] .am-state-dot, .am-view-changes .am-node[data-delta="added"] .am-state-core { fill: var(--ok, #1f9d4d); }
-.am-view-changes .am-node[data-delta="removed"] .am-state-dot, .am-view-changes .am-node[data-delta="removed"] .am-state-core { fill: var(--err, #c62828); }
-.am-view-changes .am-node[data-delta="changed"] .am-state-dot, .am-view-changes .am-node[data-delta="changed"] .am-state-core { fill: var(--warn, #a8620a); }
-.am-view-changes .am-node[data-delta="added"] .am-state-ring { stroke: var(--ok, #1f9d4d); }
-.am-view-changes .am-node[data-delta="removed"] .am-state-ring { stroke: var(--err, #c62828); }
-.am-view-changes .am-node[data-delta="changed"] .am-state-ring { stroke: var(--warn, #a8620a); }
-.am-view-changes g[data-delta="removed"]:not(.am-delta-badge), .am-view-changes .am-cluster[data-delta="removed"], .am-view-changes .am-cluster-label[data-delta="removed"] { opacity: 0.55; }
-.am-view-changes .am-node[data-delta="removed"] > text, .am-view-changes g[data-delta="removed"] > .am-edge-label text, .am-view-changes .am-cluster-label[data-delta="removed"] { text-decoration: line-through; }
-.am-diagram .am-delta-badge circle { fill: var(--badge); stroke: var(--paper, #ffffff); stroke-width: 1.5; }
-.am-diagram .am-delta-badge text { fill: var(--paper, #ffffff); font: 700 var(--am-fs-d-badge) var(--font-sans, sans-serif); text-decoration: none; }
-
-/* er: entities and relationships use the flow rules above (an entity is an .am-node, a relationship path and its end marks are .am-edge). A marked field row adds a tinted band,
-   colored text and its sign at the start of the row; Before and After show a plain schema, so the bands and signs hide there and the rows keep their place. */
-.am-view-before .am-er-band, .am-view-after .am-er-band, .am-view-before .am-er-sign, .am-view-after .am-er-sign { visibility: hidden; }
-.am-er-sign { font-weight: 700; }
-.am-view-changes .am-er-band[data-delta="added"] { fill: var(--ok-bg); }
-.am-view-changes .am-er-band[data-delta="removed"] { fill: var(--err-bg); }
-.am-view-changes .am-er-band[data-delta="changed"] { fill: var(--warn-bg); }
-.am-view-changes .am-er-sign[data-delta="added"], .am-view-changes .am-er-field[data-delta="added"], .am-view-changes .am-er-key[data-delta="added"] { fill: var(--ok); }
-.am-view-changes .am-er-sign[data-delta="removed"], .am-view-changes .am-er-field[data-delta="removed"], .am-view-changes .am-er-key[data-delta="removed"] { fill: var(--err); }
-.am-view-changes .am-er-sign[data-delta="changed"], .am-view-changes .am-er-field[data-delta="changed"], .am-view-changes .am-er-key[data-delta="changed"] { fill: var(--warn); }
-.am-view-changes .am-er-field[data-delta="removed"] { text-decoration: line-through; }
-.am-view-changes .am-node .am-er-sign[data-delta] { text-decoration: none; }
-
-/* API changes use the shared switch but collapse hidden HTML rows and contracts so Before and After remain readable. */
-/* Use the code diff hues and ink/fill mixes: a theme's status --ok can be blue, but additions must stay green in every theme and mode. */
-.am-api {
-  --diff-add: #1f9d4d; --diff-del: #d1344a;
-  --ok: color-mix(in srgb, var(--diff-add) 75%, var(--ink));
-  --ok-bg: color-mix(in srgb, var(--diff-add) 14%, var(--fill));
-  --err: color-mix(in srgb, var(--diff-del) 75%, var(--ink));
-  --err-bg: color-mix(in srgb, var(--diff-del) 14%, var(--fill));
-}
-.am-api.am-view-before [data-delta="added"], .am-api.am-view-after [data-delta="removed"],
-.am-api.am-view-before .am-delta-badge, .am-api.am-view-after .am-delta-badge { display: none; }
-/* A view hides the columns and tables none of its fields need, and the first contract it shows drops the separator above it. */
-.am-api.am-view-before [data-api-hide~="before"], .am-api.am-view-after [data-api-hide~="after"] { display: none; }
-.am-api.am-view-before .am-api-contract[data-api-lead~="before"], .am-api.am-view-after .am-api-contract[data-api-lead~="after"] { margin-block-start: 0; padding-block-start: 0; border-block-start: 0; }
-.am-api .am-delta-badge { display: inline-block; color: var(--badge); margin-inline-end: 6px; font-weight: 700; }
-.am-view-changes .am-api-contract[data-delta="added"], .am-view-changes .am-api-contract [data-delta="added"] { --api-change: var(--ok); --api-change-bg: var(--ok-bg); }
-.am-view-changes .am-api-contract[data-delta="removed"], .am-view-changes .am-api-contract [data-delta="removed"] { --api-change: var(--err); --api-change-bg: var(--err-bg); }
-.am-view-changes .am-api-contract[data-delta="changed"], .am-view-changes .am-api-contract [data-delta="changed"] { --api-change: var(--warn); --api-change-bg: var(--warn-bg); }
-.am-view-changes .am-api-contract tr[data-delta] > * { color: var(--api-change); background: var(--api-change-bg); }
-.am-view-changes .am-api-section[data-delta] > h4,
-.am-view-changes .am-api-contract[data-delta] > .am-api-endpoint { color: var(--api-change); }
-.am-view-changes .am-api-contract[data-delta] > .am-api-endpoint strong { color: inherit; }
-.am-view-changes .am-api-contract tr[data-delta="removed"] > *,
-.am-view-changes .am-api-section[data-delta="removed"] > h4,
-.am-view-changes .am-api-contract[data-delta="removed"] > .am-api-endpoint { text-decoration: line-through; }
-
-/* tree */
-.am-tree .am-delta-badge {
-  display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; width: var(--am-ln-treeBadge); height: var(--am-ln-treeBadge); flex: none;
-  border-radius: 50%; background: var(--badge); color: var(--paper); font: 700 var(--am-fs-label)/1 var(--font-mono, monospace); text-decoration: none;
-}
-.am-tree-box[data-delta] { position: relative; }
-.am-tree-box > .am-delta-badge { position: absolute; top: -8px; inset-inline-end: -8px; }
-.am-tree-label > .am-delta-badge { margin-inline-end: 6px; vertical-align: 1px; }
-.am-view-changes .am-tree-box[data-delta="added"] { border-color: var(--ok); }
-.am-view-changes .am-tree-box[data-delta="removed"] { border-color: var(--err); opacity: 0.55; text-decoration: line-through; }
-.am-view-changes .am-tree-box[data-delta="changed"] { border-color: var(--warn); }
-.am-view-changes .am-tree-list li[data-delta="added"] > .am-tree-label { color: var(--ok); }
-.am-view-changes .am-tree-list li[data-delta="removed"] > .am-tree-label { color: var(--err); text-decoration: line-through; }
-.am-view-changes .am-tree-list li[data-delta="changed"] > .am-tree-label { color: var(--warn); }
-.am-view-changes .am-tree-list li[data-delta="removed"] > .am-tree-label, .am-view-changes .am-tree-list li[data-delta="removed"] > .am-tree-sub { opacity: 0.55; }
-
-/* Connector lines in a view that hides siblings. A hidden node keeps its stretch of the line, so the line stays whole between the nodes that remain and
-   stops at the last one; the markup (data-line-before / data-line-after, see src/components/tree.js) names the stretches that differ from the usual look. */
-.am-view-before .am-tree-list li::after, .am-view-after .am-tree-list li::after,
-.am-view-before .am-tree-col::before, .am-view-after .am-tree-col::before { visibility: visible; }
-.am-view-before .am-tree-list li[data-line-before="full"]::after, .am-view-after .am-tree-list li[data-line-after="full"]::after { bottom: 0; height: auto; }
-.am-view-before .am-tree-list li[data-line-before="short"]::after, .am-view-after .am-tree-list li[data-line-after="short"]::after { bottom: auto; height: 0.95em; }
-.am-view-before .am-tree-list li[data-line-before="none"]::after, .am-view-after .am-tree-list li[data-line-after="none"]::after,
-.am-view-before .am-tree-col[data-line-before="none"]::before, .am-view-after .am-tree-col[data-line-after="none"]::before,
-.am-view-before .am-tree-root[data-line-before="none"]::after, .am-view-after .am-tree-root[data-line-after="none"]::after { display: none; }
-.am-view-before .am-tree-col[data-line-before="full"]::before, .am-view-after .am-tree-col[data-line-after="full"]::before { inset-inline: 0; }
-.am-view-before .am-tree-col[data-line-before="start"]::before, .am-view-after .am-tree-col[data-line-after="start"]::before { inset-inline: 50% 0; }
-.am-view-before .am-tree-col[data-line-before="end"]::before, .am-view-after .am-tree-col[data-line-after="end"]::before { inset-inline: 0 50%; }
-
-/* the count row and the switch */
-.am-delta-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 10px; text-align: start; font: var(--am-fs-small)/1.3 var(--font-mono, monospace); }
-.am-delta-count--added { color: var(--ok); }
-.am-delta-count--removed { color: var(--err); }
-.am-delta-count--changed { color: var(--warn); }
-.am-delta-switch { display: inline-flex; margin-inline-start: auto; border: var(--bw, 1px) solid var(--line-2); border-radius: var(--radius); overflow: hidden; }
-.am-delta-switch[hidden] { display: none; }
-.am-delta-switch button { font: inherit; padding: 3px 10px; color: var(--ink-2); background: var(--paper); border: 0; border-inline-start: 1px solid var(--line-2); cursor: pointer; }
-.am-delta-switch button:first-child { border-inline-start: 0; }
-.am-delta-switch button[aria-pressed="true"] { color: var(--ink); background: var(--accent-bg); font-weight: 600; }
-.am-delta-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-@media print { .am-delta-switch { display: none !important; } }
-
-
 html[data-theme="blueprint"] .am-frame { border: 1px solid var(--line); padding: 30px; }
 html[data-theme="blueprint"] .am-frame::before {
   content: ""; position: absolute; inset: 18px; border: 1px solid var(--line); pointer-events: none;
@@ -1169,7 +1047,7 @@ html[data-theme="paper"] .am-md table { font-family: var(--font-sans); }
 <button class="am-export-item" type="button" role="menuitem" data-export="pdf" aria-describedby="am-export-pdf-note"><span>儲存為 PDF</span><small class="am-export-note" id="am-export-pdf-note" aria-hidden="true"></small></button>
 </div>
 <main class="am-sheet">
-<header class="am-head"><p class="am-colophon">Generated by <a href="https://github.com/QingYunA/answer-me-with-html" target="_blank" rel="noopener">Answer me with HTML</a> 0.6.4 · 2026-11-27 16:19 · <a href="https://github.com/QingYunA/answer-me-with-html" target="_blank" rel="noopener">★ Star on GitHub</a></p><h1>長任務技能 模型切換與運作流程（v1.20.0 定版）</h1><p class="am-sub">依決策帳第 1～45 項，Jay 2026-11-27 確認換模型改由程式依實際狀態判斷</p><div class="am-intro am-md"><div class="am-md"><p>這一版讓換模型全部由程式依實際狀態判斷。要換之前先即時讀額度、試打目標站，對話閒置時才送，再看新回合實際用的模型確認生效。順位、降級階梯與上一版的甲選項都不變。</p>
+<header class="am-head"><p class="am-colophon">Generated by <a href="https://github.com/QingYunA/answer-me-with-html" target="_blank" rel="noopener">Answer me with HTML</a> 0.6.4 · 2026-11-27 21:57 · <a href="https://github.com/QingYunA/answer-me-with-html" target="_blank" rel="noopener">★ Star on GitHub</a></p><h1>長任務技能 模型切換與運作流程（v1.21.1 定版）</h1><p class="am-sub">依決策帳第 1～45 項，Jay 2026-11-27 改降級階梯門檻為越接近用完越密</p><div class="am-intro am-md"><div class="am-md"><p>這一版只改 B 降級階梯的門檻。門檻從每 7% 一階，改成 50、35、24、16、10、6、3、1，越接近用完間距越密。可用量還多時各角色留在高階模型更久，接近用完才快速往下讓。各階的站、順位與換模型步驟都不變。</p>
 </div></div></header>
 <div class="am-frame">
 <div class="am-ruler am-ruler--top" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span></div><div class="am-ruler am-ruler--bottom" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span></div><div class="am-ruler am-ruler--left" aria-hidden="true"><span>A</span><span>B</span><span>C</span><span>D</span></div><div class="am-ruler am-ruler--right" aria-hidden="true"><span>A</span><span>B</span><span>C</span><span>D</span></div>
@@ -1250,42 +1128,42 @@ html[data-theme="paper"] .am-md table { font-family: var(--font-sans); }
 </tr>
 <tr>
 <td>2</td>
-<td>43%</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">35%（原 43%）</span></span></td>
 <td>Terra・OpenAI 訂閱</td>
 <td>—</td>
 <td>—</td>
 </tr>
 <tr>
 <td>3</td>
-<td>36%</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">24%（原 36%）</span></span></td>
 <td>Terra・OpenAI API</td>
 <td>Opus・Claude API</td>
 <td>—</td>
 </tr>
 <tr>
 <td>4</td>
-<td>29%</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">16%（原 29%）</span></span></td>
 <td>DeepSeek</td>
 <td>Sol・OpenAI 訂閱</td>
 <td>—</td>
 </tr>
 <tr>
 <td>5</td>
-<td>22%</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">10%（原 22%）</span></span></td>
 <td>Muse</td>
 <td>Sol・OpenAI API</td>
 <td>Opus・Claude API</td>
 </tr>
 <tr>
 <td>6</td>
-<td>15%</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">6%（原 15%）</span></span></td>
 <td><span class="am-status am-status--warn"><span class="am-status-icon" aria-hidden="true">!</span><span class="am-status-text">Terra・OpenAI 訂閱（原 Muse）</span></span></td>
 <td>Terra・OpenAI 訂閱</td>
 <td>Sol・OpenAI 訂閱</td>
 </tr>
 <tr>
 <td>7</td>
-<td>8%</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">3%（原 8%）</span></span></td>
 <td>Muse</td>
 <td>Terra・OpenAI API</td>
 <td>Sol・OpenAI API</td>
@@ -1321,7 +1199,7 @@ html[data-theme="paper"] .am-md table { font-family: var(--font-sans); }
 </section>
 <section class="am-panel am-span-wide" id="panel-D" style="grid-column: span 2" data-span="2">
 <header class="am-panel-head"><span class="am-panel-id">D</span><h2>換模型的步驟與規則</h2></header>
-<div class="am-panel-body"><figure class="am-diagram am-flow am-view-changes"><svg viewBox="0 0 596 717" width="596" height="717" role="img" aria-label="流程圖：背景程式判斷要換模型、送切換通知、切換生效、15 分鐘內有成功回應?、新站暫停 30 分鐘並往下換、對話閒置?、下一輪再看、即時讀額度，依新讀值重判" xmlns="http://www.w3.org/2000/svg"><defs><marker id="am5-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="am-arrow" d="M0,0 L10,5 L0,10 z"/></marker><marker id="am5-arrow-added" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="am-arrow am-arrow--added" d="M0,0 L10,5 L0,10 z"/></marker><marker id="am5-arrow-removed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="am-arrow am-arrow--removed" d="M0,0 L10,5 L0,10 z"/></marker></defs><g></g><g><g data-step="3" data-delta="removed"><path class="am-edge" d="M307.2,49 L341.7,60.5 Q376.1,72 376.1,97.5 Q376.1,123 376.1,153 Q376.1,183 376.1,212 Q376.1,241 376.1,265.5 Q376.1,290 376.1,315.5 Q376.1,341 376.1,371 Q376.1,401 363.1,421.3 L350.1,441.5" marker-end="url(#am5-arrow-removed)"/></g><g data-step="4" data-delta="removed"><path class="am-edge" d="M292.4,475.7 L247.6,491.9 Q202.7,508 202.7,519.5 L202.7,531" marker-end="url(#am5-arrow-removed)"/></g><g data-step="5" data-delta="removed"><path class="am-edge" d="M232.3,580 L259.9,599.5 Q287.4,619 307.6,639.3 L327.9,659.5" marker-end="url(#am5-arrow-removed)"/><g class="am-edge-label"><rect x="276.6" y="610" width="21.5" height="18" rx="3"/><text x="287.4" y="619" text-anchor="middle" dominant-baseline="central">是</text></g></g><g data-step="6" data-delta="removed"><path class="am-edge" d="M193.4,584.8 L187.2,601.9 Q181,619 181,635 L181,651" marker-end="url(#am5-arrow-removed)"/><g class="am-edge-label"><rect x="170.2" y="610" width="21.5" height="18" rx="3"/><text x="181" y="619" text-anchor="middle" dominant-baseline="central">否</text></g></g><g data-step="7" data-delta="added"><path class="am-edge" d="M234.7,49 L221.4,60.5 Q208.1,72 208.1,83.5 L208.1,95" marker-end="url(#am5-arrow-added)"/></g><g data-step="8" data-delta="added"><path class="am-edge" d="M232.6,140.5 L262.4,161.8 Q292.1,183 292.1,203.3 L292.1,223.5" marker-end="url(#am5-arrow-added)"/><g class="am-edge-label"><rect x="258.4" y="174" width="67.5" height="18" rx="3"/><text x="292.1" y="183" text-anchor="middle" dominant-baseline="central">回合進行中</text></g></g><g data-step="9" data-delta="added"><path class="am-edge" d="M183.6,140.5 L153.9,161.8 Q124.1,183 124.1,199 L124.1,215" marker-end="url(#am5-arrow-added)"/><g class="am-edge-label"><rect x="107.6" y="174" width="33" height="18" rx="3"/><text x="124.1" y="183" text-anchor="middle" dominant-baseline="central">閒置</text></g></g><g data-step="10" data-delta="added"><path class="am-edge" d="M124.1,267 L124.1,278.5 Q124.1,290 124.1,301.5 L124.1,313" marker-end="url(#am5-arrow-added)"/></g><g data-step="11" data-delta="added"><path class="am-edge" d="M114,365.7 L106.8,383.3 Q99.5,401 99.5,417 L99.5,433" marker-end="url(#am5-arrow-added)"/><g class="am-edge-label"><rect x="83" y="392" width="33" height="18" rx="3"/><text x="99.5" y="401" text-anchor="middle" dominant-baseline="central">不通</text></g></g><g data-step="12" data-delta="added"><path class="am-edge" d="M150.9,360.2 L179.5,380.6 Q208.1,401 253.8,421.3 L299.4,441.5" marker-end="url(#am5-arrow-added)"/><g class="am-edge-label"><rect x="197.4" y="392" width="21.5" height="18" rx="3"/><text x="208.1" y="401" text-anchor="middle" dominant-baseline="central">通</text></g></g><g data-step="13" data-delta="added"><path class="am-edge" d="M385.1,476.5 L426.7,492.3 Q468.2,508 468.2,519.5 L468.2,531" marker-end="url(#am5-arrow-added)"/></g><g data-step="14" data-delta="added"><path class="am-edge" d="M441.2,579.8 L415.7,599.4 Q390.2,619 374.6,639.3 L359,659.5" marker-end="url(#am5-arrow-added)"/><g class="am-edge-label"><rect x="368" y="610" width="44.5" height="18" rx="3"/><text x="390.2" y="619" text-anchor="middle" dominant-baseline="central">新模型</text></g></g><g data-step="15" data-delta="added"><path class="am-edge" d="M481.7,583.4 L491.6,601.2 Q501.5,619 501.5,639.3 L501.5,659.5" marker-end="url(#am5-arrow-added)"/><g class="am-edge-label"><rect x="479.2" y="610" width="44.5" height="18" rx="3"/><text x="501.5" y="619" text-anchor="middle" dominant-baseline="central">舊模型</text></g></g></g><g><g class="am-node am-node--round" data-key="背景程式判斷要換模型" data-step="0"><rect class="am-node-shape" x="169.9" y="14" width="170" height="35" rx="17.5"/><text x="254.9" y="31.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">背景程式判斷要換模型</text></g><g class="am-node am-node--rect" data-key="送切換通知" data-step="1"><rect class="am-node-shape" x="292.4" y="441.5" width="93" height="35" rx="3"/><text x="338.9" y="459" text-anchor="middle" dominant-baseline="central" class="am-node-text">送切換通知</text></g><g class="am-node am-node--rect" data-key="切換生效" data-step="2"><rect class="am-node-shape" x="305.4" y="659.5" width="80" height="35" rx="3"/><text x="345.4" y="677" text-anchor="middle" dominant-baseline="central" class="am-node-text">切換生效</text></g><g class="am-node am-node--diamond" data-key="15 分鐘內有成功回應?" data-step="4" data-delta="removed"><polygon class="am-node-shape" points="202.7,531 321.1,559 202.7,587 84.4,559"/><text x="202.7" y="559" text-anchor="middle" dominant-baseline="central" class="am-node-text">15 分鐘內有成功回應?</text><g class="am-delta-badge am-delta-badge--removed" data-delta="removed" transform="translate(261.9,545)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">−</text></g></g><g class="am-node am-node--rect" data-key="新站暫停 30 分鐘並往下換" data-step="6" data-delta="removed"><rect class="am-node-shape" x="97.3" y="651" width="167.4" height="52" rx="3"/><text x="181" y="668.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">新站暫停 30 分鐘並往下</text><text x="181" y="685.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">換</text><g class="am-delta-badge am-delta-badge--removed" data-delta="removed" transform="translate(264.7,651)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">−</text></g></g><g class="am-node am-node--diamond" data-key="對話閒置?" data-step="7" data-delta="added"><polygon class="am-node-shape" points="208.1,95 273.6,123 208.1,151 142.7,123"/><text x="208.1" y="123" text-anchor="middle" dominant-baseline="central" class="am-node-text">對話閒置?</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(240.9,109)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g><g class="am-node am-node--rect" data-key="下一輪再看" data-step="8" data-delta="added"><rect class="am-node-shape" x="245.6" y="223.5" width="93" height="35" rx="3"/><text x="292.1" y="241" text-anchor="middle" dominant-baseline="central" class="am-node-text">下一輪再看</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(338.6,223.5)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g><g class="am-node am-node--rect" data-key="即時讀額度，依新讀值重判" data-step="9" data-delta="added"><rect class="am-node-shape" x="38.6" y="215" width="171" height="52" rx="3"/><text x="124.1" y="232.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">即時讀額度，依新讀值重</text><text x="124.1" y="249.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">判</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(209.6,215)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g><g class="am-node am-node--diamond" data-key="試打目標站通?" data-step="10" data-delta="added"><polygon class="am-node-shape" points="124.1,313 209.1,341 124.1,369 39.2,341"/><text x="124.1" y="341" text-anchor="middle" dominant-baseline="central" class="am-node-text">試打目標站通?</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(166.6,327)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g><g class="am-node am-node--rect" data-key="跳過這一站，下一輪取下一站" data-step="11" data-delta="added"><rect class="am-node-shape" x="14" y="433" width="171" height="52" rx="3"/><text x="99.5" y="450.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">跳過這一站，下一輪取下</text><text x="99.5" y="467.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">一站</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(185,433)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g><g class="am-node am-node--diamond" data-key="新回合用哪個模型?" data-step="13" data-delta="added"><polygon class="am-node-shape" points="468.2,531 572.7,559 468.2,587 363.8,559"/><text x="468.2" y="559" text-anchor="middle" dominant-baseline="central" class="am-node-text">新回合用哪個模型?</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(520.5,545)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g><g class="am-node am-node--rect" data-key="閒置時重送，最多 3 次" data-step="15" data-delta="added"><rect class="am-node-shape" x="421.4" y="659.5" width="160.1" height="35" rx="3"/><text x="501.5" y="677" text-anchor="middle" dominant-baseline="central" class="am-node-text">閒置時重送，最多 3 次</text><g class="am-delta-badge am-delta-badge--added" data-delta="added" transform="translate(581.5,659.5)"><circle r="7"/><text text-anchor="middle" dominant-baseline="central">+</text></g></g></g></svg><div class="am-delta-bar"><span class="am-delta-count am-delta-count--added">+16 新增</span> <span class="am-delta-count am-delta-count--removed">−6 刪除</span><span class="am-delta-switch" role="group" aria-label="檢視" hidden><button type="button" data-view="before" aria-pressed="false">改前</button><button type="button" data-view="changes" aria-pressed="true">變更</button><button type="button" data-view="after" aria-pressed="false">改後</button></span></div></figure>
+<div class="am-panel-body"><figure class="am-diagram am-flow"><svg viewBox="0 0 485 700" width="485" height="700" role="img" aria-label="流程圖：背景程式判斷要換模型、送切換通知、切換生效、對話閒置?、下一輪再看、即時讀額度，依新讀值重判、試打目標站通?、跳過這一站，下一輪取下一站" xmlns="http://www.w3.org/2000/svg"><defs><marker id="am5-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="am-arrow" d="M0,0 L10,5 L0,10 z"/></marker></defs><g></g><g><g data-step="3"><path class="am-edge" d="M340.1,49 L340.1,60.5 Q340.1,72 340.1,83.5 L340.1,95" marker-end="url(#am5-arrow)"/></g><g data-step="4"><path class="am-edge" d="M364.6,140.5 L394.3,161.8 Q424.1,183 424.1,203.3 L424.1,223.5" marker-end="url(#am5-arrow)"/><g class="am-edge-label"><rect x="390.3" y="174" width="67.5" height="18" rx="3"/><text x="424.1" y="183" text-anchor="middle" dominant-baseline="central">回合進行中</text></g></g><g data-step="5"><path class="am-edge" d="M315.5,140.5 L285.8,161.8 Q256.1,183 256.1,199 L256.1,215" marker-end="url(#am5-arrow)"/><g class="am-edge-label"><rect x="239.6" y="174" width="33" height="18" rx="3"/><text x="256.1" y="183" text-anchor="middle" dominant-baseline="central">閒置</text></g></g><g data-step="6"><path class="am-edge" d="M256.1,267 L256.1,278.5 Q256.1,290 256.1,301.5 L256.1,313" marker-end="url(#am5-arrow)"/></g><g data-step="7"><path class="am-edge" d="M282.9,360.2 L311.5,380.6 Q340.1,401 340.1,417 L340.1,433" marker-end="url(#am5-arrow)"/><g class="am-edge-label"><rect x="323.6" y="392" width="33" height="18" rx="3"/><text x="340.1" y="401" text-anchor="middle" dominant-baseline="central">不通</text></g></g><g data-step="8"><path class="am-edge" d="M229.2,360.2 L200.6,380.6 Q172.1,401 172.1,421.3 L172.1,441.5" marker-end="url(#am5-arrow)"/><g class="am-edge-label"><rect x="161.3" y="392" width="21.5" height="18" rx="3"/><text x="172.1" y="401" text-anchor="middle" dominant-baseline="central">通</text></g></g><g data-step="9"><path class="am-edge" d="M172.1,476.5 L172.1,492.3 Q172.1,508 172.1,519.5 L172.1,531" marker-end="url(#am5-arrow)"/></g><g data-step="10"><path class="am-edge" d="M199.1,579.8 L224.6,599.4 Q250.1,619 250.1,635 L250.1,651" marker-end="url(#am5-arrow)"/><g class="am-edge-label"><rect x="227.8" y="610" width="44.5" height="18" rx="3"/><text x="250.1" y="619" text-anchor="middle" dominant-baseline="central">新模型</text></g></g><g data-step="11"><path class="am-edge" d="M145.1,579.8 L119.6,599.4 Q94,619 94,635 L94,651" marker-end="url(#am5-arrow)"/><g class="am-edge-label"><rect x="71.8" y="610" width="44.5" height="18" rx="3"/><text x="94" y="619" text-anchor="middle" dominant-baseline="central">舊模型</text></g></g></g><g><g class="am-node am-node--round" data-key="背景程式判斷要換模型" data-step="0"><rect class="am-node-shape" x="255.1" y="14" width="170" height="35" rx="17.5"/><text x="340.1" y="31.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">背景程式判斷要換模型</text></g><g class="am-node am-node--rect" data-key="送切換通知" data-step="1"><rect class="am-node-shape" x="125.6" y="441.5" width="93" height="35" rx="3"/><text x="172.1" y="459" text-anchor="middle" dominant-baseline="central" class="am-node-text">送切換通知</text></g><g class="am-node am-node--rect" data-key="切換生效" data-step="2"><rect class="am-node-shape" x="210.1" y="651" width="80" height="35" rx="3"/><text x="250.1" y="668.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">切換生效</text></g><g class="am-node am-node--diamond" data-key="對話閒置?" data-step="3"><polygon class="am-node-shape" points="340.1,95 405.5,123 340.1,151 274.6,123"/><text x="340.1" y="123" text-anchor="middle" dominant-baseline="central" class="am-node-text">對話閒置?</text></g><g class="am-node am-node--rect" data-key="下一輪再看" data-step="4"><rect class="am-node-shape" x="377.6" y="223.5" width="93" height="35" rx="3"/><text x="424.1" y="241" text-anchor="middle" dominant-baseline="central" class="am-node-text">下一輪再看</text></g><g class="am-node am-node--rect" data-key="即時讀額度，依新讀值重判" data-step="5"><rect class="am-node-shape" x="170.6" y="215" width="171" height="52" rx="3"/><text x="256.1" y="232.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">即時讀額度，依新讀值重</text><text x="256.1" y="249.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">判</text></g><g class="am-node am-node--diamond" data-key="試打目標站通?" data-step="6"><polygon class="am-node-shape" points="256.1,313 341,341 256.1,369 171.1,341"/><text x="256.1" y="341" text-anchor="middle" dominant-baseline="central" class="am-node-text">試打目標站通?</text></g><g class="am-node am-node--rect" data-key="跳過這一站，下一輪取下一站" data-step="7"><rect class="am-node-shape" x="254.6" y="433" width="171" height="52" rx="3"/><text x="340.1" y="450.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">跳過這一站，下一輪取下</text><text x="340.1" y="467.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">一站</text></g><g class="am-node am-node--diamond" data-key="新回合用哪個模型?" data-step="9"><polygon class="am-node-shape" points="172.1,531 276.5,559 172.1,587 67.6,559"/><text x="172.1" y="559" text-anchor="middle" dominant-baseline="central" class="am-node-text">新回合用哪個模型?</text></g><g class="am-node am-node--rect" data-key="閒置時重送，最多 3 次" data-step="11"><rect class="am-node-shape" x="14" y="651" width="160.1" height="35" rx="3"/><text x="94" y="668.5" text-anchor="middle" dominant-baseline="central" class="am-node-text">閒置時重送，最多 3 次</text></g></g></svg></figure>
 <div class="am-md"><ul>
 <li>切換通知只在對話閒置時送。進行中的回合沿用開始時選定的模型。被拒時回合已經結束，所以立刻送。</li>
 <li>要送之前，距上次讀額度超過 1 分鐘就即時再讀一次。重置優惠或原廠提前重置會馬上算進去。例行掃描維持每 30 分鐘。</li>
@@ -1350,39 +1228,24 @@ html[data-theme="paper"] .am-md table { font-family: var(--font-sans); }
 </tr>
 </thead>
 <tbody><tr>
-<td>換模型前先試打目標站，通了才切</td>
-<td>route-probe.cjs（新增）、native-watch.cjs</td>
-<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已實作</span></span></td>
-</tr>
-<tr>
-<td>要換之前即時讀額度，依新讀值重判</td>
-<td>claude-quota.cjs、native-watch.cjs</td>
-<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已實作</span></span></td>
-</tr>
-<tr>
-<td>只在對話閒置時送切換通知</td>
-<td>native-watch.cjs</td>
-<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已實作</span></span></td>
-</tr>
-<tr>
-<td>依新回合實際用的模型判斷切換是否生效</td>
-<td>native-watch.cjs、model-fallback.cjs</td>
-<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已實作</span></span></td>
-</tr>
-<tr>
-<td>換回一律回角色順位第一站，工區 D 主線回 Opus</td>
-<td>model-fallback.cjs、native-watch.cjs</td>
-<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已實作</span></span></td>
-</tr>
-<tr>
-<td>刪除「15 分鐘沒成功回應就暫停」與「依失敗請求重送」</td>
-<td>model-fallback.cjs、native-watch.cjs</td>
-<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已刪除</span></span></td>
-</tr>
-<tr>
-<td>例行掃描間隔</td>
+<td>降級門檻改成 50、35、24、16、10、6、3、1</td>
 <td>claude-quota.cjs</td>
-<td>維持 30 分鐘</td>
+<td><span class="am-status am-status--ok"><span class="am-status-icon" aria-hidden="true">✓</span><span class="am-status-text">已實作</span></span></td>
+</tr>
+<tr>
+<td>第 1 階門檻 50%、第 8 階 1%</td>
+<td>claude-quota.cjs</td>
+<td>維持不變</td>
+</tr>
+<tr>
+<td>各階的站、讓位順序（監督晚 2 階、主線晚 4 階）</td>
+<td>claude-quota.cjs</td>
+<td>維持不變</td>
+</tr>
+<tr>
+<td>5 小時額度用到 80% 時多降 1 階</td>
+<td>claude-quota.cjs</td>
+<td>維持不變</td>
 </tr>
 </tbody></table></div>
 </div></div>
@@ -1407,12 +1270,12 @@ html[data-theme="paper"] .am-md table { font-family: var(--font-sans); }
 </div>
 <textarea id="am-source" hidden readonly aria-hidden="true">---
 lang: zh-Hant
-title: 長任務技能 模型切換與運作流程（v1.20.0 定版）
-subtitle: 依決策帳第 1～45 項，Jay 2026-11-27 確認換模型改由程式依實際狀態判斷
-file: long-task-model-switch-v1200
+title: 長任務技能 模型切換與運作流程（v1.21.1 定版）
+subtitle: 依決策帳第 1～45 項，Jay 2026-11-27 改降級階梯門檻為越接近用完越密
+file: long-task-model-switch-v1211
 cols: 2
 ---
-這一版讓換模型全部由程式依實際狀態判斷。要換之前先即時讀額度、試打目標站，對話閒置時才送，再看新回合實際用的模型確認生效。順位、降級階梯與上一版的甲選項都不變。
+這一版只改 B 降級階梯的門檻。門檻從每 7% 一階，改成 50、35、24、16、10、6、3、1，越接近用完間距越密。可用量還多時各角色留在高階模型更久，接近用完才快速往下讓。各階的站、順位與換模型步驟都不變。
 
 ## A 各角色的換模型順位 {span=2}
 訂閱帳號用固定月費和額度。API 按用量計費。高階是 Opus 與 Sol，中階是 Sonnet 與 Terra，開源最後。Opus、Sonnet 是 Claude，Sol、Terra 是 OpenAI，DeepSeek、Muse 走 OpenRouter。
@@ -1453,12 +1316,12 @@ group 訂閱帳號: Terra 訂閱
 |---|---|---|---|---|
 | 0 | — | Sonnet・Claude 訂閱 | Opus・Claude 訂閱 | Opus・Claude 訂閱 |
 | 1 | 50% | Sonnet・Claude API | — | — |
-| 2 | 43% | Terra・OpenAI 訂閱 | — | — |
-| 3 | 36% | Terra・OpenAI API | Opus・Claude API | — |
-| 4 | 29% | DeepSeek | Sol・OpenAI 訂閱 | — |
-| 5 | 22% | Muse | Sol・OpenAI API | Opus・Claude API |
-| 6 | 15% | warn Terra・OpenAI 訂閱（原 Muse） | Terra・OpenAI 訂閱 | Sol・OpenAI 訂閱 |
-| 7 | 8% | Muse | Terra・OpenAI API | Sol・OpenAI API |
+| 2 | ok 35%（原 43%） | Terra・OpenAI 訂閱 | — | — |
+| 3 | ok 24%（原 36%） | Terra・OpenAI API | Opus・Claude API | — |
+| 4 | ok 16%（原 29%） | DeepSeek | Sol・OpenAI 訂閱 | — |
+| 5 | ok 10%（原 22%） | Muse | Sol・OpenAI API | Opus・Claude API |
+| 6 | ok 6%（原 15%） | warn Terra・OpenAI 訂閱（原 Muse） | Terra・OpenAI 訂閱 | Sol・OpenAI 訂閱 |
+| 7 | ok 3%（原 8%） | Muse | Terra・OpenAI API | Sol・OpenAI API |
 | 8 | 1% | warn Terra・OpenAI 訂閱（原 Muse） | DeepSeek | Terra・OpenAI 訂閱 |
 
 - 目的：讓監督、執行主線與你自己把前段資源用得更久。
@@ -1487,19 +1350,15 @@ group 訂閱帳號: Terra 訂閱
 (背景程式判斷要換模型)
 [送切換通知]
 [切換生效]
-- 背景程式判斷要換模型 -&gt; 送切換通知
-- 送切換通知 -&gt; {15 分鐘內有成功回應?}
-- 15 分鐘內有成功回應? -&gt; 切換生效: 是
-- 15 分鐘內有成功回應? -&gt; [新站暫停 30 分鐘並往下換]: 否
-+ 背景程式判斷要換模型 -&gt; {對話閒置?}
-+ 對話閒置? -&gt; [下一輪再看]: 回合進行中
-+ 對話閒置? -&gt; [即時讀額度，依新讀值重判]: 閒置
-+ 即時讀額度，依新讀值重判 -&gt; {試打目標站通?}
-+ 試打目標站通? -&gt; [跳過這一站，下一輪取下一站]: 不通
-+ 試打目標站通? -&gt; 送切換通知: 通
-+ 送切換通知 -&gt; {新回合用哪個模型?}
-+ 新回合用哪個模型? -&gt; 切換生效: 新模型
-+ 新回合用哪個模型? -&gt; [閒置時重送，最多 3 次]: 舊模型
+背景程式判斷要換模型 -&gt; {對話閒置?}
+對話閒置? -&gt; [下一輪再看]: 回合進行中
+對話閒置? -&gt; [即時讀額度，依新讀值重判]: 閒置
+即時讀額度，依新讀值重判 -&gt; {試打目標站通?}
+試打目標站通? -&gt; [跳過這一站，下一輪取下一站]: 不通
+試打目標站通? -&gt; 送切換通知: 通
+送切換通知 -&gt; {新回合用哪個模型?}
+新回合用哪個模型? -&gt; 切換生效: 新模型
+新回合用哪個模型? -&gt; [閒置時重送，最多 3 次]: 舊模型
 ```
 - 切換通知只在對話閒置時送。進行中的回合沿用開始時選定的模型。被拒時回合已經結束，所以立刻送。
 - 要送之前，距上次讀額度超過 1 分鐘就即時再讀一次。重置優惠或原廠提前重置會馬上算進去。例行掃描維持每 30 分鐘。
@@ -1518,13 +1377,10 @@ group 訂閱帳號: Terra 訂閱
 ## E 這一版改了哪裡 {span=2}
 | 改動 | 位置 | 狀態 |
 |---|---|---|
-| 換模型前先試打目標站，通了才切 | route-probe.cjs（新增）、native-watch.cjs | ok 已實作 |
-| 要換之前即時讀額度，依新讀值重判 | claude-quota.cjs、native-watch.cjs | ok 已實作 |
-| 只在對話閒置時送切換通知 | native-watch.cjs | ok 已實作 |
-| 依新回合實際用的模型判斷切換是否生效 | native-watch.cjs、model-fallback.cjs | ok 已實作 |
-| 換回一律回角色順位第一站，工區 D 主線回 Opus | model-fallback.cjs、native-watch.cjs | ok 已實作 |
-| 刪除「15 分鐘沒成功回應就暫停」與「依失敗請求重送」 | model-fallback.cjs、native-watch.cjs | ok 已刪除 |
-| 例行掃描間隔 | claude-quota.cjs | 維持 30 分鐘 |
+| 降級門檻改成 50、35、24、16、10、6、3、1 | claude-quota.cjs | ok 已實作 |
+| 第 1 階門檻 50%、第 8 階 1% | claude-quota.cjs | 維持不變 |
+| 各階的站、讓位順序（監督晚 2 階、主線晚 4 階） | claude-quota.cjs | 維持不變 |
+| 5 小時額度用到 80% 時多降 1 階 | claude-quota.cjs | 維持不變 |
 </textarea>
 <script>
 (() => {
@@ -3623,36 +3479,6 @@ if (panels.length > 1) {
     else run(save, text.saved);
   });
 })();
-})();
-
-// ── Change markers: the Before / Changes / After switch ─────────────
-// The switch starts hidden because it needs this script. It swaps the am-view-* class of its diagram; the delta styles show the colors and badges only in
-// the Changes view and hide the items that do not exist in the view.
-(() => {
-  const VIEWS = ['before', 'changes', 'after'];
-  const setView = (el, view) => {
-    el.classList.remove(...VIEWS.map((v) => `am-view-${v}`));
-    el.classList.add(`am-view-${view}`);
-  };
-  for (const bar of document.querySelectorAll('.am-delta-bar')) {
-    const view = bar.parentElement;
-    const group = bar.querySelector('.am-delta-switch');
-    if (!group) continue;
-    group.hidden = false;
-    group.addEventListener('click', (e) => {
-      const btn = e.target.closest('button[data-view]');
-      if (!btn) return;
-      setView(view, btn.dataset.view);
-      for (const b of group.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === btn));
-    });
-  }
-  // The expand button copies only the drawing into the viewer; the viewer shows the view the diagram is in.
-  document.addEventListener('click', (e) => {
-    const host = e.target.closest?.('.am-diagram-expand')?.parentElement;
-    const canvas = document.querySelector('.am-lightbox-canvas');
-    const view = host && VIEWS.find((v) => host.classList.contains(`am-view-${v}`));
-    if (view && canvas) setView(canvas, view);
-  });
 })();
 </script>
 </body>

@@ -33,9 +33,9 @@ function withEnv(values,fn){
   const restore=()=>{for(const [key,value] of Object.entries(old))if(value===undefined)delete process.env[key];else process.env[key]=value;};
   try{const result=fn();if(result?.then)return result.finally(restore);restore();return result;}catch(error){restore();throw error;}
 }
-// The 2026-11-21 12:48 reading: jay@xplorx.co (Max 20x) used up until 11/23, jjdigi (Max 5x) at 1%, two Max 20x paused.
-// That is 19.8% available, ladder step 5; big:61 gives 51%, step 0.
-function reading(now,{big=100,small=1,bigFive=0,smallFive=24,bigFiveReset=now+3*HOUR,smallFiveReset=now+2*HOUR}={}){
+// Shaped on the 2026-11-21 12:48 reading: jay@xplorx.co (Max 20x) used up until 11/23, jjdigi (Max 5x) at 55%, two Max 20x
+// paused. That is 9% available, ladder step 5 of 50/35/24/16/10/6/3/1 (Jay 2026-11-27); big:40 gives 57%, step 0.
+function reading(now,{big=100,small=55,bigFive=0,smallFive=24,bigFiveReset=now+3*HOUR,smallFiveReset=now+2*HOUR}={}){
   return {accounts:[
     {provider:'anthropic',label:'jay@xplorx.co',plan:'max_20x',paused:false,quota:{weeklyPercent:big,weeklyResetAt:now+2*DAY,fiveHourPercent:bigFive,fiveHourResetAt:bigFiveReset}},
     {provider:'anthropic',label:'jay@jjdigi.com.tw',plan:'max_5x',paused:false,quota:{weeklyPercent:small,weeklyResetAt:now+5*DAY,fiveHourPercent:smallFive,fiveHourResetAt:smallFiveReset}},
@@ -45,24 +45,24 @@ function reading(now,{big=100,small=1,bigFive=0,smallFive=24,bigFiveReset=now+3*
     {provider:'openai',label:'not-claude',plan:'pro',paused:false,quota:{weeklyPercent:10,weeklyResetAt:now+DAY}}]};
 }
 
-test('the available share weighs Max 20x four times Max 5x, keeps what lies above a stop line for Jay and sets one step per 7 points under 50%',()=>{
+test('the available share weighs Max 20x four times Max 5x, keeps what lies above a stop line for Jay and steps down faster nearer empty',()=>{
   const now=Date.now();
   const today=quota.evaluate(reading(now),now);
-  assert.deepEqual([today.available,today.step,today.excludedPaused],[19.8,5,2],'(0×4 + 99×1) ÷ 5 is below 50, 43, 36, 29 and 22');
-  assert.equal(quota.evaluate(reading(now,{big:99}),now).available,20.6,'no jump when the account reaches 100%');
+  assert.deepEqual([today.available,today.step,today.excludedPaused],[9,5,2],'(0×4 + 45×1) ÷ 5 is below 50, 35, 24, 16 and 10');
+  assert.equal(quota.evaluate(reading(now,{big:99}),now).available,9.8,'no jump when the account reaches 100%');
   // A stop line of 60 on the Max 20x: only the 60 below it is the Agent's, so 30 used leaves half of its share.
   const lined=reading(now,{big:30});lined.accounts[0].autoSwitchThresholdOverride=60;
-  assert.equal(quota.evaluate(lined,now).available,64.4,'(4×30 + 1×99) ÷ (4×60 + 1×100)');
-  assert.deepEqual([50,49.9,43,42.9,1,0.9,null].map(quota.stepOf),[0,1,1,2,7,8,8],'thresholds 50 43 36 29 22 15 8 1; nothing readable is the bottom step');
+  assert.equal(quota.evaluate(lined,now).available,48.5,'(4×30 + 1×45) ÷ (4×60 + 1×100)');
+  assert.deepEqual([50,49.9,35,34.9,10,9.9,3,2.9,1,0.9,null].map(quota.stepOf),[0,1,1,2,4,5,6,7,7,8,8],'thresholds 50 35 24 16 10 6 3 1, closer together nearer empty; nothing readable is the bottom step');
   const unreadable=reading(now,{big:0});delete unreadable.accounts[0].quota.weeklyPercent;
-  assert.equal(quota.evaluate(unreadable,now).available,19.8,'an unreadable account is never taken to have quota left');
+  assert.equal(quota.evaluate(unreadable,now).available,9,'an unreadable account is never taken to have quota left');
   const stale=reading(now,{big:0});stale.accounts[0].quota.weeklyResetAt=now-MINUTE;
-  assert.equal(quota.evaluate(stale,now).available,19.8,'a reading whose week already ended is not current');
+  assert.equal(quota.evaluate(stale,now).available,9,'a reading whose week already ended is not current');
   assert.equal(quota.evaluate({error:'ocx failed'},now).available,null);
   // Each role keeps away from as many stops as its step: the subagents k, the supervisor k−2, the executor k−4.
   assert.deepEqual(['subagent','supervisor','executor'].map(role=>quota.floorOf(today,role)),[5,3,1]);
   assert.deepEqual(['subagent','supervisor','executor'].map(role=>quota.floorOf({step:3},role)),[3,1,0]);
-  assert.match(quota.describe(today),/19\.8%.*降級第 5 階.*子代理退 5 站、監督退 3 站、執行主線退 1 站/);
+  assert.match(quota.describe(today),/可用量 9%.*降級第 5 階.*子代理退 5 站、監督退 3 站、執行主線退 1 站/);
 });
 
 test('the five-hour step lowers the ladder one step when every account that can serve is at 80%, except within 30 minutes of a reset',()=>{
@@ -89,7 +89,7 @@ test('quota is read every 30 minutes and once just after an account reset; a tes
     const state={};
     await withEnv({LONG_TASK_CLAUDE_QUOTA_FILE:file},async()=>{
       assert.equal(await quota.refresh(state,now),true);
-      assert.deepEqual([state.claudeQuota.available,state.claudeQuota.step],[19.8,5]);
+      assert.deepEqual([state.claudeQuota.available,state.claudeQuota.step],[9,5]);
       save(file,reading(now,{big:0}));
       assert.equal(await quota.refresh(state,now+MINUTE),false,'no second read before it is due');
       assert.equal(await quota.refresh(state,state.claudeQuota.nextReadAt),true);
@@ -224,21 +224,21 @@ function fixture({executorModel=opus,supervisorModel=opus,quotaData=null,env:ext
     async stop(){if(child?.exitCode===null){child.kill('SIGTERM');await new Promise(resolve=>child.once('exit',resolve));}fs.rmSync(root,{recursive:true,force:true});}};
 }
 
-test('at ladder step 5 the supervisor moves three stops down to Terra and the executor one stop to the Opus API; at 51% nothing moves',async()=>{
-  const low=fixture({quotaData:reading(Date.now())}),kept=fixture({quotaData:reading(Date.now(),{big:61})});
+test('at ladder step 5 the supervisor moves three stops down to Terra and the executor one stop to the Opus API; at 57% nothing moves',async()=>{
+  const low=fixture({quotaData:reading(Date.now())}),kept=fixture({quotaData:reading(Date.now(),{big:40})});
   try{
     low.start();kept.start();
     await until(()=>['executor-qa','supervisor-qa'].every(id=>low.calls().some(c=>c.threadId===id&&c.model)));
     const executor=low.calls().find(c=>c.threadId==='executor-qa'&&c.model),supervisor=low.calls().find(c=>c.threadId==='supervisor-qa'&&c.model);
     assert.equal(executor.model,paid,'the executor gives way last: only its first stop is off');
     assert.equal(supervisor.model,terra,'two steps ahead of the executor: Opus, the Opus API and Sol are off');
-    for(const call of [executor,supervisor])assert.match(call.prompt,/降級階梯（Agent 可用量 19\.8%/);
+    for(const call of [executor,supervisor])assert.match(call.prompt,/降級階梯（Agent 可用量 9%/);
     assert.equal(read(low.statePath).modelSwitch['executor-qa'].original,opus,'kept as a move away from Opus, so it returns when the share rises');
     const published=peek(path.join(low.run,'model-fallback.json'));
-    assert.deepEqual([published.ladder.step,published.ladder.available],[5,19.8]);
-    await until(()=>{try{return /訂閱額度降級階梯：Agent 可用量 19\.8%/.test(fs.readFileSync(path.join(low.run,'監督儀表板.md'),'utf8'));}catch{return false;}});
+    assert.deepEqual([published.ladder.step,published.ladder.available],[5,9]);
+    await until(()=>{try{return /訂閱額度降級階梯：Agent 可用量 9%/.test(fs.readFileSync(path.join(low.run,'監督儀表板.md'),'utf8'));}catch{return false;}});
     await until(()=>read(kept.statePath).reads>=4);
-    assert.ok(!kept.calls().some(c=>c.model),'51% left: no switch');
+    assert.ok(!kept.calls().some(c=>c.model),'57% left: no switch');
     assert.equal(read(path.join(kept.run,'model-fallback.json')).ladder.step,0);
   }finally{await low.stop();await kept.stop();}
 });
@@ -283,7 +283,7 @@ test('an acceptance from an interim open-source supervisor is kept and sent agai
 test('a mainline a model left on an open-source route climbs back by the order: the executor to the Opus API at step 5 or Opus at step 0, the supervisor to Opus',async()=>{
   const muse='openrouter/meta-muse-ember';
   const low=fixture({executorModel:muse,quotaData:reading(Date.now())});
-  const kept=fixture({executorModel:muse,supervisorModel:muse,quotaData:reading(Date.now(),{big:61})});
+  const kept=fixture({executorModel:muse,supervisorModel:muse,quotaData:reading(Date.now(),{big:40})});
   try{
     low.start();kept.start();
     await until(()=>low.calls().some(c=>c.threadId==='executor-qa'&&c.model));
@@ -306,7 +306,7 @@ test('a mainline a model left on an open-source route climbs back by the order: 
 // times in 19 minutes until that turn ended. Jay: 「印出來的訊息要讓我知道重送原因，不然我會以為是死迴圈不斷傳訊息」.
 test('a supervisor on an open-source route is told to move only when idle and once per turn, never when it is already set to move; a notice sent again says why',async()=>{
   const deepseek='openrouter/deepseek-deepseek-v4.1-flash-1017';
-  const f=fixture({executorModel:sol,supervisorModel:deepseek,quotaData:reading(Date.now(),{big:61})});
+  const f=fixture({executorModel:sol,supervisorModel:deepseek,quotaData:reading(Date.now(),{big:40})});
   const turnEnded=path.join(f.root,'supervisor-turn-ended');
   save(f.mockFile,{...read(f.mockFile),supervisorCompletedGate:turnEnded});
   const notices=()=>f.calls().filter(c=>c.threadId==='supervisor-qa'&&c.model);
@@ -344,7 +344,7 @@ test('a supervisor on an open-source route is told to move only when idle and on
 });
 
 test('the watcher puts a supervisor moved for consecutive failures back on Opus once the connection answers again, without waiting out the 30 minutes',async()=>{
-  const f=fixture({executorModel:sol,quotaData:reading(Date.now(),{big:61})});
+  const f=fixture({executorModel:sol,quotaData:reading(Date.now(),{big:40})});
   const usage=f.env.OPENCODEX_USAGE_FILE,own=fallback.hashId('supervisor-qa'),t0=Date.now()-14*MINUTE;
   const row=(at,status,conversationId=own)=>line(usage,{conversationId,timestamp:at,requestedModel:opus,status,...(status===200?{usage:{outputTokens:5}}:{})});
   const moves=()=>f.calls().filter(c=>c.threadId==='supervisor-qa'&&c.model);

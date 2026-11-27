@@ -43,7 +43,7 @@ function catalogFile(dir){
 function reading(now,{prolite=99,free=3,freePaused=true}={}){
   const week=Math.floor((now+2*DAY)/1000);
   return {accounts:[
-    {provider:'anthropic',label:'jay@xplorx.co',plan:'max_20x',paused:false,quota:{weeklyPercent:90,weeklyResetAt:now+4*DAY}},
+    {provider:'anthropic',label:'jay@xplorx.co',plan:'max_20x',paused:false,quota:{weeklyPercent:95,weeklyResetAt:now+4*DAY}},
     {provider:'openai',id:'__main__',label:'prolite',plan:'prolite',upstreamAccountKey:'uai1_pro',paused:false,quota:{weeklyPercent:prolite,weeklyResetAt:week}},
     {provider:'openai',id:'chatgpt-pool',label:'prolite',plan:'prolite',upstreamAccountKey:'uai1_pro',paused:false,quota:{weeklyPercent:prolite,weeklyResetAt:week}},
     {provider:'openai',id:'chatgpt-free',label:'free',plan:'free',upstreamAccountKey:'uai1_free',paused:freePaused,quota:{monthlyPercent:free,monthlyResetAt:Math.floor((now+20*DAY)/1000)}}]};
