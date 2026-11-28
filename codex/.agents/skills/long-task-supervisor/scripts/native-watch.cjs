@@ -487,15 +487,19 @@ function waitingHasBlocker(text) {
   return /(?:權限.{0,16}(?:審查|拒絕|阻擋)|(?:審查|核准).{0,16}(?:拒絕|阻擋)|(?:merge|push|release|deploy|合併|發版|發布).{0,40}(?:被擋|遭擋|阻塞|拒絕|blocked|denied|approval)|(?:需要|等待|等).{0,20}(?:Jay|使用者).{0,20}(?:決定|核准|授權)|(?:requires?|needs?|waiting for).{0,20}(?:user|Jay).{0,20}(?:approval|authorization|decision)|(?:待決|需要授權|授權或處置))/i.test(body);
 }
 async function exactFinal(turnId) {
+  let turn=null;
   for (let attempt=0;attempt<3;attempt++) {
     const detail=unpack(await rpc('read_thread',{
       threadId:binding.executorId,turnLimit:8,includeOutputs:false,maxOutputCharsPerItem:20000
     }));
-    const turn=detail.turns?.find(item=>item.id===turnId && item.status==='completed');
+    turn=detail.turns?.find(item=>item.id===turnId && item.status==='completed');
     const final=turn?.items?.filter(item=>item.type==='agentMessage' && item.phase==='final_answer').at(-1);
     if (final && typeof final.text==='string') return final;
     await sleep(1000);
   }
+  // A completed turn can end with no final message at all (工區 E 11/28 10:09, last_agent_message null). It is a turn
+  // that ended without an event and takes that path; throwing here stopped the watcher at every start.
+  if (turn) return {text:''};
   throw Error('Completed executor turn has no exact readable final message: '+turnId);
 }
 // wait_threads reports only the latest turn, so a turn that completed while another event was pending, or between two

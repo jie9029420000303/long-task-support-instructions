@@ -90,6 +90,21 @@ test('a turn that ends with no event resumes the executor on its own last next s
   assert.doesNotMatch(f.stderr(),/Error:|Delivery uncertain|protocol_error/);
 });
 
+test('a turn that ends with no final message at all resumes the executor instead of stopping the watcher',async()=>{
+  // 工區 E 11/28 10:09: the executor's turn completed with last_agent_message null. The watcher threw on it at every
+  // start, so nobody watched workspace E from 10:09 until it was fixed.
+  const f=setup([null]);
+  try{
+    await until(()=>calls(f).length===1&&log(f).length===1);
+    await delay(200);
+    const sent=calls(f);
+    assert.equal(sent[0].threadId,'executor-qa');
+    assert.match(sent[0].prompt,/回合結束沒有送事件/);
+    assert.deepEqual(log(f).map(item=>item.kind),['unmarked_final']);
+  }finally{await stop(f);}
+  assert.doesNotMatch(f.stderr(),/Error:|Delivery uncertain|protocol_error/);
+});
+
 test('the same stop twice in a row reaches the supervisor marked as a repeat',async()=>{
   const f=setup(['Next I will run the tests.','Next I will run the tests.']);
   try{
