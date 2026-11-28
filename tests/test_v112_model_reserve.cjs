@@ -105,6 +105,17 @@ test('quota is read every 30 minutes and once just after an account reset; a tes
       assert.equal(quota.unreadableAlert(state.claudeQuota,failedAt+29*MINUTE),null,'the supervisor hears only after 30 minutes');
       assert.ok(quota.unreadableAlert(state.claudeQuota,failedAt+30*MINUTE));
       assert.match(quota.describe(state.claudeQuota),/沿用 .* 讀到的數字，各角色不換/);
+      // v1.21.x stored a failed read as the bottom step with no share; 11/28 10:02 it moved 清票's executor to Terra.
+      // That state is no last good reading: it is read again two minutes after it was taken, and a failure on top of it
+      // moves nobody.
+      const legacy={claudeQuota:{at:now,available:null,step:8,error:'Command failed: ocx',nextReadAt:now+30*MINUTE,
+        settings:state.claudeQuota.settings}};
+      assert.equal(await quota.refresh(legacy,now+MINUTE),false,'not before two minutes');
+      assert.equal(await quota.refresh(legacy,now+2*MINUTE),true,'two minutes on it is read again');
+      assert.deepEqual([legacy.claudeQuota.step,legacy.claudeQuota.readError.noBaseline],[0,true],'a failed read on top of it moves nobody');
+      save(file,reading(now));
+      assert.equal(await quota.refresh(legacy,legacy.claudeQuota.nextReadAt),true);
+      assert.deepEqual([legacy.claudeQuota.available,legacy.claudeQuota.step],[9,5],'the next good read is used');
     });
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

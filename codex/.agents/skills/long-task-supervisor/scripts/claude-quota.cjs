@@ -259,7 +259,12 @@ function settingsFingerprint(){
 // in that switch (Jay 2026-11-27 decision 45). Returns true when the decision changed.
 async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   const known=state.claudeQuota, settings=settingsFingerprint();
-  if(!force&&known&&now<known.nextReadAt&&known.settings===settings)return false;
+  // Only a reading with a share is a last good reading. One without (a failed read, including the bottom step v1.21.x
+  // stored for it: workspace 清票's executor went to Terra at 10:02 on 11/28 and that state waited 30 minutes) is read
+  // again two minutes after it was taken.
+  const usable=Number.isFinite(known?.available)||known?.unconfigured;
+  const due=usable?known?.nextReadAt:Math.min(known?.nextReadAt,(known?.at||0)+RETRY_MS);
+  if(!force&&known&&now<due&&known.settings===settings)return false;
   if(!process.env.LONG_TASK_CLAUDE_QUOTA_FILE&&run&&temporary(run)){
     state.claudeQuota={at:now,step:0,available:null,unconfigured:true,ladder:LADDER,accounts:[],
       openai:evaluateOpenAI(null,now),plaintext:{enabled:null},nextReadAt:now+READ_EVERY_MS,settings};
@@ -277,7 +282,7 @@ async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   const failure=data?.error||reading.openai?.error;
   if(failure){
     const readError={since:known?.readError?.since||now,at:now,message:String(failure)};
-    if(known&&!known.unconfigured&&!known.readError?.noBaseline){
+    if(Number.isFinite(known?.available)){
       state.claudeQuota={...known,plaintext:plain,settings,nextReadAt:now+RETRY_MS,readError};
       return known.plaintext?.enabled!==plain.enabled;
     }
