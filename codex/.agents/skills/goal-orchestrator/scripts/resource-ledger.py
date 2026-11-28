@@ -119,7 +119,7 @@ BROWSER_NAMES = {"Google Chrome for Testing", "Chromium", "Google Chrome", "Goog
 PROFILE = re.compile(r"--user-data-dir=(\S+)")
 # 以資料夾存在與否判斷還在不在的資源：git 工作樹、非 git 的工作包資料夾、工作包自己的暫存資料夾。
 FOLDER_KINDS = ("worktree", "workdir", "tmp")
-# 不是 PASS 的容器停止後留給診斷的時數；之後先存 logs 與 inspect 再移除（Jay 2026-11-28 2A）。
+# 不是 PASS 的容器停止後留給診斷的時數；之後先存不含環境變數的容器資訊、日誌留在主機上再移除（Jay 2026-11-28 2A）。
 FAILED_KEEP_HOURS = 24
 # 每個環境保留的映像：最新的兩個（部署中與上一版，退回用），另加容器在用與登記時指定保留的版本（Jay 2026-11-28 2A）。
 IMAGE_KEEP_NEWEST = 2
@@ -832,7 +832,7 @@ def audit(state, claimed=False, snapshot=None):
             problems.append(f"{describe(res)}：工作包已 PASS、容器已停止還沒移除；stop --id {res['id']} --remove")
         elif passed is False and stopped_hours(res) >= FAILED_KEEP_HOURS:
             problems.append(f"{describe(res)}：工作包不是 PASS，已停止 {FAILED_KEEP_HOURS} 小時以上；stop --id {res['id']} "
-                            "--remove（先存 logs 與 inspect 再移除）")
+                            "--remove（先存容器資訊與日誌位置再移除）")
     keys = registered(state, worktrees)
     loose, scanned_containers = unregistered(roots, since, until, task, snap, keys)
     problems += [f"未登記 {item}" for item in loose]
@@ -1022,7 +1022,9 @@ def cmd_register(args):
         record.update(kind="container", container=args.container, host=args.host, managed=True,
                       container_identities=[container_identity(c) for c in found])
         if all(c.get("state") != "running" for c in found):
-            record["stopped_at"] = now().isoformat()
+            # 24 小時從容器實際停止時算起，讀不到才用登記當下（工區 E 監督 2026-11-28）。
+            stopped = finished_at(inspect_containers(args.host, [c["id"] for c in found]))
+            record["stopped_at"] = (stopped or now()).isoformat()
     else:
         containers = docker_containers()
         if containers is None:
@@ -1126,6 +1128,14 @@ def label_new_volumes(command, labels):
 def identity_problem(res, path, everything):
     """到期代關與移除只認四項身分（任務、工作包、關閉時點、帳本位置）都和帳本一致的容器；相符回 None。"""
     recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
+    if res.get("host"):
+        # 遠端主機上事後登記的容器沒有 lt.* 標籤（工區 E 的 C105 在 Staging 登記 22 筆，全是 v1.22.2 以前建的，一筆都
+        # 刪不掉）。它們的身分是登記時記下的容器 ID、名稱與建立時間，三項都要和現在一致。
+        known = {item["id"]: item for item in res.get("container_identities", []) if item.get("id")}
+        for c in everything:
+            if c["id"] in known and container_identity(c) != known[c["id"]]:
+                return f"容器 {c['name']} 的名稱或建立時間與登記時不同，未動"
+        return None
     expected = {"task": Path(path).parent.name, "wp": res.get("wp"), "close": res.get("close"),
                 "ledger": os.path.realpath(path)}
     for c in everything:
@@ -1243,6 +1253,72 @@ def deletion_row(state_dir, item, producer, why, search):
     return readback
 
 
+# 移除前留給診斷的資料不能帶憑證或讀值（工區 E 監督 2026-11-28：讀單容器可能帶 Claude 授權碼、app 容器帶測試庫連線
+# 字串，Mac 上 28 個測試庫容器的 inspect 都有 POSTGRES_PASSWORD，日誌可能有原件讀值，狀態目錄又在雲端同步範圍內）。
+# inspect 只取下面這些欄位，Config.Env 與 HostConfig 不取；日誌留在容器所在主機、不同步雲端的受限資料夾，狀態目錄只記
+# 位置、行數與雜湊。
+REMOTE_LOG_DIR = "/var/tmp/long-task-container-logs"
+STATE_FIELDS = ("Status", "ExitCode", "OOMKilled", "Error", "StartedAt", "FinishedAt")
+MOUNT_FIELDS = ("Type", "Name", "Source", "Destination", "RW")
+
+
+def inspect_containers(host, ids):
+    """docker inspect 的原始結果；讀不到時回 None。只在記憶體裡用，不寫進任何檔案。"""
+    try:
+        result = subprocess.run(docker_argv(host, "inspect", *ids), capture_output=True, text=True, timeout=120)
+        return json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def safe_inspect(item):
+    config, state = item.get("Config") or {}, item.get("State") or {}
+    return {"Id": item.get("Id"), "Name": item.get("Name"), "Created": item.get("Created"), "Image": item.get("Image"),
+            "ConfigImage": config.get("Image"), "Labels": config.get("Labels"), "RestartCount": item.get("RestartCount"),
+            "State": {key: state.get(key) for key in STATE_FIELDS},
+            "Mounts": [{key: mount.get(key) for key in MOUNT_FIELDS} for mount in item.get("Mounts") or []]}
+
+
+def finished_at(items):
+    """容器實際停止的時間（本機時間，取最晚的一個）；沒停過或讀不到時回 None。"""
+    times = []
+    for item in items or []:
+        text = ((item.get("State") or {}).get("FinishedAt") or "")[:19]
+        with contextlib.suppress(ValueError):
+            when = dt.datetime.fromisoformat(text).replace(tzinfo=dt.timezone.utc).astimezone().replace(tzinfo=None)
+            if when.year > 1:
+                times.append(when)
+    return max(times) if times else None
+
+
+def keep_logs(host, container_id, name):
+    """把最後 500 行日誌存在容器所在主機的受限資料夾（遠端 root 700、本機 LONG_TASK_HOME 下 700），回傳位置、行數與雜湊。"""
+    file = f"{name.strip('/') or 'container'}-{container_id[:12]}-{now().strftime('%Y%m%dT%H%M%S')}.log"
+    if host:
+        target = f"{REMOTE_LOG_DIR}/{file}"
+        script = (f"set -e; umask 077; mkdir -p {REMOTE_LOG_DIR}; docker logs --tail 500 {shlex.quote(container_id)} > "
+                  f"{shlex.quote(target)} 2>&1; wc -l < {shlex.quote(target)}; sha256sum {shlex.quote(target)}")
+        try:
+            result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
+                                     "sudo -n sh -c " + shlex.quote(script)], capture_output=True, text=True, timeout=180)
+            lines, digest = result.stdout.split()[:2]
+            return {"host": host, "path": target, "lines": int(lines), "sha256": digest}
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return {"host": host, "path": target, "error": "存不了日誌"}
+    folder = local_home() / "removed-container-logs"
+    folder.mkdir(parents=True, exist_ok=True)
+    folder.chmod(0o700)
+    target = folder / file
+    try:
+        data = subprocess.run(docker_argv(None, "logs", "--tail", "500", container_id), stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {"host": "本機", "path": str(target), "error": "存不了日誌"}
+    with open(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as handle:
+        handle.write(data)
+    return {"host": "本機", "path": str(target), "lines": data.count(b"\n"), "sha256": hashlib.sha256(data).hexdigest()}
+
+
 def stopped_hours(res):
     try:
         return (now() - dt.datetime.fromisoformat(res["stopped_at"]).replace(tzinfo=None)).total_seconds() / 3600
@@ -1294,7 +1370,13 @@ def remove(res, path, args):
     """移除已停止的容器或工作樹；回傳 ("removed"｜"kept"｜"failed", 說明)。條件不符就保留，不算失敗。"""
     state_dir = Path(path).parent
     passed = package_passed(state_dir, res.get("wp"))
-    # 不是 PASS 的容器留給診斷 24 小時，之後先存 logs 與 inspect 再移除（Jay 2026-11-28 2A：工區 E 登記的 40 個容器
+    if res["kind"] == "container" and res.get("host") and passed is False:
+        # 24 小時從容器實際停止時算起。v1.22.2 登記時記的是登記當下，這裡改讀 State.FinishedAt 並寫回帳本。
+        stopped = finished_at(inspect_containers(res["host"], [item["id"] for item in res.get("container_identities", [])]))
+        if stopped:
+            res["stopped_at"] = stopped.isoformat()
+            note_resource(path, res["id"], stopped_at=res["stopped_at"])
+    # 不是 PASS 的容器留給診斷 24 小時，之後先存容器資訊與日誌位置再移除（Jay 2026-11-28 2A：工區 E 登記的 40 個容器
     # 沒有一個移除過，FAIL 的留作診斷之後就沒人收）。
     expired = res["kind"] == "container" and passed is False and stopped_hours(res) >= FAILED_KEEP_HOURS
     if not passed and not expired:
@@ -1330,14 +1412,16 @@ def remove(res, path, args):
             return "kept", f"工作樹的 HEAD 不在 {args.integrated_into} 裡，尚未整合"
         needles, label = [tree], f"工作樹 {tree}（分支 {res.get('branch')} 保留）"
     if expired:
-        evidence = state_dir / "evidence" / f"container-{res['id']}-移除前.log"
+        items = inspect_containers(host, sorted(recorded)) or []
+        logs = [keep_logs(host, item.get("Id") or "", item.get("Name") or "") for item in items]
+        if not items or any("error" in item for item in logs):
+            return "kept", "存不了移除前的容器資訊或日誌，未移除"
+        evidence = state_dir / "evidence" / f"container-{res['id']}-移除前.json"
         evidence.parent.mkdir(parents=True, exist_ok=True)
-        with open(evidence, "w", encoding="utf-8") as handle:
-            for item in sorted(recorded):
-                for argv in (docker_argv(host, "inspect", item), docker_argv(host, "logs", "--tail", "500", item)):
-                    with contextlib.suppress(OSError, subprocess.SubprocessError):
-                        handle.write(subprocess.run(argv, capture_output=True, text=True, timeout=120).stdout + "\n")
-        used, search = False, f"logs 與 inspect 已存 {evidence.name}"
+        evidence.write_text(json.dumps({"inspect": [safe_inspect(item) for item in items], "logs": logs},
+                                       ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        used, search = False, (f"容器資訊（不含環境變數）已存 {evidence.name}，日誌留在"
+                               f"{host or '本機'} {Path(logs[0]['path']).parent}")
     else:
         used, search = referenced(state_dir, needles, args.search or ())
     if used is not False:
