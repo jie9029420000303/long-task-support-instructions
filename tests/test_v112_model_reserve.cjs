@@ -96,8 +96,15 @@ test('quota is read every 30 minutes and once just after an account reset; a tes
       assert.equal(state.claudeQuota.step,0);
       fs.unlinkSync(file);
       await quota.refresh(state,state.claudeQuota.nextReadAt);
-      assert.deepEqual([state.claudeQuota.available,state.claudeQuota.step],[null,8],'a failed read does not keep the last good answer');
-      assert.ok(state.claudeQuota.error);
+      // Jay 2026-11-28 1A: one failed ocx read at 09:28 put workspace E's supervisor on DeepSeek. A failed read keeps the
+      // last good answer, so nobody moves, and reads again in two minutes.
+      const failedAt=state.claudeQuota.readError.since;
+      assert.deepEqual([state.claudeQuota.available,state.claudeQuota.step],[89,0],'a failed read keeps the last good answer');
+      assert.equal(state.claudeQuota.nextReadAt,failedAt+quota.RETRY_MS);
+      assert.ok(state.claudeQuota.readError.message);
+      assert.equal(quota.unreadableAlert(state.claudeQuota,failedAt+29*MINUTE),null,'the supervisor hears only after 30 minutes');
+      assert.ok(quota.unreadableAlert(state.claudeQuota,failedAt+30*MINUTE));
+      assert.match(quota.describe(state.claudeQuota),/沿用 .* 讀到的數字，各角色不換/);
     });
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

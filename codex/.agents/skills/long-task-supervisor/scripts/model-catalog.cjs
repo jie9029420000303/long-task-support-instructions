@@ -40,4 +40,13 @@ function enabled(items){
     return !off.has(id)&&!(provider&&config.providers?.[provider]?.disabled===true);
   });
 }
-module.exports={tiers,efforts,identity,available,latest,installed};
+// A subagent's starting effort: the role's baseline, one step higher on Sol and Terra (Jay 2026-11-28「SOL Terra起步都升一檔」:
+// from Nov 14 to 28, 16% of Terra medium subagents came back unfinished from their first turn against Sonnet medium's 1%,
+// and 41% of Sol medium subagents needed another instruction against Sol high's 10%).
+const WORKER_BASELINE={general:'medium',ui:'low'};
+function workerBaseline(role,model){
+  const base=WORKER_BASELINE[role];
+  if(!base)return null;
+  return ['sol','terra'].includes(identity(model)?.tier)?efforts[efforts.indexOf(base)+1]:base;
+}
+module.exports={tiers,efforts,identity,available,latest,installed,workerBaseline};

@@ -437,6 +437,25 @@ async function sendAndRead(target, prompt, key, options = {}) {
   checkpoint();
   await reconcile(state.inflight);
 }
+// Each segment submission's time, so the dashboard can count the image builds that went into it (Jay 2026-11-28 3A).
+function noteSubmission(event){
+  if(event.kind!=='submission'||!event.segment)return;
+  const list=state.segmentSubmissions||=[];
+  if(!list.some(item=>item.id===event.id))list.push({id:event.id,segment:event.segment,at:event.at});
+  if(list.length>200)list.splice(0,list.length-200);
+}
+// Every image build of this run, the mainline's and its subagents', each counted toward the next segment submission
+// after it: the rule is one build per segment candidate, so a segment's count above one shows the extra builds. Counting
+// starts when this watcher first looked, like the notes (subagentBuildsSince).
+function imageBuildCount(){
+  const since=state.subagentBuildsSince??=Date.now();
+  const builds=[...(state.imageBuilds||[]).map(item=>item.at),...pace.agentRuns(binding).flatMap(agent=>(agent.builds||[]).map(item=>item.at))]
+    .map(at=>Date.parse(at)).filter(at=>Number.isFinite(at)&&at>=since).sort((a,b)=>a-b);
+  const submissions=(state.segmentSubmissions||[]).map(item=>({segment:item.segment,at:Date.parse(item.at)})).sort((a,b)=>a.at-b.at);
+  const bySegment={};let pending=0;
+  for(const at of builds){const next=submissions.find(item=>item.at>=at);if(next)bySegment[next.segment]=(bySegment[next.segment]||0)+1;else pending++;}
+  return {bySegment,pending,total:builds.length};
+}
 function extractEvent(turn, message) {
   const text = message.text || '';
   const marker = 'LONG_TASK_EVENT ';
@@ -494,7 +513,7 @@ async function queueSkipped(latestId){
   for(const turn of older){
     const final=(turn.items||[]).filter(item=>item.type==='agentMessage'&&item.phase==='final_answer').at(-1);
     if(!(typeof final?.text==='string'&&final.text.trim())){state.seen.push(turn.id);continue;}
-    const event=extractEvent(turn,final);
+    const event=extractEvent(turn,final);noteSubmission(event);
     if(['waiting','progress'].includes(event.kind)&&asksSupervisor(event.text))event.kind='question';
     if(event.kind==='waiting'&&waitingHasBlocker(event.text))event.kind='blocked';
     if(['waiting','progress'].includes(event.kind))state.seen.push(turn.id);else queue.push(event);
@@ -671,6 +690,7 @@ async function pendingDecision() {
     if(!preflight.current){releaseAnnounced(state,event);(state.resolved||={})[event.id]={event,obsolete:true,decisionSha256:submitted.decisionSha256};state.seen.push(event.id);state.pending=null;state.phase='watching';checkpoint();return;}
     // A ruled review of the mainline's own work ends it; another one needs another note and another repeat.
     if(state.selfWorkEscalated&&event.dispatchIssueKeys?.includes(state.selfWorkEscalated.key))delete state.selfWorkEscalated;
+    if(state.subagentBuildEscalated&&event.dispatchIssueKeys?.includes(state.subagentBuildEscalated.key))delete state.subagentBuildEscalated;
   }
   if(event.kind==='progress_review'){
     const fresh=await waitExecutor();
@@ -793,7 +813,7 @@ function writeDashboard() {
     // A paused run skips the clock, so the permission mode is read here too.
     if (!state.executorSettings) { const found = fallback.settingsOf(binding.executorId); if (found) state.executorSettings = found; }
     const snapshot = clock.snapshotOf(run,binding);
-    dashboard.write(run,{binding,state,snapshot,paced:clock.paceNow(run,binding,state,snapshot),alive:true,paused:isPaused()});
+    dashboard.write(run,{binding,state,snapshot,paced:clock.paceNow(run,binding,state,snapshot),alive:true,paused:isPaused(),imageBuilds:imageBuildCount()});
   } catch (error) { state.dashboardError = {message:error.message,at:now()}; }
 }
 // Jay's questions reach his phone once the supervisor has finished the event that raised them (Jay 2026-11-09: on
@@ -841,6 +861,32 @@ async function selfWorkNotice(){
   if(!again.length)return;
   work.escalated=true;
   state.selfWorkEscalated={key:'self-work-'+fallback.hashId(binding.executorId+'/'+work.turnId),turnId:work.turnId,hits:again.slice(0,10),at:now()};checkpoint();
+}
+// A subagent built, pushed or moved an image (pace imageCommand; Jay 2026-11-28 3A): deploying is the mainline's, and
+// the experiments that must run on Staging use the test containers already there. The first build in a subagent turn
+// gets a note to the mainline; another one in that same turn after the note wakes the supervisor through a dispatch
+// review. Builds made before this watcher first looked are not reported.
+async function subagentBuildNotice(){
+  if(isPaused()||state.inflight)return;
+  const since=state.subagentBuildsSince??=Date.now(),seen=state.subagentBuilds||={};
+  for(const agent of require('./pace.cjs').agentRuns(binding)){
+    const builds=(agent.builds||[]).filter(item=>Date.parse(item.at)>=since);
+    if(!builds.length)continue;
+    const last=builds.at(-1),record=seen[agent.id],name=agent.path||agent.id;
+    if(!record||record.turnId!==last.turnId){
+      seen[agent.id]={turnId:last.turnId,noticeAt:Date.now()};checkpoint();
+      await sendAndRead(binding.executorId,'LONG_TASK_SUBAGENT_IMAGE：背景程式看到子代理 '+name+' 建映像或搬映像：'+last.command+'\n'+
+        '建映像、部署只由主線做，一個區段整合完才建一次。要在 Staging 跑的實驗，請子代理用 Staging 上既有的測試容器跑指定 commit 的程式，不另建映像。'+
+        '請通知這個子代理停止建映像。這一則不叫醒監督；同一回合它再建一次，背景程式會請監督處理。','subagent-image-'+fallback.hashId(agent.id+'/'+last.turnId).slice(0,16));
+      return;
+    }
+    const again=builds.filter(item=>item.turnId===record.turnId&&Date.parse(item.at)>record.noticeAt);
+    if(again.length&&!record.escalated){
+      record.escalated=true;
+      state.subagentBuildEscalated={key:'subagent-image-'+fallback.hashId(agent.id+'/'+record.turnId),agent:name,turnId:record.turnId,builds:again.slice(0,5),at:now()};
+      checkpoint();return;
+    }
+  }
 }
 // supervise.cjs amend, run while this watcher is alive, leaves Jay's authorization in amend-request.json. The watcher records
 // it at a safe point (no event waiting for a ruling, no unconfirmed delivery) under its own lock and keeps watching. The
@@ -1206,12 +1252,23 @@ async function watch() {
     await pushQuestions();
     await reworkDecisions();
     await selfWorkNotice();
+    await subagentBuildNotice();
     // The supervisor saw an outage warning: one short note once reads work again, so it does not act on a stale alarm.
     if (state.appHealth?.recoveryNotice && !state.inflight && !state.pending) {
       const since = state.appHealth.recoveryNotice;
       await sendAndRead(binding.supervisorId,'LONG_TASK_WATCH_RECOVERED：背景監看已恢復讀取執行對話（'+clockText(Date.parse(since))+' 起中斷）。不用處理，用一句話結束回合即可。',
         'watch-recovered-'+require('node:crypto').createHash('sha256').update(since).digest('hex').slice(0,12));
       delete state.appHealth.recoveryNotice; checkpoint();
+      continue;
+    }
+    // The quota reading has failed for 30 minutes (claude-quota unreadableAlert): the last good reading is still in use.
+    const unreadable = quota.unreadableAlert(state.claudeQuota);
+    if (unreadable && state.quotaUnreadableNoticed !== unreadable.since && !state.inflight && !state.pending) {
+      state.quotaUnreadableNoticed = unreadable.since; checkpoint();
+      if (fallback.supervisorOwner(run,binding.supervisorId))
+        await sendAndRead(binding.supervisorId,'LONG_TASK_QUOTA_UNREADABLE：背景程式從 '+clockText(unreadable.since)+' 起讀不到 OpenCodex 的額度（'+unreadable.message.slice(0,120)+
+          '）。各角色的模型沿用最後一次讀到的數字，沒有換站，背景程式每 2 分鐘重讀。請把這件事登記到待決帳讓 Jay 知道，其他工作照常。',
+          'quota-unreadable-'+require('node:crypto').createHash('sha256').update(String(unreadable.since)).digest('hex').slice(0,12));
       continue;
     }
     if (state.plaintextNotice && !state.inflight && !state.pending) {
@@ -1311,7 +1368,7 @@ async function watch() {
       await queueSkipped(turn.id);
       state.lastRealEventAt=Date.now();
       if(state.progressWait)state.progressWait=null;
-      const event = extractEvent(turn,await exactFinal(turn.id));
+      const event = extractEvent(turn,await exactFinal(turn.id));noteSubmission(event);
       if(['waiting','progress'].includes(event.kind)&&asksSupervisor(event.text))event.kind='question';
       if(event.kind==='waiting'){
         if(waitingHasBlocker(event.text))event.kind='blocked';

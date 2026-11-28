@@ -6,6 +6,8 @@
 
 `loginSites` 必填：SKILL 啟動第 1 步在準備目錄預檢過的同一份清單（格式見下方 `login_expired`），init 檢查格式後寫成 `RUN/login-sites.json`，格式不對就一次列出問題、不建 run 目錄；本任務不用任何登入時填 `[]`。續接舊 run 也要重新預檢並填這一欄，登入清單不隨 `inheritFrom` 帶過來。
 
+`priorArt` 新開的 run 必填（使用者 2026-11-28，開案研究見 SKILL「開案五項與環境」；續接舊 run 沿用第一個 run 的開案研究，可省略）：`{"documented":true|false,"researchAgent":"監督派出的研究子代理代號","environment":"環境評估結論：每條驗收條文在哪一層環境驗、需要的服務、硬體、資料與套件版本","references":[{"url":"…","license":"…","maintenance":"…","fit":"…"}]}`。`documented` 寫需求文件原本有沒有這些內容（true＝這次驗證，false＝這次補做）；真的沒有可沿用的參考時 `references` 留空並寫 `notFound`。init 讀研究子代理的紀錄，沒有網路搜尋或參考網址沒出現在搜尋之後就拒絕，通過後寫成 `RUN/prior-art.json`（含搜尋紀錄與每項參考的查閱時間）。
+
 ```text
 node <installed-skill>/scripts/login-check.cjs PREP_DIR_OR_RUN
 node <installed-skill>/scripts/supervise.cjs init RUN INPUT.json

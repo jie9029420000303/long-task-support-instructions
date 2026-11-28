@@ -60,10 +60,19 @@ function firstLine(file){
 // A Codex subagent rollout starts with session_meta naming its agent path and the root thread it serves; a
 // subagent turn runs from task_started to task_complete, and token_count carries the running output total.
 // Turns are summed because a subagent waits between messages, and that wait is not output time.
+// Building, pushing or moving an image is deployment work, which stays with the mainline (Jay 2026-11-28 3A: workspace E
+// built images 42 times since 11/14, 20 of them in subagents, one in research c69).
+const IMAGE_BUILD=/\bdocker\s+(?:buildx\s+)?build\b|\bdocker\s+compose\b[^\n;&|]*\sbuild\b|\bdocker\s+(?:image\s+)?(?:push|save|load)\b/;
+function imageCommand(payload){
+  if(!['custom_tool_call','function_call'].includes(payload?.type))return null;
+  const body=String(payload.input||payload.arguments||'');
+  const found=IMAGE_BUILD.exec(body);
+  return found?body.slice(Math.max(0,found.index-40),found.index+120).replace(/\s+/g,' ').trim():null;
+}
 const parsed=new Map();
 function agentRun(file,meta){
   let item=parsed.get(file);
-  if(!item)parsed.set(file,item={offset:0,model:null,effort:null,startedAt:null,lastAt:null,turnAt:null,activeMs:0,outputTokens:0,done:false});
+  if(!item)parsed.set(file,item={offset:0,model:null,effort:null,startedAt:null,lastAt:null,turnAt:null,activeMs:0,outputTokens:0,done:false,builds:[]});
   const size=fs.statSync(file).size;
   if(size>item.offset){
     const fd=fs.openSync(file,'r'),buffer=Buffer.alloc(size-item.offset);
@@ -75,6 +84,8 @@ function agentRun(file,meta){
         let row;try{row=JSON.parse(line);}catch{continue;}
         const at=Date.parse(row.timestamp),payload=row.payload||{};
         if(Number.isFinite(at)){item.startedAt??=at;item.lastAt=at;}
+        const image=Number.isFinite(at)&&imageCommand(payload);
+        if(image&&item.builds.length<50)item.builds.push({at:new Date(at).toISOString(),turnId:item.turnId||null,command:image});
         if(row.type==='turn_context'){item.model=payload.model||item.model;item.effort=payload.effort||item.effort;}
         else if(payload.type==='task_started'){item.turnAt=at;item.turnStartedAt=at;item.turnId=payload.turn_id||null;item.done=false;item.completedAt=null;item.completedTurnId=null;}
         else if(payload.type==='task_complete'||payload.type==='turn_aborted'){if(item.turnAt)item.activeMs+=at-item.turnAt;item.turnAt=null;item.done=payload.type==='task_complete'&&!payload.error;item.completedAt=at;item.completedTurnId=payload.turn_id||item.turnId||null;}
@@ -84,7 +95,7 @@ function agentRun(file,meta){
   }
   const activeMs=item.activeMs+(item.turnAt&&item.lastAt?item.lastAt-item.turnAt:0);
   return {id:meta.id,path:meta.agent_path||null,model:item.model,effort:item.effort,startedAt:item.startedAt,lastAt:item.lastAt,active:Boolean(item.turnAt),turnStartedAt:item.turnStartedAt,turnId:item.turnId,sourceFile:file,outputTokens:item.outputTokens,done:item.done,
-    completedAt:item.completedAt||null,completedTurnId:item.completedTurnId||null,finished:Boolean(item.completedAt),seconds:activeMs/1000};
+    completedAt:item.completedAt||null,completedTurnId:item.completedTurnId||null,finished:Boolean(item.completedAt),seconds:activeMs/1000,builds:item.builds.slice()};
 }
 // Rollouts live in sessions/YYYY/MM/DD by local start date; subagents of this executor start after binding.
 const metas=new Map();
@@ -232,7 +243,7 @@ function resourceUse(snapshot){
   const candidates=[...(packages.ready||[]).filter(item=>item.independent&&item.safe),...(packages.blocked||[]).filter(item=>item.kind==='resource_conflict')].filter(startable);
   return resources.map(item=>({...item,waiting:candidates.filter(candidate=>uses(candidate,item.key).length).map(candidate=>candidate.id)}));
 }
-module.exports={DEFAULTS,sessionsRoot,sessionFile,sessionFiles,markerIn,agentRuns,workerPaths,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
+module.exports={IMAGE_BUILD,imageCommand,DEFAULTS,sessionsRoot,sessionFile,sessionFiles,markerIn,agentRuns,workerPaths,speed,rate,baseline,inFlight,sleptWithin,resourceUse};
 if(require.main===module){
   const [command,runArg,...rest]=process.argv.slice(2);
   try{

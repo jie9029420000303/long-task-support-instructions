@@ -31,6 +31,8 @@
 
 `loginSites` 必填：SKILL 啟動第 1 步在準備目錄預檢過的同一份清單（格式見下方 `login_expired`），init 檢查格式後寫成 `RUN/login-sites.json`；本任務不用任何登入時填 `[]`。續接舊 run 也要重新預檢並填這一欄，登入清單不隨 `inheritFrom` 帶過來。
 
+`priorArt` 新開的 run 必填（使用者 2026-11-28，開案研究見 SKILL「開案五項與環境」；續接舊 run 沿用第一個 run 的開案研究，可省略）：`{"documented":true|false,"researchAgent":"監督派出的研究子代理代號","environment":"環境評估結論：每條驗收條文在哪一層環境驗、需要的服務、硬體、資料與套件版本","references":[{"url":"…","license":"…","maintenance":"…","fit":"…"}]}`。`documented` 寫需求文件原本有沒有這些內容（true＝這次驗證，false＝這次補做）；真的沒有可沿用的參考時 `references` 留空並寫 `notFound`。init 讀研究子代理的紀錄，沒有網路搜尋或參考網址沒出現在搜尋之後就拒絕，通過後寫成 `RUN/prior-art.json`（含搜尋紀錄與每項參考的查閱時間）。
+
 建立或綁定前先依[模型路由](model-routing.md)選定並傳入執行模型；Claude 監督不依賴 App 全域預設。模型路線另記在啟動 prompt 與 sidecar，不將執行設定改寫進已鎖定的驗收條文。
 
 先保存來源快照，再實際計算 SHA-256。來源是已定案文件與對話摘錄，不能用會持續變動的進度 log 充當鎖定條文。允許根目錄只列本次已授權的專案／工作區。Run 目錄建議 `<projectRoot>/.codex/long-task-supervisor/<executorId>`，不要在真實專案寫合成測試資料。

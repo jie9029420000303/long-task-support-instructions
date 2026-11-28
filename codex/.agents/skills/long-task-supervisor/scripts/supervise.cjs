@@ -58,6 +58,9 @@ function init() {
   // run here, so the hourly check never starts empty (the 2026-10-13 v117 run had no login list at all).
   need(Array.isArray(input.loginSites), 'loginSites is required: the login list checked at start step 1 with login-check.cjs, or [] when the task uses no login');
   login.validate(input.loginSites);
+  // The supervisor's opening research of outside references and the environment (Jay 2026-11-28), from its own subagent.
+  const priorArt = require('./rework.cjs').openingResearch(run, { executorId: input.supervisorId, platform: 'codex',
+    createdAt: new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString() }, input.priorArt, { inherited: Boolean(inherited) });
   const fourth=input.fourthExecutorModel && require('./model-fallback.cjs').availableFourth(input.fourthExecutorModel);
   if(input.fourthExecutorModel)need(fourth,'The fourth executor model and effort must be in the current Codex catalog');
   const modelPolicy=require('./model-fallback.cjs').modelPolicy(input.modelPolicy!==undefined || input.modelFallback!==undefined ? input : inherited?.binding||{});
@@ -66,6 +69,7 @@ function init() {
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
   else write(path.join(run, 'contract.json'), input.contract);
   login.write(run, input.loginSites);
+  if (priorArt) write(path.join(run, 'prior-art.json'), priorArt);
   if (input.segments !== undefined) segments.write(run, input.segments, criterionIds);
   if (input.efficiency !== undefined) efficiency.write(run, {allowedRoots:input.allowedRoots}, input.efficiency, new Set(criterionIds));
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).

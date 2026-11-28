@@ -18,7 +18,7 @@ const path=require('node:path');
 const os=require('node:os');
 const crypto=require('node:crypto');
 const {execFile}=require('node:child_process');
-const LADDER=[50,35,24,16,10,6,3,1], FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000, OPENAI_FLOOR=2;
+const LADDER=[50,35,24,16,10,6,3,1], FIVE_HOUR_HIGH=80, FIVE_HOUR_NEAR_MS=30*60000, READ_EVERY_MS=30*60000, RESET_GRACE_MS=60000, OPENAI_FLOOR=2, RETRY_MS=2*60000, UNREADABLE_ALERT_MS=30*60000;
 // How many steps later than the subagents each role starts stepping down (decision 24).
 const LADDER_DELAY={subagent:0,supervisor:2,executor:4};
 // Max 20x counts four shares, Max 5x and OpenAI prolite one (Q48 A, decision 17); another plan (OpenAI free cannot run
@@ -271,8 +271,21 @@ async function refresh(state,now=Date.now(),run=null,{force=false}={}){
   const actions=[];
   for(const provider of [data,reading.openai])if(provider&&!provider.error)actions.push(...await applyStops(provider,ledger,now));
   if(actions.some(action=>!action.error))saveStops(file,ledger);
-  // Without the Claude reading there is no share to judge: nothing is assumed left (the bottom step).
-  const result=data?.error?{...evaluate(null,now,known),available:null,step:LADDER.length,error:data.error}:evaluate(data,now,known,stoppedIds(ledger),reading.openai?.error?null:reading.openai);
+  // A failed read says nothing about quota (Jay 2026-11-28 1A: at 09:28 one failed ocx call put workspace E's supervisor
+  // on DeepSeek for five minutes). The last good reading stays, nobody is moved, and it reads again in two minutes; after
+  // 30 minutes of failures the supervisor hears once (native-watch). Without any good reading yet, nobody is moved either.
+  const failure=data?.error||reading.openai?.error;
+  if(failure){
+    const readError={since:known?.readError?.since||now,at:now,message:String(failure)};
+    if(known&&!known.unconfigured&&!known.readError?.noBaseline){
+      state.claudeQuota={...known,plaintext:plain,settings,nextReadAt:now+RETRY_MS,readError};
+      return known.plaintext?.enabled!==plain.enabled;
+    }
+    state.claudeQuota={...evaluate(null,now,known),available:null,step:0,stops:[],openai:evaluateOpenAI(null,now),
+      nextReadAt:now+RETRY_MS,settings,plaintext:plain,readError:{...readError,noBaseline:true}};
+    return !known||known.step!==0||known.plaintext?.enabled!==plain.enabled;
+  }
+  const result=evaluate(data,now,known,stoppedIds(ledger),reading.openai);
   result.stops=Object.values(ledger.accounts).filter(entry=>entry.state==='paused').map(({label,line,resetAt})=>({label,line,resetAt}));
   if(actions.length)result.stopActions=actions;
   result.openai=evaluateOpenAI(reading.openai,now);
@@ -291,15 +304,22 @@ function openaiHeld(state){return state.claudeQuota?.openai?.held===true;}
 function describe(quota){
   if(!quota)return '尚未讀取';
   if(quota.unconfigured)return '測試環境沒有額度來源，不套用降級階梯';
-  const share=quota.available===null?'讀不到':quota.available+'%';
-  const next=LADDER[quota.step];
-  const why=quota.step===0?'各角色用順位第一站':'降級第 '+quota.step+' 階（'+(quota.available===null?'讀不到用量，不假定還有額度':'低於 '+LADDER[Math.min(quota.step,LADDER.length)-1]+'%')+(quota.fiveHourStep?'，另因 5 小時額度都已用到 '+FIVE_HOUR_HIGH+'% 多降一階':'')+'）'+
-    '：子代理退 '+floorOf(quota,'subagent')+' 站、監督退 '+floorOf(quota,'supervisor')+' 站、執行主線退 '+floorOf(quota,'executor')+' 站';
   const when=at=>new Date(at).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false,month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  const share=quota.available===null?'讀不到':quota.available+'%';
+  const unread=quota.readError?'；'+when(quota.readError.since)+' 起讀不到額度（'+quota.readError.message.slice(0,80)+'），'+
+    (quota.readError.noBaseline?'還沒有讀到過，各角色先不換':'沿用 '+when(quota.at)+' 讀到的數字，各角色不換')+'，每 2 分鐘重讀':'';
+  const next=LADDER[quota.step];
+  const why=quota.step===0?'各角色用順位第一站':'降級第 '+quota.step+' 階（'+(quota.available===null?'可用量算不出來':'低於 '+LADDER[Math.min(quota.step,LADDER.length)-1]+'%')+(quota.fiveHourStep?'，另因 5 小時額度都已用到 '+FIVE_HOUR_HIGH+'% 多降一階':'')+'）'+
+    '：子代理退 '+floorOf(quota,'subagent')+' 站、監督退 '+floorOf(quota,'supervisor')+' 站、執行主線退 '+floorOf(quota,'executor')+' 站';
   const stops=(quota.stops||[]).map(s=>s.label+' 是共用帳號，週用量到停用線 '+s.line+'%，已暫停到 '+when(s.resetAt)+' 重置');
   const failed=(quota.stopActions||[]).filter(a=>a.error).map(a=>a.label+(a.type==='pause'?' 暫停':' 恢復')+'失敗：'+a.error);
   return 'Agent 可用量 '+share+'（停用線以上留給你）：'+why+(next!==undefined&&quota.available!==null?'；低於 '+next+'% 再降一階':'')+
-    [...stops,...failed].map(s=>'；'+s).join('')+(quota.error?'；讀取錯誤：'+quota.error:'');
+    [...stops,...failed].map(s=>'；'+s).join('')+(quota.error?'；讀取錯誤：'+quota.error:'')+unread;
+}
+// The reading has failed for 30 minutes: the supervisor hears it once for each stretch of failures.
+function unreadableAlert(quota,now=Date.now()){
+  const error=quota?.readError;
+  return error&&now-error.since>=UNREADABLE_ALERT_MS?{since:error.since,message:error.message}:null;
 }
 function describePlaintext(quota){
   const plain=quota?.plaintext;
@@ -317,5 +337,5 @@ function describeOpenAI(quota){
   if(openai.held)return left+'：都已到停用線或只剩 '+openai.floor+'% 以下，留給你自己用，長任務改用下一順位到 '+when(openai.resetAt)+' 重置';
   return left+'：長任務照常可用'+(openai.error?'；讀取錯誤：'+openai.error:'');
 }
-module.exports={LADDER,LADDER_DELAY,FIVE_HOUR_HIGH,FIVE_HOUR_NEAR_MS,READ_EVERY_MS,OPENAI_FLOOR,weightOf,shared,evaluate,evaluateOpenAI,stepOf,floorOf,nextReadAt,read,temporary,refresh,
+module.exports={unreadableAlert,RETRY_MS,LADDER,LADDER_DELAY,FIVE_HOUR_HIGH,FIVE_HOUR_NEAR_MS,READ_EVERY_MS,OPENAI_FLOOR,weightOf,shared,evaluate,evaluateOpenAI,stepOf,floorOf,nextReadAt,read,temporary,refresh,
   step,openaiHeld,describe,describeOpenAI,describePlaintext,plaintext,crossFamily,planStops,applyStops,stopsFile};

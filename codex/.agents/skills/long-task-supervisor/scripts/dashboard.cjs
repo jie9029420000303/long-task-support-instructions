@@ -36,7 +36,7 @@ function modelLines(binding,state,now){
     '），等 Sol、Astra、Opus 或 Fable 回到監督後逐條複驗');
   return lines;
 }
-function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},pushProblem=null,segments=null,now=Date.now()}){
+function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},pushProblem=null,segments=null,imageBuilds=null,now=Date.now()}){
   const items=snapshot?.acceptance?.items||[],passed=items.filter(item=>item.status==='PASS').length;
   const open=items.filter(item=>OPEN.includes(item.status)),settings=state.executorSettings;
   const autoReview=settings?.approvalPolicy&&settings.approvalPolicy!=='never';
@@ -77,7 +77,9 @@ function render({binding,state,snapshot,paced,alive,paused,ledger={open:[]},push
   // Each segment with the criteria the supervisor has passed (Jay 2026-11-25): segments are ruled one at a time while
   // the mainline works on the next, so progress shows here during development instead of only at the end.
   if(segments?.length)lines.push('','## 區段進度（共 '+segments.length+' 段，已全部通過 '+segments.filter(item=>item.passed.length===item.criteria.length).length+' 段）','',
-    '| 區段 | 通過／條文 | 依賴 |','|---|---|---|',...segments.map(item=>'| '+item.id+(item.title?' '+cell(item.title):'')+' | '+item.passed.length+'／'+item.criteria.length+' | '+(item.dependsOn.join('、')||'—')+' |'));
+    '| 區段 | 通過／條文 | 依賴 | 封裝映像 |','|---|---|---|---|',...segments.map(item=>'| '+item.id+(item.title?' '+cell(item.title):'')+' | '+item.passed.length+'／'+item.criteria.length+' | '+(item.dependsOn.join('、')||'—')+' | '+(imageBuilds?.bySegment?.[item.id]||0)+' |'));
+  // One build per segment candidate is the rule (Jay 2026-11-28 3A); builds count toward the next submission after them.
+  if(imageBuilds?.total)lines.push('','封裝映像共 '+imageBuilds.total+' 次，算在之後第一次送驗的區段；還沒送驗的候選已封裝 '+imageBuilds.pending+' 次。一個區段整合完只封裝一次。');
   lines.push('','## 在途工作','');
   if(paced.packages.length)lines.push('| 工作包 | 已跑（分） | 預估（分） | 比值 |','|---|---|---|---|',
     ...paced.packages.map(item=>'| '+item.id+' | '+(item.elapsedMinutes??'—')+' | '+(item.baselineMinutes??'未填')+' | '+(item.ratio??'—')+' |'));

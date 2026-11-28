@@ -111,6 +111,9 @@ function init() {
   const visible = visibleSupervisor(input.supervisorId,input.projectRoot,input.executorId);
   const supervisorLog = visible.log;
   need(desktopLog(supervisorLog),'Supervisor is not a Claude Desktop conversation');
+  // The supervisor's opening research of outside references and the environment (Jay 2026-11-28), from its own subagent.
+  const priorArt = require('./rework.cjs').openingResearch(run, { executorId: path.basename(supervisorLog, '.jsonl'), executorLog: supervisorLog, platform: 'claude' },
+    input.priorArt, { inherited: Boolean(inherited) });
   const executorId = input.executorId;
   need(executorId !== visible.id && /^[a-f0-9-]{36}$/.test(executorId), 'Invalid executor session ID');
   const existingLog = transcript(executorId);
@@ -127,6 +130,7 @@ function init() {
   if (inherited) for (const name of inherited.files) fs.copyFileSync(path.join(inherited.run, name), path.join(run, name));
   else save(path.join(run, 'contract.json'), contract);
   login.write(run, input.loginSites);
+  if (priorArt) save(path.join(run, 'prior-art.json'), priorArt);
   if (input.segments !== undefined) segments.write(run, input.segments, criterionIds);
   if (input.efficiency !== undefined) efficiency.write(run, {allowedRoots:input.allowedRoots}, input.efficiency, new Set(criterionIds));
   // One page of formats and commands to reread after compaction instead of the whole skill (Jay 2026-10-29).
