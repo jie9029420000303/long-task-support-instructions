@@ -31,12 +31,12 @@ test('a worker reaches Terra on the subscription when the mainline tool list sto
   // The mainline's own list, cut off before Terra as spawn_agent showed it.
   const listed=[opus,sonnet,apiSonnet].map(id=>({id,efforts}));
   const general=route(t,{catalogs:{subagent:listed}},[opus,sonnet,apiSonnet,terra,apiTerra]);
-  assert.deepEqual([general.status,general.model,general.effort,general.basis],['ready',terra,'medium','quota-ladder']);
+  assert.deepEqual([general.status,general.model,general.effort,general.basis],['ready',terra,'high','quota-ladder']);
 });
 
 test('the mainline no longer has to copy a model list into the route input',t=>{
   const general=route(t,{},[opus,sonnet,apiSonnet,terra,apiTerra]);
-  assert.deepEqual([general.model,general.effort],[terra,'medium']);
+  assert.deepEqual([general.model,general.effort],[terra,'high']);
 });
 
 

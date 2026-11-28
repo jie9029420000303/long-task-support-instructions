@@ -56,7 +56,7 @@ test('a mainline on the ChatGPT subscription dispatches the subscription Terra w
     save(fallbackFile,{limits:{},ladder:{floors:{subagent:4,supervisor:2,executor:0}}});
     const ask=executorModel=>route.resolve({supervisorModel:opus,executorModel,roles:['general'],catalogs:{subagent:subagentCatalog},fallback:fallbackFile}).roles.general;
     for(const mainline of [sol,terra])
-      assert.deepEqual([ask(mainline).model,ask(mainline).effort,ask(mainline).basis],[terra,'medium','subscription-mainline'],mainline+' mainline');
+      assert.deepEqual([ask(mainline).model,ask(mainline).effort,ask(mainline).basis],[terra,'high','subscription-mainline'],mainline+' mainline');
     assert.notEqual(ask(opus).model,terra,'an Opus mainline keeps the subagent ladder');
     // Terra refused: no worker for this mainline, which the watcher moves on.
     save(fallbackFile,{limits:{[terra]:{until:iso(Date.now()+3600000)}},ladder:{floors:{subagent:0}}});

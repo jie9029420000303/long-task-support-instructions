@@ -47,7 +47,7 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 4. 先派能解鎖最多後續工作的包。
 5. 同一區段裡改同一個程式區塊或同一個 worktree 的後續包，用 `followup_task` 交給原本的子代理，不重讀整包背景。
 6. 換區段、換程式區塊、不合格後要開新子代理（見「不合格交付」）、需要獨立查核，或模型降級換站時，才開新的子代理。換站時在途的包照舊做完，舊站的子代理交件後封存。
-7. 主線只做 Git 合併與提交、建立 worktree、部署、派工與收件工具、狀態與送驗。
+7. 主線只做 Git 合併與提交、建立 worktree、部署、派工與收件工具、狀態與送驗。建映像與部署一個區段整合完做一次，子代理不建映像，背景程式看到子代理建映像會提醒主線（使用者 2026-11-28）。
 8. 改程式或設定檔（含解 Git 衝突）、跑任何測試、讀大量紀錄、查環境，一律派子代理；狀態檔、工作包檔、收件結果檔、證據與說明文件不算改程式。
 9. 用 `wait_agent` 這類任一包交回就返回的等待，交回一包就先收；受監督時用 `dispatch.cjs collect` 一步寫入狀態、證據與驗收表，同時交回多包就在同一個指令一次收完，解鎖的包當輪補派。主線不自己 sleep（部署腳本內部的等待不算）。
 10. 區段全部採用後整合成區段候選，派子代理跑一輪受影響範圍的測試，通過就送驗。
@@ -70,11 +70,11 @@ description: 使用者明確啟動、續接或正在執行 Codex Goal，或由 l
 
 ## 執行期資源收尾
 
-並行派工閘只管「誰在用」；本節管「誰開、誰關」。主線或子代理啟動、會活過當下回合的資源（dev server、預覽 server、容器／compose 專案、其他常駐程序）一律經 `scripts/resource-ledger.py` 登記在 sidecar 同目錄的 `resources.json`：常駐程序用 `start --state <sidecar 目錄>/state.md --wp <id> -- <指令>` 啟動（獨立 process group，日誌在 `resources/`）；單一容器一律用 `run-container --state … --wp <id> --name <名> --ttl <時限> [--memory 1g] -- <docker run 的其餘參數與映像>`，一步完成啟動、任務標籤、登記與到期時間，不直接 `docker run`；`docker compose up -d` 等自行脫離的資源，啟動後立即 `register --compose-project <名>`；工作包專用與整合候選版的 worktree 建好當下就 `register --worktree <路徑>`（任務期間建立、紀錄裡寫到卻沒登記的 worktree，守門算需處理）；`run-container` 參數裡還不存在的具名資料卷會先帶同一組任務標籤建立，已存在的不動。不以 `&`、`nohup`、`disown` 直接把程序丟到背景。
+並行派工閘只管「誰在用」；本節管「誰開、誰關」。主線或子代理啟動、會活過當下回合的資源（dev server、預覽 server、容器／compose 專案、其他常駐程序）一律經 `scripts/resource-ledger.py` 登記在 sidecar 同目錄的 `resources.json`：常駐程序用 `start --state <sidecar 目錄>/state.md --wp <id> -- <指令>` 啟動（獨立 process group，日誌在 `resources/`）；單一容器一律用 `run-container --state … --wp <id> --name <名> --ttl <時限> [--memory 1g] -- <docker run 的其餘參數與映像>`，一步完成啟動、任務標籤、登記與到期時間，不直接 `docker run`；`docker compose up -d` 等自行脫離的資源，啟動後立即 `register --compose-project <名>`；工作包專用與整合候選版的 worktree 建好當下就 `register --worktree <路徑>`（任務期間建立、紀錄裡寫到卻沒登記的 worktree，守門算需處理）；`run-container` 參數裡還不存在的具名資料卷會先帶同一組任務標籤建立，已存在的不動。不以 `&`、`nohup`、`disown` 直接把程序丟到背景。這個任務建的映像，第一次建就 `register --image-repo <映像庫> [--host <主機>] [--keep <基準版本>]`；在測試環境等遠端主機用 ssh 起的容器 `register --container <名> --host <主機>`，之後停止、移除與核對都經同一台主機。新候選部署並讀回後跑 `prune-images --id <r>`：保留最新兩版（部署中與上一版）、容器在用與指定保留的版本，其餘刪除並記進 `deletions.md`；還有可刪的舊映像時守門算需處理（使用者 2026-11-28；工區 E 在 Mac 留下 11 個、Staging 16 個舊映像，Staging 磁碟用到 79%）。
 
 `run-container` 的容器到期（從建立或最後一次續期起算）只停止這一個、不刪除；還要用就 `renew --id <r> --ttl <時限>`。記憶體資料庫與正式資料副本（參數含 tmpfs，或加 `--protect`）到期不自動停，只由主線 `stop`。到期計時不跨重開機：重開機後要續用的先 `renew`，否則只由守門提示已過期（使用者 2026-11-16 定案；2026-11-14 實測 316 個已停止容器與 4 個沒標籤的容器沒人收）。
 
-關閉時點預設 `--close wp`：所屬工作包判定（PASS／FAIL）後，主線 `stop --wp <id>` 關閉並核對已停止；判定 PASS 且不再需要的容器與 worktree 加 `--remove` 一併移除（worktree 另加 `--integrated-into <候選版 commit 或分支>`，分支不刪）。程式只移除所屬工作包 PASS、識別值沒被驗收結果帳、`evidence/` 與決策帳引用，且 worktree 已整合、沒有未提交變更的資源，每筆先記進 `deletions.md`、刪後讀回；不符的只停不刪並說明原因，FAIL 的留作診斷。主線自用服務用 `--wp 主線 --close final`，宣稱完成前關閉；只有要交使用者驗收的最終候選版預覽可用 `--close acceptance --reason <理由>`，未給 `--ttl` 時 72 小時到期自動關，驗收後由主線 `stop --id <r>`；確定不屬本任務者用 `--close external --reason <歸屬>` 只登記不關。子代理自行啟動的服務在交回前 `stop`，工作包明列保留者除外（回報附 resource id）。
+關閉時點預設 `--close wp`：所屬工作包判定（PASS／FAIL）後，主線 `stop --wp <id>` 關閉並核對已停止；判定 PASS 且不再需要的容器與 worktree 加 `--remove` 一併移除（worktree 另加 `--integrated-into <候選版 commit 或分支>`，分支不刪）。程式只移除所屬工作包 PASS、識別值沒被驗收結果帳、`evidence/` 與決策帳引用，且 worktree 已整合、沒有未提交變更的資源，每筆先記進 `deletions.md`、刪後讀回；不符的只停不刪並說明原因，不是 PASS 的停止滿 24 小時後，`stop --remove` 先把 logs 與 inspect 存進 `evidence/` 再移除；判定後還沒移除的容器守門算需處理。主線自用服務用 `--wp 主線 --close final`，宣稱完成前關閉；只有要交使用者驗收的最終候選版預覽可用 `--close acceptance --reason <理由>`，未給 `--ttl` 時 72 小時到期自動關，驗收後由主線 `stop --id <r>`；確定不屬本任務者用 `--close external --reason <歸屬>` 只登記不關。子代理自行啟動的服務在交回前 `stop`，工作包明列保留者除外（回報附 resource id）。
 
 **子代理用完即封存**（Codex App；使用者 2026-11-17 定案）：App 替每個子代理對話常駐兩個 node_repl（合計約 19MB），子代理結束後不會釋放，只有封存對話或重開 App 才收回（2026-11-17 實測：306 個合計約 2.9GB；封存後 20 秒內結束）。確定不再交辦某個子代理時（區段結束或換程式區塊後不再沿用、不合格後改開新子代理、模型換站後舊站子代理交件），派出它的一方（主線，或派出它的子代理）當下執行 `node <監督技能目錄>/scripts/subagent-archive.cjs plan --agent <子代理名稱>`，對回傳 `archive` 清單內每個 threadId 呼叫 App 工具 `set_thread_archived`（`archived:true`），再執行 `subagent-archive.cjs verify <threadId…> --log <sidecar 目錄>/archived-agents.jsonl` 讀回並留紀錄；`verify` 回 1 就重新封存未生效的那幾個。還要追問、等返工或仍在執行的子代理不封存；`plan` 只列已結束回合的子代理，連同它自己派出、也已結束的子代理，仍在執行或底下還有子代理在跑的會列在 `skip` 並寫明原因。原包需追問、補件或退回時，封存過的子代理仍可直接用 followup 處理原包，不必先解除（2026-11-17 實測照常回覆，且維持封存）；它的紀錄改寫在 `~/.codex/archived_sessions/`，監看與完成喚醒連同這裡一起讀，續派後的進度與完成照常追蹤；要讓它回到側邊欄，才用紀錄裡的 threadId 呼叫 `set_thread_archived`（`archived:false`）。宣稱完成前執行 `plan --all`，把剩下已結束的子代理一次封存並 `verify`。封存只收回 App 替子代理開的程序，不動工作區、資源帳本與證據。
 

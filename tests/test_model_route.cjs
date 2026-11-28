@@ -80,7 +80,7 @@ test('a refused stop moves the role down and says when the front stop returns',t
 test('the quota ladder skips the front stops of each role, never past its last serving stop',t=>{
  const catalogs={executor:[item(opus),item(apiOpus),item(sol),item(apiSol)],subagent:[item(sonnet),item(apiSonnet),item(terra),item(apiTerra)]};
  const r=resolve({supervisorModel:opus,roles:['executor','general'],catalogs,fallback:published(t,{limits:{},ladder:{floors:{executor:2,subagent:3}}})});
- assert.deepEqual(pick(r),{executor:[sol,'xhigh'],general:[apiTerra,'medium']});
+ assert.deepEqual(pick(r),{executor:[sol,'xhigh'],general:[apiTerra,'high']},'Terra workers start one step above Medium (Jay 2026-11-28)');
  assert.equal(r.roles.general.basis,'quota-ladder');
  const deep=resolve({supervisorModel:opus,roles:['general'],catalogs:{subagent:[item(sonnet)]},fallback:published(t,{limits:{},ladder:{floors:{subagent:9}}})});
  assert.equal(deep.roles.general.model,sonnet,'the bottom of the order stays usable');

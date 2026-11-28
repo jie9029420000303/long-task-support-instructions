@@ -3,13 +3,14 @@
 // determine the role, model and supported reasoning level.
 const fs=require('node:fs');
 const {keyOf,billingAccount,subscriptionOpenAI,stopIndex,MAINLINE_STOPS,SUBAGENT_STOPS}=require('./model-fallback.cjs');
-const {efforts,identity,available,latest,installed}=require('./model-catalog.cjs');
+const {efforts,identity,available,latest,installed,workerBaseline}=require('./model-catalog.cjs');
 const openrouter=()=>require('./openrouter-route.cjs');
 // The executor plans, dispatches and judges the work: it runs at xhigh (Jay 2026-11-26 decision 1). Workers start at
 // Medium on every closed model now that the mainline is stronger (decision 9, replacing 2026-11-23's Sonnet High);
-// interface work keeps Low. Open-source routes are pinned at max by OpenCodex.
+// interface work keeps Low, and Sol and Terra start one step higher (model-catalog workerBaseline). Open-source routes
+// are pinned at max by OpenCodex.
 const roles={executor:'xhigh',general:'medium',ui:'low'};
-const baseline=role=>roles[role];
+const baseline=(role,model)=>workerBaseline(role,model)||roles[role];
 // Unsuccessful deliveries of one criterion, counted without reset (Jay 2026-11-26 decision 33; rework.cjs keeps the
 // count): the 1st, 3rd and 5th go back to the subagent that delivered, at the same model and effort (followup_task keeps
 // its context and its trail of the error). The 2nd and 4th go to research first; then the 2nd opens a new subagent two
@@ -103,11 +104,11 @@ function resolve(input) {
     else if(open)effort='max';
     else if(worker&&(step===MAINLINE_AT||research))effort=input.executorEffort||roles.executor;
     else if(worker&&step===RAISE_AT){
-      const prior=input.previousEffort&&rank(input.previousEffort)>rank(baseline(role))?input.previousEffort:baseline(role);
+      const prior=input.previousEffort&&rank(input.previousEffort)>rank(baseline(role,selected.id))?input.previousEffort:baseline(role,selected.id);
       const want=Math.min(rank(prior)+2,rank(CEILING));
       effort=supported.filter(e=>rank(e)<=want).at(-1)||prior;
       if(rank(effort)<=rank(prior))extra.effortAtCeiling=true;
-    }else effort=baseline(role);
+    }else effort=baseline(role,selected.id);
     if(open&&step===RAISE_AT&&selected.id===input.previousModel)extra.effortAtCeiling=true;
     if(!supported.includes(effort)){unavailable('The selected model does not support '+effort);continue;}
     result.roles[role]={status:'ready',model:selected.id,effort,basis,...(worker?{newAgent:true}:{}),...extra,...(research?{research:true}:{}),...(restoreAfter?{restoreAfter}:{})};

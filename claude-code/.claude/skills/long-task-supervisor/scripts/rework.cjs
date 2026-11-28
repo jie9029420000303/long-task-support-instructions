@@ -183,7 +183,7 @@ function researchTrail(binding,handle,since){
   const pace=require('./pace.cjs'),key=String(handle).replace(/^agent:/,'');
   // An agent path can be reused after its subagent closes; the latest run under that path is the research.
   const agent=pace.agentRuns(binding).filter(item=>[item.path,item.id].includes(key)).sort((a,b)=>(b.lastAt||0)-(a.lastAt||0))[0];
-  need(agent,'researchAgent '+handle+' 不是這個執行主線派出的子代理：寫研究子代理的代號（Codex 的 /root/... 路徑或子代理對話 ID，Claude Code 的 agent ID）');
+  need(agent,'researchAgent '+handle+' 不是'+(binding.role==='supervisor'?'這個監督對話':'這個執行主線')+'派出的子代理：寫研究子代理的代號（Codex 的 /root/... 路徑或子代理對話 ID，Claude Code 的 agent ID）');
   const files=pace.sessionFiles?pace.sessionFiles(agent.id):[];
   const searches=[],after=[];
   for(const file of files.length?files:[agent.sourceFile])for(const line of fs.readFileSync(file,'utf8').split('\n')){
@@ -285,7 +285,35 @@ function raiseAlerts(run,binding,{title}={}){
     recommend:'依研究結論決定方向：改做法、調整條文或暫緩這條',why:'Jay 2026-11-26 定案：第 6 次不合格研究完成後由 Jay 裁決接下來怎麼做',options:['照研究結論再做一輪','我要調整方向（請寫明）']}))},{binding});
   return fresh.map(a=>a.key);
 }
-module.exports={LIMIT,STUDY_AT,JAY_AT,rows,tally,held,nextStep,status,caller,mainlineOnly,verdictRows,formalFailure,scope,rulingRows,recordRuling,dispatchCheck,reset,resume,alerts,describe,raiseAlerts,keyOf};
+module.exports={openingResearch,LIMIT,STUDY_AT,JAY_AT,rows,tally,held,nextStep,status,caller,mainlineOnly,verdictRows,formalFailure,scope,rulingRows,recordRuling,dispatchCheck,reset,resume,alerts,describe,raiseAlerts,keyOf};
+// Opening research (Jay 2026-11-28「監督任務今天如果被觸發了時候，他第一件事情應該是要先去看給他的這個計畫內容，有沒有先做外部
+// 開源 GitHub 或是一些技術文件 ... 的引用」, then「大部分的狀況我應該在事前就會先做完 ... 如果有疏漏的話，就是進到監督任務後他
+// 再做一次 ... 如果裡面已經有做過的話，那他就是再做一次驗證」). Before a new run exists the supervisor's own research subagent
+// checks the requirement documents' outside references and the environment they need, or finds them when the documents
+// have none. Its transcript is read the same way as a rework study: it searched, and every reference appears after the
+// search. A continued run keeps its first run's opening research; a run under the system temp directory is a test, and
+// there the record is checked only when it is given.
+function openingResearch(run,conversation,input,{inherited=false}={}){
+  // The run folder does not exist yet: the nearest existing parent is resolved (macOS /var is /private/var).
+  const real=file=>{const full=path.resolve(file);try{return fs.realpathSync(full);}catch{const up=path.dirname(full);return up===full?full:path.join(real(up),path.basename(full));}};
+  const tmp=real(process.env.LONG_TASK_TEMP_ROOT||require('node:os').tmpdir()),at=real(path.dirname(run));
+  const test=at===tmp||at.startsWith(tmp+path.sep);
+  if(input===undefined&&(inherited||test))return null;
+  need(input&&typeof input==='object','priorArt is required: the opening research of outside references and the environment, done by a research subagent of this supervisor (see SKILL「開案五項與環境」)');
+  need(typeof input.documented==='boolean','priorArt.documented 寫需求文件原本有沒有外部參考與環境評估（true＝已有、這次驗證；false＝沒有或有缺、這次補做）');
+  need(text(input.researchAgent),'priorArt.researchAgent 寫監督派出的研究子代理代號');
+  need(text(input.environment),'priorArt.environment 寫環境評估的結論：每條驗收條文要在哪一層環境驗，需要的服務、硬體、資料與套件版本，寫進環境表（ENV- 條文）');
+  const references=Array.isArray(input.references)?input.references:[];
+  need(references.length||text(input.notFound),'priorArt.references 列可沿用的開源專案、套件或技術文件；真的沒有可沿用的，寫 notFound 說明查了哪些地方');
+  need(references.every(item=>/^https?:\/\//.test(item?.url)&&['license','maintenance','fit'].every(key=>text(item[key]))),
+    '每項參考要有 url、license（授權，商用產品要能用）、maintenance（維護狀況與評分）、fit（要改什麼才合用，或為什麼不合用）');
+  const trail=researchTrail({...conversation,role:'supervisor'},input.researchAgent.trim(),0);
+  need(trail.searches.length,'研究子代理 '+trail.agent+' 的執行紀錄沒有任何網路搜尋：開案研究要先上網搜尋 GitHub、技術論壇與所用語言或框架的外部文件，再回來對照需求文件');
+  const seen=references.map(item=>({...item,seenAt:trail.seen(item.url)})),unseen=seen.filter(item=>!item.seenAt).map(item=>item.url);
+  need(!unseen.length,'這些參考沒有出現在研究子代理 '+trail.agent+' 搜尋之後的執行紀錄裡：'+unseen.join('、'));
+  return {documented:input.documented,researchAgent:trail.agent,searches:trail.searches,references:seen,environment:input.environment.trim(),
+    ...(text(input.notFound)?{notFound:input.notFound.trim()}:{}),at:new Date().toISOString()};
+}
 if(require.main===module){
   const [command,run,inputFile]=process.argv.slice(2);
   try{

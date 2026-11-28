@@ -5,7 +5,7 @@ const crypto=require('node:crypto');
 const acceptance=require('./acceptance-audit.cjs');
 const machine=require('./machine.cjs');
 
-const kinds=['ready_capacity','returned_unintegrated','resource_conflict','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn','snapshot_mismatch','untracked_agent','self_work','unrecorded_activity_review','planning_review','dependency_ready_review'];
+const kinds=['ready_capacity','returned_unintegrated','resource_conflict','snapshot_missing','snapshot_invalid','acceptance_rework','acceptance_withdrawn','snapshot_mismatch','untracked_agent','self_work','subagent_build','unrecorded_activity_review','planning_review','dependency_ready_review'];
 // Document time budget (Jay 2026-10-15: document work takes at most 1.5x the development time).
 const DOC_BUDGET_RATIO=1.5;
 const nonEmpty=value=>typeof value==='string'&&value.trim();
@@ -191,6 +191,9 @@ function inspect(run,binding,state){
     // the supervisor asks it to hand the work to subagents. It stays until that review is ruled.
     const own=state.selfWorkEscalated;
     if(own){const value=issue('self_work',['executor'],{turnId:own.turnId,hits:own.hits,at:own.at});value.key=own.key;issues.push(value);}
+    // A subagent built an image again in the same turn after the watcher's note (native-watch subagentBuildNotice).
+    const built=state.subagentBuildEscalated;
+    if(built){const value=issue('subagent_build',[built.agent],{turnId:built.turnId,builds:built.builds,at:built.at});value.key=built.key;issues.push(value);}
     for(const item of acceptance.issues(run,snapshot.acceptance)){const value=issue(item.kind,item.affected,item.detail);value.key=digest({kind:item.kind,affected:item.affected,cases:item.cases,episode:item.episode});issues.push(value);}validSnapshot=true;}catch(error){
     const kind=error.code==='ENOENT'?'snapshot_missing':'snapshot_invalid';
     let sha256=null;try{sha256=crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');}catch{}

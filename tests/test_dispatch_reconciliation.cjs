@@ -145,3 +145,16 @@ test('both platforms keep invalid snapshot content out of review events',()=>{
  }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
 });
 
+
+// Jay 2026-11-28 3A: a subagent that builds an image again in the same turn after the watcher's note is one dispatch
+// review (native-watch subagentBuildNotice), until it is ruled.
+test('a subagent image build repeated after the note is one dispatch review until it is ruled',()=>{
+ const f=setup(),old=process.env.CODEX_HOME;process.env.CODEX_HOME=f.root;try{const s=snap();save(path.join(f.run,'dispatch.json'),s);
+ const state={subagentBuildEscalated:{key:'subagent-image-a1',agent:'/root/builder',turnId:'t1',builds:[{at:new Date().toISOString(),command:'docker buildx build -t bpm-app:1 .'}],at:new Date().toISOString()}};
+ let r=audit.inspect(f.run,f.binding,state);
+ const found=r.issues.find(x=>x.kind==='subagent_build');assert.deepEqual([found.affected,found.detail.turnId],[['/root/builder'],'t1']);
+ const event=audit.eventFor(r);assert.equal(event.kind,'dispatch_review');audit.markAnnounced(state,event);
+ assert.equal(audit.inspect(f.run,f.binding,state).newIssues.length,0,'announced once');
+ delete state.subagentBuildEscalated;r=audit.inspect(f.run,f.binding,state);assert.equal(r.resolved.length,1);
+ }finally{if(old===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=old;fs.rmSync(f.root,{recursive:true,force:true});}
+});

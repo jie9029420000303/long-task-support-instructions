@@ -124,7 +124,7 @@ test('model-route gives the executor the API Sol at the floor and workers the AP
     const executor=route.resolve({supervisorModel:opus,roles:['executor'],fallback:file,catalogs:{executor:inventory}});
     assert.equal(executor.roles.executor.model,apiSol);
     const workers=route.resolve({supervisorModel:opus,executorModel:apiSol,roles:['general'],fallback:file,catalogs:{subagent:inventory}});
-    assert.deepEqual([workers.roles.general.model,workers.roles.general.effort],[apiTerra,'medium'],'workers of '+apiSol);
+    assert.deepEqual([workers.roles.general.model,workers.roles.general.effort],[apiTerra,'high'],'workers of '+apiSol);
     // A mainline still on the subscription Sol can hand work only to the subscription Terra, which is out: it waits for
     // the watcher to move it (2026-11-27 decision 37).
     assert.equal(route.resolve({supervisorModel:opus,executorModel:sol,roles:['general'],fallback:file,catalogs:{subagent:inventory}}).roles.general.status,'unavailable');

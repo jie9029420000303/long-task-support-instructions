@@ -169,6 +169,8 @@ function trackTools(state,row,boundAt=0,sourceFile=null,sourceOffset=null){
   }
   if(row.type==='response_item'&&['custom_tool_call','function_call'].includes(payload.type)){
     if(state.selfWork&&Date.parse(at)>=boundAt)for(const hit of selfWorkOf(payload))if(state.selfWork.hits.length<20)state.selfWork.hits.push({...hit,at});
+    // The mainline's own image builds, counted per segment on the dashboard (Jay 2026-11-28 3A).
+    if(Date.parse(at)>=boundAt&&pace.imageCommand(payload)){const builds=state.imageBuilds||=[];builds.push({at,by:'executor'});if(builds.length>300)builds.splice(0,builds.length-300);}
     const items=state.callItems||={};items[payload.call_id]=workItem(payload);
     const keys=Object.keys(items);if(keys.length>50)for(const key of keys.slice(0,keys.length-50))delete items[key];
     const commands=commandsOf(payload).map(item=>item.replace(/\s+/g,' ').trim().slice(0,300)).filter(Boolean);

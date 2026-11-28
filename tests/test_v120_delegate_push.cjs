@@ -146,9 +146,9 @@ test('the subagent reminder names runs above the default once, on either route, 
   assert.match(found.text,/每次派工都明確寫出模型/);
   assert.equal(modelReminder([run('a',opus,'xhigh')],{mainModel:opus,reported:['a'],now}),null,'a subagent is named once');
   assert.equal(modelReminder([run('old',opus,'xhigh',4*3600000)],{mainModel:opus,now}),null,'runs from before a restart are not raised again');
-  // OpenAI route: Terra or Sol at Medium is the default, so a model choice there is not flagged; effort above Medium is.
-  assert.equal(modelReminder([run('t','gpt-5.6-terra','medium'),run('s','gpt-5.6-sol','medium')],{mainModel:'gpt-6.1-sol',now}),null);
-  assert.match(modelReminder([run('x','gpt-5.6-terra','high')],{mainModel:'gpt-6.1-sol',now}).text,/（Medium）/);
+  // OpenAI route: Sol and Terra start at High (Jay 2026-11-28), so High there is not flagged; effort above High is.
+  assert.equal(modelReminder([run('t','gpt-5.6-terra','high'),run('s','gpt-5.6-sol','medium')],{mainModel:'gpt-6.1-sol',now}),null);
+  assert.match(modelReminder([run('x','gpt-5.6-terra','xhigh')],{mainModel:'gpt-6.1-sol',now}).text,/（Medium，Sol 與 Terra 是 High）/);
   // Claude Code logs no effort, so an Opus subagent is named by its model alone.
   assert.deepEqual(modelReminder([run('o','claude-opus-5-5',undefined)],{mainModel:'claude',now}).ids,['o']);
   // Jay 2026-11-26: with the mainline on Opus xhigh, Sonnet general workers start at Medium again on both skills

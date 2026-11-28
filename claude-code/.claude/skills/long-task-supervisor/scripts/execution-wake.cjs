@@ -128,18 +128,19 @@ function taipei(ms=Date.now()){
 const sentLine=(ms=Date.now())=>'背景程式送出時間（台北）：'+taipei(ms);
 // Subagents above the skill default get one reminder on the next message to the executor (Jay 2026-11-09: since
 // 11/08 22:22 WEB ran 29 subagents on Opus xhigh, and 36 dispatches named no model, so they inherited the main line's).
-// Claude route: Sonnet／Medium (interface Low); OpenAI route: Medium (Jay 2026-11-26, both skills). A raised
+// Claude route: Sonnet／Medium (interface Low); OpenAI route: Medium, Sol and Terra High (Jay 2026-11-26 and 11-28). A raised
 // effort after a quality error is allowed, so this reminds and never blocks. Codex logs record the effort, Claude Code
 // logs only the model. Runs older than 3 hours are left alone, so a restarted watcher does not report old runs again.
-const EFFORTS=['none','minimal','low','medium','high','xhigh','max','ultra'],CLAUDE=/claude|opus|sonnet|haiku/i;
+const EFFORTS=['none','minimal','low','medium','high','xhigh','max','ultra'],CLAUDE=/claude|opus|sonnet|haiku/i,SOL_TERRA=/gpt-[\d.]+-(?:sol|terra)$/i;
+const defaultEffort=model=>SOL_TERRA.test(String(model||''))?'high':'medium';
 function modelReminder(runs,{mainModel=null,reported=[],now=Date.now(),windowMs=3*3600000}={}){
   const seen=new Set(reported),claude=CLAUDE.test(String(mainModel||''))||runs.some(item=>CLAUDE.test(String(item.model||'')));
   const above=runs.filter(item=>item.id&&!seen.has(item.id)&&(item.startedAt||0)>=now-windowMs&&
-    (claude&&/opus/i.test(String(item.model||''))||EFFORTS.indexOf(item.effort)>EFFORTS.indexOf('medium')));
+    (claude&&/opus/i.test(String(item.model||''))||EFFORTS.indexOf(item.effort)>EFFORTS.indexOf(defaultEffort(item.model))));
   if(!above.length)return null;
   const groups=new Map();
   for(const item of above){const label=(item.model||'未知模型')+(item.effort?'／'+item.effort:'');groups.set(label,(groups.get(label)||0)+1);}
-  return {ids:above.map(item=>item.id),text:'子代理模型提醒：最近 '+above.length+' 個子代理高於技能預設（'+(claude?'Sonnet／Medium，介面 Sonnet／Low':'Medium')+'）：'+
+  return {ids:above.map(item=>item.id),text:'子代理模型提醒：最近 '+above.length+' 個子代理高於技能預設（'+(claude?'Sonnet／Medium，介面 Sonnet／Low':'Medium，Sol 與 Terra 是 High')+'）：'+
     [...groups].map(([label,count])=>label+' ×'+count).join('、')+'。不是品質錯誤後升檔的，下次派工改回預設；每次派工都明確寫出模型（工具支援時連同推理強度），不要省略讓它沿用主線。'};
 }
 module.exports={allowed,inspect,waitChange,prompt,facts,modelReminder,taipei,sentLine,PROGRESS_WAIT_NOTE,EXECUTOR_PUSH};

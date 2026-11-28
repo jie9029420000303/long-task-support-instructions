@@ -26,6 +26,11 @@ swap 97%：已結束的長任務留下 50 個容器（佔 Docker 95% CPU），de
            到期（從建立或最後一次 renew 起算）由背景計時自動「停止」這一個容器，不刪除；記憶體資料庫與正式資料副本
            （參數含 tmpfs，或加 --protect）不自動停，只由主線 stop。
            參數裡還不存在的具名資料卷（-v 名:/路徑、--mount source=名）先帶同一組標籤建立；已存在的不動。
+  register --image-repo 映像庫 [--host 主機] [--keep 標籤或映像 ID]…：登記這個任務建的映像庫（本機或遠端）。
+  register --container 名 --host 主機：登記遠端主機上用 ssh 起的容器（已停止的也可），stop 與移除都經同一台主機。
+  prune-images --state S --id R [--keep 標籤或映像 ID]…
+           新候選部署並讀回後刪舊映像：保留最新兩版（部署中與上一版）、容器在用、登記或這次指定保留的版本，以及任務
+           開始前就有的；其餘每筆先記進 deletions.md、刪後讀回。
   renew    --state S --id R --ttl 4h
            還要用就續期，到期時間從現在起算；重開機後要繼續用的容器也用它重新掛上計時。
   stop     --state S (--id R | --wp ID | --all) [--include-acceptance] [--remove [--integrated-into REF]]
@@ -74,6 +79,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -113,6 +119,10 @@ BROWSER_NAMES = {"Google Chrome for Testing", "Chromium", "Google Chrome", "Goog
 PROFILE = re.compile(r"--user-data-dir=(\S+)")
 # 以資料夾存在與否判斷還在不在的資源：git 工作樹、非 git 的工作包資料夾、工作包自己的暫存資料夾。
 FOLDER_KINDS = ("worktree", "workdir", "tmp")
+# 不是 PASS 的容器停止後留給診斷的時數；之後先存 logs 與 inspect 再移除（Jay 2026-11-28 2A）。
+FAILED_KEEP_HOURS = 24
+# 每個環境保留的映像：最新的兩個（部署中與上一版，退回用），另加容器在用與登記時指定保留的版本（Jay 2026-11-28 2A）。
+IMAGE_KEEP_NEWEST = 2
 DELETIONS_HEAD = ("# 刪除清冊\n\n| 時間 | 項目與識別 | 產生者 | 為何屬中間產物 | 引用搜尋結果 | 刪後讀回 |\n"
                   "|---|---|---|---|---|---|\n")
 
@@ -317,10 +327,18 @@ def launchd_pids():
     return {int(f[0]) for f in (line.split() for line in out.splitlines()[1:]) if f and f[0].isdigit()}
 
 
-def _docker_ps(extra, fmt):
+def docker_argv(host, *args):
+    """本機直接跑 docker；指定主機時經 ssh 以 sudo -n docker 跑（2026-11-28：工區 E 在 Staging 起的容器沒有一個登記）。"""
+    if not host:
+        return ["docker", *args]
+    remote = " ".join(shlex.quote(a) for a in ("sudo", "-n", "docker", *args))
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, remote]
+
+
+def _docker_ps(extra, fmt, host=None):
     try:
-        result = subprocess.run(["docker", "ps", *extra, "--no-trunc", "--format", fmt],
-                                capture_output=True, text=True, timeout=30)
+        result = subprocess.run(docker_argv(host, "ps", *extra, "--no-trunc", "--format", fmt),
+                                capture_output=True, text=True, timeout=60 if host else 30)
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
@@ -346,9 +364,19 @@ def docker_containers():
     return _docker_ps([], DOCKER_FORMAT)
 
 
-def docker_all():
+def docker_all(host=None):
     """所有容器（含已停止），每筆另有 state 與 run-container 貼的 wp／close／ledger 標籤；docker 不可用時回 None。"""
-    return _docker_ps(["-a"], ALL_FORMAT)
+    return _docker_ps(["-a"], ALL_FORMAT, host)
+
+
+def host_containers(snap, host):
+    """遠端主機執行中的容器，同一輪核對只問一次；本機用 snap 裡已讀的清單。"""
+    if not host:
+        return snap.get("containers")
+    hosts = snap.setdefault("hosts", {})
+    if host not in hosts:
+        hosts[host] = _docker_ps([], DOCKER_FORMAT, host)
+    return hosts[host]
 
 
 def process_snapshot():
@@ -398,19 +426,21 @@ def members(res, snap):
 
 
 def containers_of(res, snap):
-    if snap.get("containers") is None:
+    current = host_containers(snap, res.get("host"))
+    if current is None:
         return None
     recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
-    return [c["id"] for c in snap["containers"] if c["id"] in recorded]
+    return [c["id"] for c in current if c["id"] in recorded]
 
 
 def container_candidates(res, snap):
     """用可讀名稱找現在的容器；只用於回報身分不符，不能當成停止目標。"""
-    if snap.get("containers") is None:
+    current = host_containers(snap, res.get("host"))
+    if current is None:
         return None
     if res["kind"] == "compose":
-        return [c for c in snap["containers"] if c["project"] == res["project"]]
-    return [c for c in snap["containers"] if c["name"] == res["container"]]
+        return [c for c in current if c["project"] == res["project"]]
+    return [c for c in current if c["name"] == res["container"]]
 
 
 def container_identity(c):
@@ -437,6 +467,8 @@ def inactive_note(res, snap):
 
 def alive(res, snap):
     """True／False；容器在 docker 不可用時回 None（無法確認）。"""
+    if res["kind"] == "images":
+        return True  # 映像登記不是常駐資源，由 prune-images 與 check 處理
     if res["kind"] in FOLDER_KINDS:
         return Path(res.get("path") or "").is_dir()
     if res["kind"] == "process":
@@ -449,7 +481,8 @@ def describe(res):
     target = {
         "process": f"pid {res.get('pgid') or res.get('pid')}" + (f"、port {res['port']}" if res.get("port") else ""),
         "compose": f"compose 專案 {res.get('project')}",
-        "container": f"容器 {res.get('container')}",
+        "container": f"容器 {res.get('container')}" + (f"（{res['host']}）" if res.get("host") else ""),
+        "images": f"映像 {res.get('repo')}" + (f"（{res['host']}）" if res.get("host") else "（本機）"),
         "worktree": f"工作樹 {res.get('path')}",
         "workdir": f"工作資料夾 {res.get('path')}",
         "tmp": f"任務暫存 {res.get('path')}",
@@ -743,6 +776,16 @@ def audit(state, claimed=False, snapshot=None):
                if task_dir.parent.name == "long-task" and task_dir.parent.parent.name in (".claude", ".codex") else None)
     shown, problems = [], []
     for res in running:
+        if res["kind"] == "images":
+            plan = image_plan(res, since)
+            if plan is None:
+                shown.append(f"  {describe(res)}：讀不到這台主機的 docker，未核對")
+            elif plan["remove"]:
+                problems.append(f"{describe(res)}：有 {len(plan['remove'])} 個舊映像可刪（保留 {len(plan['keep'])} 個）；"
+                                f"新候選部署並讀回後 prune-images --id {res['id']}")
+            else:
+                shown.append(f"  {describe(res)}：保留 {len(plan['keep'])} 個，沒有可刪的")
+            continue
         state_now = alive(res, snap)
         if state_now is False:
             shown.append(f"  {describe(res)}：{inactive_note(res, snap)}")
@@ -780,6 +823,16 @@ def audit(state, claimed=False, snapshot=None):
             note = "無法確認（docker 不可用）" if state_now is None else "執行中"
             reason = f"；理由：{res['reason']}" if res.get("reason") else ""
             shown.append(f"  {describe(res)}：{note}{reason}{overdue(res)}")
+    # 已停止、還沒移除的容器（Jay 2026-11-28 2A）：判定 PASS 的現在移除，其餘停止滿 24 小時後移除。
+    for res in data["resources"]:
+        if res["kind"] != "container" or not res.get("stopped_at") or res.get("removed_at") or res.get("close") == "external":
+            continue
+        passed = package_passed(task_dir, res.get("wp"))
+        if passed is True:
+            problems.append(f"{describe(res)}：工作包已 PASS、容器已停止還沒移除；stop --id {res['id']} --remove")
+        elif passed is False and stopped_hours(res) >= FAILED_KEEP_HOURS:
+            problems.append(f"{describe(res)}：工作包不是 PASS，已停止 {FAILED_KEEP_HOURS} 小時以上；stop --id {res['id']} "
+                            "--remove（先存 logs 與 inspect 再移除）")
     keys = registered(state, worktrees)
     loose, scanned_containers = unregistered(roots, since, until, task, snap, keys)
     problems += [f"未登記 {item}" for item in loose]
@@ -920,9 +973,14 @@ def cmd_register(args):
     record = {"wp": args.wp, "close": args.close, "reason": args.reason, "created_at": now().isoformat()}
     if args.ttl:
         record.update(ttl=args.ttl, expires_at=expiry(args.ttl))
-    if args.keep and not args.workdir:
-        die("--keep 只用在 --workdir")
-    if args.workdir:
+    if args.keep and not (args.workdir or args.image_repo):
+        die("--keep 只用在 --workdir 與 --image-repo")
+    if args.host and not (args.container or args.image_repo):
+        die("--host 只用在 --container 與 --image-repo")
+    if args.image_repo:
+        # 這個任務建的映像（2026-11-28 Jay 3A：工區 E 每次部署都建一個新映像，Mac 留 11 個、Staging 留 16 個沒人刪）。
+        record.update(kind="images", repo=args.image_repo, host=args.host, keep=list(args.keep or []))
+    elif args.workdir:
         folder = os.path.realpath(os.path.expanduser(args.workdir))
         if not os.path.isdir(folder):
             die(f"找不到資料夾：{folder}")
@@ -952,6 +1010,19 @@ def cmd_register(args):
             die(f"找不到執行中的 compose 專案 {args.compose_project}")
         record.update(kind="compose", project=args.compose_project,
                       container_identities=[container_identity(c) for c in found])
+    elif args.host:
+        # 遠端主機（例如 Staging）上用 ssh 起的容器：記下身分，之後 stop、移除與核對都經同一台主機。測試容器常常
+        # 跑完就結束，已停止的也能登記。
+        containers = docker_all(args.host)
+        if containers is None:
+            die(f"無法讀取 {args.host} 的 docker（ssh 與 sudo -n docker 都要可用）")
+        found = [c for c in containers if c["name"] == args.container]
+        if not found:
+            die(f"{args.host} 上找不到容器 {args.container}")
+        record.update(kind="container", container=args.container, host=args.host, managed=True,
+                      container_identities=[container_identity(c) for c in found])
+        if all(c.get("state") != "running" for c in found):
+            record["stopped_at"] = now().isoformat()
     else:
         containers = docker_containers()
         if containers is None:
@@ -1172,16 +1243,68 @@ def deletion_row(state_dir, item, producer, why, search):
     return readback
 
 
+def stopped_hours(res):
+    try:
+        return (now() - dt.datetime.fromisoformat(res["stopped_at"]).replace(tzinfo=None)).total_seconds() / 3600
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def image_plan(res, since):
+    """登記的映像庫在該主機上要保留與可刪的映像；讀不到 docker 時回 None。"""
+    host, repo = res.get("host"), res["repo"]
+    try:
+        listed = subprocess.run(docker_argv(host, "image", "ls", "--no-trunc", "--format",
+                                            "{{.ID}}\t{{.Tag}}\t{{.CreatedAt}}", repo),
+                                capture_output=True, text=True, timeout=60)
+        ids = subprocess.run(docker_argv(host, "ps", "-aq", "--no-trunc"), capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0 or ids.returncode != 0:
+        return None
+    used = set()
+    if ids.stdout.split():
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            used = set(subprocess.run(docker_argv(host, "inspect", "--format", "{{.Image}}", *ids.stdout.split()),
+                                      capture_output=True, text=True, timeout=120).stdout.split())
+    images = {}
+    for line in listed.stdout.splitlines():
+        f = line.split("\t")
+        if len(f) < 3:
+            continue
+        try:
+            created = dt.datetime.strptime(f[2][:25], "%Y-%m-%d %H:%M:%S %z").astimezone().replace(tzinfo=None)
+        except ValueError:
+            created = None
+        item = images.setdefault(f[0], {"id": f[0], "tags": [], "created": created})
+        item["tags"].append(f[1])
+    ordered = sorted(images.values(), key=lambda x: x["created"] or dt.datetime.min, reverse=True)
+    keep, remove = [], []
+    for rank, item in enumerate(ordered):
+        marks = item["tags"] + [item["id"], item["id"].removeprefix("sha256:")]
+        why = ("最新兩版之一（部署中或上一版）" if rank < IMAGE_KEEP_NEWEST else
+               "容器在用" if item["id"] in used else
+               "登記時指定保留" if any(m.startswith(k) or m == k for m in marks for k in res.get("keep") or []) else
+               "任務開始前就有，不是這個任務建的" if since and item["created"] and item["created"] < since else None)
+        (keep if why else remove).append({**item, "why": why})
+    return {"keep": keep, "remove": remove}
+
+
 def remove(res, path, args):
     """移除已停止的容器或工作樹；回傳 ("removed"｜"kept"｜"failed", 說明)。條件不符就保留，不算失敗。"""
     state_dir = Path(path).parent
     passed = package_passed(state_dir, res.get("wp"))
-    if not passed:
-        return "kept", ("查不到所屬工作包的判定" if passed is None else "所屬工作包不是 PASS") + "，只停不刪"
+    # 不是 PASS 的容器留給診斷 24 小時，之後先存 logs 與 inspect 再移除（Jay 2026-11-28 2A：工區 E 登記的 40 個容器
+    # 沒有一個移除過，FAIL 的留作診斷之後就沒人收）。
+    expired = res["kind"] == "container" and passed is False and stopped_hours(res) >= FAILED_KEEP_HOURS
+    if not passed and not expired:
+        return "kept", ("查不到所屬工作包的判定" if passed is None else
+                        f"所屬工作包不是 PASS，停止滿 {FAILED_KEEP_HOURS} 小時才移除") + "，只停不刪"
+    host = res.get("host")
     if res["kind"] == "container":
         if not res.get("managed"):
             return "kept", "不是 run-container 建立的，身分不齊，未移除"
-        everything = docker_all()
+        everything = docker_all(host)
         if everything is None:
             return "failed", "docker 不可用，無法移除"
         recorded = {item["id"] for item in res.get("container_identities", []) if item.get("id")}
@@ -1206,7 +1329,17 @@ def remove(res, path, args):
         if git(tree, "merge-base", "--is-ancestor", "HEAD", args.integrated_into)[0] != 0:
             return "kept", f"工作樹的 HEAD 不在 {args.integrated_into} 裡，尚未整合"
         needles, label = [tree], f"工作樹 {tree}（分支 {res.get('branch')} 保留）"
-    used, search = referenced(state_dir, needles, args.search or ())
+    if expired:
+        evidence = state_dir / "evidence" / f"container-{res['id']}-移除前.log"
+        evidence.parent.mkdir(parents=True, exist_ok=True)
+        with open(evidence, "w", encoding="utf-8") as handle:
+            for item in sorted(recorded):
+                for argv in (docker_argv(host, "inspect", item), docker_argv(host, "logs", "--tail", "500", item)):
+                    with contextlib.suppress(OSError, subprocess.SubprocessError):
+                        handle.write(subprocess.run(argv, capture_output=True, text=True, timeout=120).stdout + "\n")
+        used, search = False, f"logs 與 inspect 已存 {evidence.name}"
+    else:
+        used, search = referenced(state_dir, needles, args.search or ())
     if used is not False:
         return "kept", search + "，未移除"
     if res["kind"] == "worktree":
@@ -1217,13 +1350,13 @@ def remove(res, path, args):
                                        git(tree, "status", "--short")[1], "git diff:", git(tree, "diff")[1]]),
                             encoding="utf-8")
     readback = deletion_row(state_dir, label, f"工作包 {res.get('wp')}（帳本 {res['id']}）",
-                            "工作包已判定 PASS 的測試中間產物", search)
+                            f"工作包不是 PASS、停止滿 {FAILED_KEEP_HOURS} 小時的診斷容器" if expired else "工作包已判定 PASS 的測試中間產物", search)
     if res["kind"] == "container":
         try:
-            code = subprocess.run(["docker", "rm", "-v", *sorted(recorded)], capture_output=True, timeout=120).returncode
+            code = subprocess.run(docker_argv(host, "rm", "-v", *sorted(recorded)), capture_output=True, timeout=120).returncode
         except (OSError, subprocess.SubprocessError):
             code = 1
-        left = [c for c in (docker_all() or []) if c["id"] in recorded] if code == 0 else present
+        left = [c for c in (docker_all(host) or []) if c["id"] in recorded] if code == 0 else present
         gone = code == 0 and not left
     else:
         common = git(tree, "rev-parse", "--path-format=absolute", "--git-common-dir")[1].strip()
@@ -1273,12 +1406,12 @@ def terminate(res, snap):
     if not ids:
         return True, "原登記身分已不在執行" + mismatch
     try:
-        result = subprocess.run(["docker", "stop", *ids], capture_output=True, timeout=120)
+        result = subprocess.run(docker_argv(res.get("host"), "stop", *ids), capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return False, "docker 停止指令失敗"
     if result.returncode != 0:
         return False, f"docker stop 失敗（exit {result.returncode}）"
-    current = docker_containers()
+    current = _docker_ps([], DOCKER_FORMAT, res.get("host"))
     if current is None:
         return False, "docker 不可用，無法核對停止結果"
     left = containers_of(res, {"containers": current})
@@ -1494,6 +1627,8 @@ def cmd_stop(args):
         return args.remove and res["kind"] in ("container", "worktree") and not res.get("removed_at")
 
     for res in data["resources"]:
+        if res["kind"] == "images":
+            continue  # 映像用 prune-images 刪
         if res.get("close") == "external" or (res.get("stopped_at") and not removable(res)):
             continue
         if res["kind"] == "workdir" or (res["kind"] == "worktree" and not args.remove):
@@ -1525,6 +1660,35 @@ def cmd_stop(args):
         print(f"{'✓' if ok else '✗'} {describe(res)}：{note}")
         if not ok:
             failed += 1
+    return 4 if failed else 0
+
+
+def cmd_prune_images(args):
+    """刪掉登記映像庫的舊映像：每筆先記進 deletions.md，刪後讀回。"""
+    path = ledger_of(args)
+    res = next((r for r in load(path)["resources"] if r["id"] == args.id), None)
+    if not res or res["kind"] != "images":
+        die(f"帳本裡沒有映像登記 {args.id}；先 register --image-repo <映像庫> [--host 主機]")
+    state = Path(args.state).expanduser()
+    since = task_scope(state, state.read_text(encoding="utf-8").splitlines())[1] if state.is_file() else None
+    plan = image_plan({**res, "keep": (res.get("keep") or []) + (args.keep or [])}, since)
+    if plan is None:
+        die(f"讀不到{res.get('host') or '本機'}的 docker，未刪除")
+    for item in plan["keep"]:
+        print(f"・保留 {res['repo']}:{'、'.join(item['tags'])}：{item['why']}")
+    failed = 0
+    for item in plan["remove"]:
+        label = f"映像 {res['repo']}:{'、'.join(item['tags'])}（{item['id'][:19]}，{res.get('host') or '本機'}）"
+        readback = deletion_row(path.parent, label, f"帳本 {res['id']}", "舊候選映像，可從 commit 重建",
+                                "已保留最新兩版、容器在用與登記指定的版本")
+        code = 1
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            code = subprocess.run(docker_argv(res.get("host"), "rmi", item["id"]), capture_output=True, timeout=180).returncode
+        gone = code == 0 and subprocess.run(docker_argv(res.get("host"), "image", "inspect", item["id"]),
+                                            capture_output=True, timeout=60).returncode != 0
+        readback("讀回已不存在" if gone else "刪除失敗，仍存在")
+        print(f"{'✓' if gone else '✗'} {label}")
+        failed += not gone
     return 4 if failed else 0
 
 
@@ -1680,7 +1844,9 @@ def build_parser():
     group.add_argument("--container")
     group.add_argument("--worktree", help="工作包專用的 git worktree 路徑")
     group.add_argument("--workdir", help="非 git 的工作包資料夾；判定 PASS 後用 prune 清過程檔")
-    p.add_argument("--keep", action="append", help="--workdir 用：prune 不可刪的檔名樣式（相對於資料夾）；可重複")
+    group.add_argument("--image-repo", help="這個任務建的映像庫（例如 bpm-app）；新候選部署並讀回後用 prune-images 刪舊映像")
+    p.add_argument("--host", help="--container、--image-repo 用：遠端主機的 ssh 名稱（例如 ops-staging）")
+    p.add_argument("--keep", action="append", help="--workdir：prune 不可刪的檔名樣式；--image-repo：要保留的標籤或映像 ID；可重複")
     p.add_argument("--ttl", type=duration, default=0.0, help="只記到期時間、不自動關")
     p.set_defaults(func=cmd_register)
 
@@ -1692,6 +1858,12 @@ def build_parser():
     p.add_argument("--protect", action="store_true", help="到期不自動停，只由主線 stop（正式資料副本等）")
     p.add_argument("command", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run_container)
+
+    p = sub.add_parser("prune-images")
+    target(p, wp=False)
+    p.add_argument("--id", required=True)
+    p.add_argument("--keep", action="append", help="這次另外要保留的標籤或映像 ID；可重複")
+    p.set_defaults(func=cmd_prune_images)
 
     p = sub.add_parser("renew")
     target(p, wp=False)
