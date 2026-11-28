@@ -143,6 +143,14 @@ class SafeContainerEvidence(unittest.TestCase):
                 stopped = json.loads(path.read_text(encoding="utf-8"))["resources"][0]["stopped_at"]
                 self.assertEqual(stopped, rl.finished_at([inspected()]).isoformat(), "the ledger keeps the real stop time")
 
+    def test_the_ledger_keeps_env_names_but_not_their_values(self):
+        # v1.22.4: run-container and start wrote "-e POSTGRES_PASSWORD=..." into resources.json as given.
+        for rl in LEDGERS:
+            shown = rl.recorded_command(["--rm", "-e", SECRET, "--env", "TOKEN=abc", "--env=URL=postgres://u:p@h/db",
+                                         "-e", "POSTGRES_DB", "--label", "a=b", "postgres:16"])
+            self.assertEqual(shown, "--rm -e POSTGRES_PASSWORD=*** --env TOKEN=*** --env=URL=*** -e POSTGRES_DB "
+                                    "--label a=b postgres:16")
+
     def test_an_old_container_replaced_under_the_same_name_is_not_touched(self):
         for rl in LEDGERS:
             listed = {"id": "c" * 64, "name": "prev2", "created": dt.datetime(2026, 11, 24, 9, 0)}

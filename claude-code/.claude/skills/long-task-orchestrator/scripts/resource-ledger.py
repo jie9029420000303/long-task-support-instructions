@@ -327,6 +327,20 @@ def launchd_pids():
     return {int(f[0]) for f in (line.split() for line in out.splitlines()[1:]) if f and f[0].isdigit()}
 
 
+def recorded_command(command):
+    """寫進帳本的啟動指令：-e／--env 帶的值換成 ***，只留變數名。帳本常在雲端同步範圍內（工區 E 的帳本記了 19 筆
+    POSTGRES_PASSWORD 的值，工區 E 監督 2026-11-28 回報同類的 inspect 外洩）；實際啟動照原指令。"""
+    shown, after_flag = [], False
+    for word in command:
+        if word.startswith("--env=") and "=" in word[6:]:
+            word = word[:6] + word[6:].split("=", 1)[0] + "=***"
+        elif after_flag and "=" in word:
+            word = word.split("=", 1)[0] + "=***"
+        after_flag = word in ("-e", "--env")
+        shown.append(word)
+    return " ".join(shown)
+
+
 def docker_argv(host, *args):
     """本機直接跑 docker；指定主機時經 ssh 以 sudo -n docker 跑（2026-11-28：工區 E 在 Staging 起的容器沒有一個登記）。"""
     if not host:
@@ -887,7 +901,7 @@ def cmd_start(args):
             time.sleep(0.05)
         data["resources"].append({
             "id": rid, "wp": args.wp, "kind": "process", "pgid": proc.pid, "start": start,
-            "command": " ".join(command), "cwd": str(cwd), "port": args.port, "close": args.close,
+            "command": recorded_command(command), "cwd": str(cwd), "port": args.port, "close": args.close,
             "reason": args.reason, "ttl": ttl or None, "log": str(log), "created_at": now().isoformat(),
         })
     expiry = f"，{human(ttl)}後自動關" if ttl else ""
@@ -1076,7 +1090,7 @@ def cmd_run_container(args):
         data["resources"].append({
             "id": rid, "wp": args.wp, "kind": "container", "container": identity["name"],
             "container_identities": [identity], "managed": True, "protected": protected, "memory": args.memory,
-            "command": " ".join(command), "close": args.close, "reason": args.reason, "ttl": ttl,
+            "command": recorded_command(command), "close": args.close, "reason": args.reason, "ttl": ttl,
             "expires_at": expiry(ttl), "created_at": now().isoformat(), **({"volumes": volumes} if volumes else {}),
         })
     if protected:
